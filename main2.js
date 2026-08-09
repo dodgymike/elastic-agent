@@ -32,7 +32,7 @@ const tools = [
             required: ["path", "content", "read_hash"],
         },
         exec_handler: async function ({ path, content, overwrite, read_hash }) {
-            await Write({ path, content, overwrite, read_hash });
+            return await Write({ path, content, overwrite, read_hash });
         },
     },
     {
@@ -47,7 +47,7 @@ const tools = [
             required: ["path",],
         },
         exec_handler: async function ({ path, }) {
-            await Read({ path, });
+            return await Read({ path, });
         },
     },
     {
@@ -61,7 +61,7 @@ const tools = [
             required: ["url",],
         },
         exec_handler: async function ({ url, }) {
-            await Http({ url, });
+            return await Http({ url, });
         },
     },
     {
@@ -75,11 +75,22 @@ const tools = [
             required: ["directory",],
         },
         exec_handler: async function ({ directory, }) {
-            await ListDirectory({ directory, });
+            return await ListDirectory({ directory, });
         },
     },
 ];
 
+function getTool(name) {
+    return tools.find(tool => tool.name === name);
+}
+
+function runTool(name, args) {
+    const tool = getTool(name);
+    if (!tool) {
+        throw new Error(`Tool not found: ${name}`);
+    }
+    return tool.exec_handler(args);
+}
 
 function saveData(data, filename = "data.json") {
     // Implement the logic to save data
@@ -127,17 +138,35 @@ async function main() {
         previous_response_id: configData.lastResponseId,
     };
 
-    if (configData.lastToolCallId) {
-        const toolResult = {
-            type: "function_call_output",
-            call_id: configData.lastToolCallId,
-            output: JSON.stringify({
-                temperature: 22,
-                condition: "Sunny",
-            }),
-        };
+    if (configData.lastToolCallIds) {
+        // const toolResult = {
+        //     type: "function_call_output",
+        //     call_id: configData.lastToolCallId,
+        //     output: JSON.stringify({
+        //         temperature: 22,
+        //         condition: "Sunny",
+        //     }),
+        // };
 
-        request.input = [toolResult];
+        // const toolData = JSON.stringify(configData.toolCallResponse[configData.lastToolCallIds]);
+
+        // console.log(`toolData: ${toolData}`);
+
+        // const toolResult = {
+        //     type: "function_call_output",
+        //     call_id: configData.lastToolCallId,
+        //     output: toolData,
+        // };
+
+        // request.input = [toolResult];
+
+        request.input = configData.lastToolCallIds.map(callId => ({
+            type: "function_call_output",
+            call_id: callId,
+            output: JSON.stringify(configData.toolCallResponse[callId]),
+        }));
+
+        console.log(`request.input: ${JSON.stringify(request.input)}`);
     } else {
         request.input = `
         Find all the current tool code in the current directory.
@@ -153,7 +182,7 @@ async function main() {
     console.log("Done");
 
     configData.lastResponseId = responses.id;
-    configData.lastToolCallId = null;
+    configData.lastToolCallIds = [];
 
     var loopAgain = false;
 
@@ -200,14 +229,14 @@ async function main() {
 
                 console.log(`toolArguments: ${JSON.stringify(toolArguments)}`);
 
-                const toolResponse = tool.exec_handler(toolArguments);
+                const toolResponse = await tool.exec_handler(toolArguments);
 
                 configData.toolCallResponse[callId] = {
                     toolArguments: toolArguments,
                     toolResponse: toolResponse,
                 };
 
-                configData.lastToolCallId = callId;
+                configData.lastToolCallIds.push(callId);
 
                 saveData(configData);
             } else {
