@@ -93,15 +93,18 @@ function usageSummary(usage) {
     return { total, cached, totalMinusCache: total - cached };
 }
 
+function totalUsage(tokenUsage) {
+    return tokenUsage.reduce((sum, usage) => ({
+        total: sum.total + tokenCount(usage.total_tokens),
+        cached: sum.cached + tokenCount(usage.cached_tokens),
+        totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache),
+    }), { total: 0, cached: 0, totalMinusCache: 0 });
+}
+
 class OpenAIResponseWrapper {
     constructor(response) { this.response = response; }
     print() {
-        console.log("response:");
         console.log(summarizeResponse(this.response));
-        if (this.response.usage) {
-            const { total, cached, totalMinusCache } = usageSummary(this.response.usage);
-            console.log(`Usage: total_tokens=${total} cached_tokens=${cached} total_minus_cache=${totalMinusCache}`);
-        }
     }
 }
 
@@ -148,13 +151,6 @@ async function main() {
             input_tokens_details: response.usage?.input_tokens_details ?? {},
         });
 
-        const totals = configData.tokenUsage.reduce((sum, usage) => ({
-            total: sum.total + tokenCount(usage.total_tokens),
-            cached: sum.cached + tokenCount(usage.cached_tokens),
-            totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache),
-        }), { total: 0, cached: 0, totalMinusCache: 0 });
-        console.log(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
-
         configData.lastResponseId = response.id;
         configData.lastToolCallIds = [];
         for (const output of response.output ?? []) {
@@ -180,6 +176,8 @@ async function main() {
         }
         saveData(configData);
     }
+    const totals = totalUsage(configData.tokenUsage);
+    console.log(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     console.log("Done");
 }
 
