@@ -98,6 +98,29 @@ const tools = [
     },
 ];
 
+/**
+ * Keeps the raw API response available while ensuring token usage is printed
+ * once, in a compact and predictable format.
+ */
+class OpenAIResponseWrapper {
+    constructor(response) {
+        this.response = response;
+    }
+
+    print() {
+        // Do not include usage in console.dir: it is rendered below as one line.
+        const { usage, ...responseWithoutUsage } = this.response;
+        console.log("response:");
+        console.dir(responseWithoutUsage, { depth: null });
+
+        if (usage) {
+            console.log(
+                `Usage: input_tokens=${usage.input_tokens ?? 0} output_tokens=${usage.output_tokens ?? 0} total_tokens=${usage.total_tokens ?? 0}`,
+            );
+        }
+    }
+}
+
 function saveData(data, filename = "data.json") {
     try {
         require("fs").writeFileSync(filename, JSON.stringify(data, null, 2));
@@ -148,8 +171,7 @@ async function main() {
     }
 
     const responses = await client.responses.create(request);
-    console.log("response:");
-    console.dir(responses, { depth: null });
+    new OpenAIResponseWrapper(responses).print();
     console.log("Done");
 
     configData.lastResponseId = responses.id;
