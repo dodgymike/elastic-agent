@@ -144,7 +144,7 @@ const tools = [
             properties: {
                 path: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }, body: {},
                 accessToken: { type: "string" }, refreshToken: { type: "string" }, username: { type: "string" }, password: { type: "string" },
-                clientId: { type: "string" }, region: { type: "string" }, apiBase: { type: "string" }, userAgent: { type: "string" },
+                clientId: { type: "string" }, region: { type: "string" }, apiBase: { type: "string" }, projectSlug: { type: "string" }, userAgent: { type: "string" },
             }, required: ["path"],
         },
         exec_handler: (options) => SpecKeeper(options),

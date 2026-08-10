@@ -11,8 +11,10 @@ import { readFileSync } from "node:fs";
 export type SpecKeeperMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export interface SpecKeeperOptions {
-  /** Absolute Spec Keeper route, e.g. /tasks. Legacy /api/<route> aliases remain supported. */
+  /** Supported project resource route (for example /tasks) or an absolute /api/v1 route. */
   path: string;
+  /** Project slug for resource routes. Defaults to SPEC_KEEPER_PROJECT_SLUG or enrolled configuration. */
+  projectSlug?: string;
   /** HTTP method for the requested Spec Keeper endpoint. */
   method?: SpecKeeperMethod;
   /** JSON payload for POST, PUT, and PATCH calls. */
@@ -43,6 +45,8 @@ interface SpecKeeperSecretConfig {
   clientId?: string;
   region?: string;
   apiBase?: string;
+  projectSlug?: string;
+  project_slug?: string;
 }
 
 /**
@@ -74,41 +78,57 @@ export interface SpecKeeperResult {
 }
 
 /**
- * The hosted deployment exposes its project resources at the origin root.
- * Keep these aliases so callers built against the former /api/ assumption
- * continue to reach the discovered routes during the migration.
+ * Project resources are served beneath /api/v1/projects/{slug}.  Keep this
+ * list deliberately aligned with the documented service resources so obsolete
+ * root routes (for example /goals or /task-queue) fail before a request.
  */
-const LEGACY_API_ROUTE_PREFIXES = [
-  "/goals",
-  "/epics",
-  "/tasks",
-  "/task-queue",
-  "/dependencies",
-  "/decisions",
-  "/plans",
-  "/procedures",
-  "/handoffs",
-] as const;
+const PROJECT_RESOURCES = new Set([
+  "agents", "epics", "tasks", "reservations", "counters", "locks", "import",
+  "export", "events", "notes", "changes", "decisions", "chain-runs", "jira-config", "jira",
+]);
 
 const MAX_FAILURE_DIAGNOSTIC_LENGTH = 512;
 const SENSITIVE_DIAGNOSTIC_KEY = /(?:authorization|token|password|secret|credential|api[-_]?key|cookie|session|access[_-]?key|refresh[_-]?token)/i;
+const PROJECT_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-/** Validate an absolute route and map the former /api/<resource> aliases. */
-export function resolveSpecKeeperPath(path: string): string {
+/** Resolve an explicit slug, without ever inferring a project from a task route. */
+function getProjectSlug(options: SpecKeeperOptions): string | undefined {
+  const config = loadSecretConfig();
+  const configured = options.projectSlug
+    ?? process.env.SPEC_KEEPER_PROJECT_SLUG
+    ?? config.projectSlug
+    ?? config.project_slug;
+  if (configured === undefined) return undefined;
+  const slug = configured.trim();
+  if (!PROJECT_SLUG_PATTERN.test(slug)) {
+    throw new Error("Spec Keeper projectSlug must be a URL-safe project slug.");
+  }
+  return slug;
+}
+
+/**
+ * Map a supported project resource to the versioned, project-scoped API.
+ * Absolute /api/v1 paths are retained for project discovery and uncommon
+ * documented endpoints; all resource shorthand requires an explicit slug.
+ */
+export function resolveSpecKeeperPath(path: string, projectSlug?: string): string {
   if (typeof path !== "string" || !path.startsWith("/")) {
     throw new Error("path must be an absolute Spec Keeper route beginning with '/'.");
   }
   if (/[\r\n\0]/.test(path)) {
     throw new Error("Spec Keeper path must not contain control characters.");
   }
+  if (path.startsWith("/api/v1/")) return path;
 
-  for (const prefix of LEGACY_API_ROUTE_PREFIXES) {
-    const legacyPrefix = `/api${prefix}`;
-    if (path === legacyPrefix || path.startsWith(`${legacyPrefix}/`) || path.startsWith(`${legacyPrefix}?`)) {
-      return path.slice(4);
-    }
+  const [route, query = ""] = path.split("?", 2);
+  const resource = route.slice(1).split("/", 1)[0];
+  if (!PROJECT_RESOURCES.has(resource)) {
+    throw new Error(`Unsupported Spec Keeper project resource '${resource}'. Use a documented /api/v1 route.`);
   }
-  return path;
+  if (!projectSlug || !PROJECT_SLUG_PATTERN.test(projectSlug)) {
+    throw new Error("A URL-safe Spec Keeper projectSlug is required for project resource routes.");
+  }
+  return `/api/v1/projects/${projectSlug}${route}${query ? `?${query}` : ""}`;
 }
 
 /** Redact common secret-shaped values before reporting bounded API diagnostics. */
@@ -228,7 +248,7 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
     apiBase,
     userAgent = "elastic-agent-spec-keeper/1.1",
   } = options;
-  const requestPath = resolveSpecKeeperPath(path);
+  const requestPath = resolveSpecKeeperPath(path, getProjectSlug(options));
   if (!userAgent.trim()) {
     throw new Error("Spec Keeper requires a non-empty User-Agent header.");
   }

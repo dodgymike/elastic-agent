@@ -2,22 +2,27 @@
 
 Spec Keeper is the authoritative source for project goals, specifications, plans, decisions, task state, and learned procedures. This file is an operating guide only; it does not replace the current server state.
 
-## Service routes and client compatibility
+## Service routes and client configuration
 
-The hosted Spec Keeper project resources are served from the API origin root. Use
-root-relative paths such as `/goals`, `/epics`, `/tasks`, `/task-queue`,
-`/dependencies`, `/decisions`, `/plans`, `/procedures`, and `/handoffs`.
+The hosted Spec Keeper API uses the versioned, project-scoped contract:
+`/api/v1/projects/<project-slug>/<resource>`. The visible project discovered
+from `GET /api/v1/projects` is `elastic-agent`; configure this as `SPEC_KEEPER_PROJECT_SLUG` (or
+`projectSlug` in the approved local secret store). Pass `projectSlug` explicitly
+when an invocation must target another project.
 
-`tools/SpecKeeper.ts` preserves compatibility with callers using the former
-`/api/<resource>` form: for the resources above, it removes `/api` before making
-the request. New callers should use the root-relative canonical route. The
-client rejects malformed paths and reports non-2xx responses with a bounded,
-redacted diagnostic; do not copy credentials or raw server errors into task
-notes or handoffs.
+`tools/SpecKeeper.ts` maps supported resource shorthand such as `/tasks`,
+`/tasks/<id>/status`, and `/tasks/<id>/chain-runs` to that project-scoped
+contract. It does not map obsolete root resources such as `/goals` or
+`/task-queue`; use a documented absolute `/api/v1/...` path only for endpoints
+that are not project resources (for example, `GET /api/v1/projects` to discover
+visible projects).
 
 Configure the API origin with `SPEC_KEEPER_API_BASE` only when an alternate
-deployment is required. Credentials must come from the approved environment or
-local secret store, never repository files.
+deployment is required. Credentials and the project slug must come from the
+approved environment or local secret store, never repository files. The client
+rejects malformed paths and reports non-2xx responses with a bounded, redacted
+diagnostic; do not copy credentials or raw server errors into task notes or
+handoffs.
 
 ## Required workflow
 
