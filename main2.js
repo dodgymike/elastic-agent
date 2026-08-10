@@ -23,7 +23,32 @@ const commandLinePrompt = program.args[0];
 const modelList = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const dataFilename = "/tmp/data.json";
 const historyLimit = 10;
+const maxReplanAttempts = 3;
+const maxRevisedPlanSteps = 50;
 const planningSuffix = "PROVIDE A CLEAR, STEP-BY-STEP, CONCISE PLAN FOR LATER EXECUTION";
+const executionFeedbackFormat = `
+After you have finished this step and received outputs for every tool call, report the result and include exactly one machine-readable execution-feedback block. Do not emit this block while tool calls are still needed. Use this exact fenced JSON format:
+\`\`\`json
+{
+  "stepStatus": "completed | partial | blocked | failed",
+  "summary": "concise outcome of the current step",
+  "findings": ["important finding or blocker"],
+  "suggestedStepUpdate": null,
+  "suggestedPlanUpdates": [],
+  "replanRequired": false,
+  "replanReason": null
+}
+\`\`\`
+
+Field requirements:
+- stepStatus must be one of completed, partial, blocked, or failed.
+- summary must be a string.
+- findings must be an array of strings; use [] when there are none.
+- suggestedStepUpdate must be null when no local change is needed, otherwise a concise string describing the change to this step.
+- suggestedPlanUpdates must be an array; each item must be an object with "step" (the remaining step number) and "update" (a concise replacement or change). Use [] when there are none.
+- replanRequired must be a boolean. Set it to true only when the remaining plan should be replaced rather than updated incrementally.
+- replanReason must be null when replanRequired is false, otherwise a concise string explaining why replanning is needed.
+`;
 
 const status = {
     planning: (message) => console.log(`${chalk.cyan.bold("[PLAN]")} ${message}`),
@@ -31,6 +56,9 @@ const status = {
     tool: (message) => console.log(`${chalk.blue.bold("[TOOL]")} ${message}`),
     response: (message) => console.log(`${chalk.gray("[RESPONSE]")} ${message}`),
     success: (message) => console.log(`${chalk.green.bold("[SUCCESS]")} ${message}`),
+    feedback: (message) => console.log(`${chalk.magenta.bold("[FEEDBACK]")} ${message}`),
+    change: (message) => console.log(`${chalk.cyan.bold("[PLAN CHANGE]")} ${message}`),
+    replan: (message) => console.log(`${chalk.magenta.bold("[REPLAN]")} ${message}`),
     warning: (message) => console.warn(`${chalk.yellow.bold("[WARNING]")} ${message}`),
     error: (message) => console.error(`${chalk.red.bold("[ERROR]")} ${message}`),
 };
@@ -100,8 +128,7 @@ const tools = [
         parameters: {
             type: "object",
             properties: {
-                path: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-                body: {}, baseUrl: { type: "string" }, accessToken: { type: "string" }, userAgent: { type: "string" },
+                path: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }, body: {}, baseUrl: { type: "string" }, accessToken: { type: "string" }, userAgent: { type: "string" },
             }, required: ["path"],
         },
         exec_handler: (options) => AgentBus(options),
@@ -169,14 +196,179 @@ function responseText(response) {
     return (response.output ?? []).filter((output) => output.type === "message").flatMap((output) => output.content ?? [])
         .filter((item) => item.type === "output_text" || item.type === "text").map((item) => item.text).filter(Boolean).join("\n").trim();
 }
+function validateExecutionFeedback(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, reason: "Feedback must be a JSON object." };
+    const requiredFields = ["stepStatus", "summary", "findings", "suggestedStepUpdate", "suggestedPlanUpdates", "replanRequired", "replanReason"];
+    const missingFields = requiredFields.filter((field) => !(field in value));
+    if (missingFields.length > 0) return { valid: false, reason: `Missing required field${missingFields.length === 1 ? "" : "s"}: ${missingFields.join(", ")}.` };
+    if (!new Set(["completed", "partial", "blocked", "failed"]).has(value.stepStatus)) return { valid: false, reason: "stepStatus is invalid." };
+    if (typeof value.summary !== "string") return { valid: false, reason: "summary must be a string." };
+    if (!Array.isArray(value.findings) || value.findings.some((finding) => typeof finding !== "string")) return { valid: false, reason: "findings must be an array of strings." };
+    if (value.suggestedStepUpdate !== null && typeof value.suggestedStepUpdate !== "string") return { valid: false, reason: "suggestedStepUpdate must be null or a string." };
+    if (!Array.isArray(value.suggestedPlanUpdates) || value.suggestedPlanUpdates.some((update) => !update || typeof update !== "object" || Array.isArray(update) || !Number.isInteger(update.step) || update.step < 1 || typeof update.update !== "string")) return { valid: false, reason: "suggestedPlanUpdates must contain objects with a positive integer step and string update." };
+    if (typeof value.replanRequired !== "boolean") return { valid: false, reason: "replanRequired must be a boolean." };
+    if ((value.replanRequired && (typeof value.replanReason !== "string" || !value.replanReason.trim())) || (!value.replanRequired && value.replanReason !== null)) return { valid: false, reason: "replanReason must be a non-empty string only when replanning is required, and null otherwise." };
+    return { valid: true, feedback: value };
+}
+function parseExecutionFeedback(text) {
+    const blocks = [...text.matchAll(/```json\s*([\s\S]*?)\s*```/g)];
+    if (blocks.length !== 1) return { valid: false, reason: `Expected exactly one fenced JSON feedback block; found ${blocks.length}.` };
+    try {
+        return validateExecutionFeedback(JSON.parse(blocks[0][1]));
+    } catch (error) {
+        return { valid: false, reason: `Feedback JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+}
+function captureExecutionFeedback(configData, response, stepIndex) {
+    if (!Array.isArray(configData.executionFeedback)) configData.executionFeedback = [];
+    const rawResponse = responseText(response);
+    const parsed = parseExecutionFeedback(rawResponse);
+    const entry = { response_id: response.id, step: stepIndex + 1, valid: parsed.valid };
+    if (parsed.valid) entry.feedback = parsed.feedback;
+    else {
+        entry.validationError = parsed.reason;
+        entry.rawResponse = rawResponse;
+    }
+    configData.executionFeedback.push(entry);
+    return entry;
+}
 function planSteps(plan) {
     const steps = plan.split("\n").map((line) => line.trim())
         .filter((line) => /^\d+[.)]\s+/.test(line)).map((line) => line.replace(/^\d+[.)]\s+/, "").trim()).filter(Boolean);
     return steps.length > 0 ? steps : [plan.trim() || "Execute the requested work and report the result."];
 }
+function actionablePlanSteps(plan) {
+    if (typeof plan !== "string" || !plan.trim()) return { valid: false, reason: "The revised plan response was empty." };
+    const steps = plan.split("\n").map((line) => line.trim())
+        .filter((line) => /^\d+[.)]\s+/.test(line)).map((line) => line.replace(/^\d+[.)]\s+/, "").trim());
+    if (steps.length === 0) return { valid: false, reason: "The revised plan must contain at least one numbered step." };
+    if (steps.length > maxRevisedPlanSteps) return { valid: false, reason: `The revised plan has more than ${maxRevisedPlanSteps} steps.` };
+    if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
+    return { valid: true, steps };
+}
+async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, configData) {
+    const remainingStart = completedStepCount + 1;
+    const remainingSteps = activeSteps.slice(remainingStart);
+    const feedback = feedbackEntry?.feedback;
+    if (!feedbackEntry?.valid || !feedback?.replanRequired) return { attempted: false, applied: false };
+    if (remainingSteps.length === 0) {
+        status.warning("Replan request skipped because there are no remaining steps to replace.");
+        return { attempted: false, applied: false, reason: "No remaining plan steps." };
+    }
+    if (configData.replanAttemptCount >= maxReplanAttempts) {
+        status.warning(`Replan request skipped: the limit of ${maxReplanAttempts} attempts has been reached. Keeping the existing remaining plan.`);
+        return { attempted: false, applied: false, reason: "Replan attempt limit reached." };
+    }
+
+    configData.replanAttemptCount += 1;
+    const attempt = configData.replanAttemptCount;
+    status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`);
+    const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
+    const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
+    const request = `${claudeInstructions}\n\nThe execution plan needs focused replanning. Replace only the remaining work; do not repeat completed work and do not execute tools.\n\nCompleted work:\n${completedWork}\n\nCurrent step feedback:\n${JSON.stringify(feedback)}\n\nRecent tool-result summaries:\n${toolFindings}\n\nExisting remaining steps:\n${formatPlan(remainingSteps)}\n\nReturn a concise, actionable revised plan containing one or more numbered steps only.`;
+    try {
+        const response = await client.responses.create({ model: modelList[1], input: request });
+        new OpenAIResponseWrapper(response).print();
+        recordUsage(configData, response);
+        const validation = actionablePlanSteps(responseText(response));
+        const historyEntry = { attempt, response_id: response.id, reason: feedback.replanReason, applied: false };
+        if (!validation.valid) {
+            historyEntry.failure = validation.reason;
+            configData.replanHistory.push(historyEntry);
+            status.warning(`Rejected revised plan; keeping the existing remaining plan: ${validation.reason}`);
+            return { attempted: true, applied: false, reason: validation.reason };
+        }
+        activeSteps.splice(remainingStart, remainingSteps.length, ...validation.steps);
+        historyEntry.applied = true;
+        historyEntry.replacementStepCount = validation.steps.length;
+        configData.replanHistory.push(historyEntry);
+        status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${validation.steps.length}.`);
+        return { attempted: true, applied: true, steps: validation.steps };
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        configData.replanHistory.push({ attempt, reason: feedback.replanReason, applied: false, failure: reason });
+        status.warning(`Replan request failed; keeping the existing remaining plan: ${reason}`);
+        return { attempted: true, applied: false, reason };
+    }
+}
+function formatPlan(steps) {
+    return steps.map((step, index) => `${index + 1}. ${step}`).join("\n");
+}
+function appendSuggestedUpdate(step, update) {
+    return `${step}\nUpdate: ${update.trim()}`;
+}
+function reportExecutionFeedback(feedbackEntry) {
+    const stepLabel = `Step ${feedbackEntry?.step ?? "unknown"}`;
+    if (!feedbackEntry?.valid) {
+        status.warning(`${stepLabel} feedback was retained as an execution note but not applied: ${feedbackEntry?.validationError ?? "unknown validation error"}`);
+        return;
+    }
+
+    const feedback = feedbackEntry.feedback;
+    status.feedback(`${stepLabel} status: ${feedback.stepStatus}. ${truncate(feedback.summary)}`);
+    if (feedback.findings.length > 0) {
+        status.feedback(`${stepLabel} findings: ${feedback.findings.map((finding) => truncate(finding, 160)).join("; ")}`);
+    }
+    if (feedback.replanRequired) {
+        status.replan(`${stepLabel} recommends replanning: ${truncate(feedback.replanReason)}`);
+    } else {
+        status.replan(`${stepLabel} does not recommend replanning.`);
+    }
+}
+function reportAppliedPlanChanges(appliedChanges) {
+    if (appliedChanges.localUpdate) {
+        status.change(`Accepted local update for step ${appliedChanges.localUpdate.step}: ${truncate(appliedChanges.localUpdate.update)}`);
+    }
+    for (const update of appliedChanges.planUpdates) {
+        status.change(`Accepted update for remaining step ${update.step}: ${truncate(update.update)}`);
+    }
+    for (const rejected of appliedChanges.rejectedPlanUpdates) {
+        status.warning(`Skipped suggested update for step ${rejected.step}: ${rejected.reason}`);
+    }
+}
+function applyExecutionFeedback(feedbackEntry, activeSteps, completedStepCount) {
+    const result = { localUpdate: null, planUpdates: [], rejectedPlanUpdates: [] };
+    if (!feedbackEntry?.valid || !feedbackEntry.feedback) return result;
+
+    const feedback = feedbackEntry.feedback;
+    if (feedback.suggestedStepUpdate?.trim()) {
+        activeSteps[completedStepCount] = appendSuggestedUpdate(activeSteps[completedStepCount], feedback.suggestedStepUpdate);
+        result.localUpdate = { step: completedStepCount + 1, update: feedback.suggestedStepUpdate };
+    }
+
+    for (const suggestion of feedback.suggestedPlanUpdates) {
+        const targetIndex = suggestion.step - 1;
+        if (targetIndex < completedStepCount + 1 || targetIndex >= activeSteps.length) {
+            result.rejectedPlanUpdates.push({ ...suggestion, reason: "The target is not a remaining plan step." });
+            continue;
+        }
+        if (!suggestion.update.trim()) {
+            result.rejectedPlanUpdates.push({ ...suggestion, reason: "The update is empty." });
+            continue;
+        }
+        activeSteps[targetIndex] = appendSuggestedUpdate(activeSteps[targetIndex], suggestion.update);
+        result.planUpdates.push({ step: suggestion.step, update: suggestion.update });
+    }
+    return result;
+}
 function recordUsage(configData, response) {
     const { total, cached, totalMinusCache } = usageSummary(response.usage);
     configData.tokenUsage.push({ response_id: response.id, total_tokens: total, cached_tokens: cached, total_minus_cache: totalMinusCache, input_tokens_details: response.usage?.input_tokens_details ?? {} });
+}
+function serializeToolResult(resultOrError) {
+    try {
+        const serialized = JSON.stringify(resultOrError);
+        return serialized === undefined ? "null" : serialized;
+    } catch (error) {
+        return JSON.stringify({ error: `Tool result could not be serialized: ${error instanceof Error ? error.message : String(error)}` });
+    }
+}
+function functionCallOutput(toolCall, resultOrError) {
+    return {
+        type: "function_call_output",
+        call_id: toolCall.call_id,
+        output: serializeToolResult(resultOrError),
+    };
 }
 
 async function executePlanStep(step, index, steps, plan, configData) {
@@ -189,7 +381,7 @@ async function executePlanStep(step, index, steps, plan, configData) {
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
         } else {
-            request.input = `${claudeInstructions}\n\nExecution plan:\n${plan}\n\nYou are executing step ${index + 1} of ${steps.length}: ${step}\nCarry out only this step. Use tools when needed, report the result, and do not begin another plan step.`;
+            request.input = `${claudeInstructions}\n\nExecution plan:\n${plan}\n\nYou are executing step ${index + 1} of ${steps.length}: ${step}\nCarry out only this step. Use tools when needed, report the result, and do not begin another plan step.\n${executionFeedbackFormat}`;
         }
         const response = await client.responses.create(request);
         new OpenAIResponseWrapper(response).print();
@@ -206,20 +398,23 @@ async function executePlanStep(step, index, steps, plan, configData) {
                 toolArguments = JSON.parse(output.arguments);
                 if (!tool?.exec_handler) throw new Error(`No exec_handler found for tool: ${output.name}`);
                 const toolResponse = await tool.exec_handler(toolArguments);
-                toolOutputs.push({ type: "function_call_output", call_id: callId, output: JSON.stringify(toolResponse) });
+                toolOutputs.push(functionCallOutput(output, toolResponse));
                 appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments, toolResponse));
                 status.success(`Tool completed: ${output.name}`);
             } catch (error) {
                 const toolResponse = { error: error instanceof Error ? error.message : String(error) };
-                toolOutputs.push({ type: "function_call_output", call_id: callId, output: JSON.stringify(toolResponse) });
+                toolOutputs.push(functionCallOutput(output, toolResponse));
                 appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments ?? {}, toolResponse));
                 status.error(`Tool failed: ${output.name}: ${toolResponse.error}`);
             }
         }
         saveData(configData);
         if (toolOutputs.length === 0) {
+            const feedbackEntry = captureExecutionFeedback(configData, response, index);
+            reportExecutionFeedback(feedbackEntry);
+            saveData(configData);
             status.success(`Step ${index + 1}/${steps.length} completed.`);
-            return;
+            return feedbackEntry;
         }
     }
 }
@@ -232,6 +427,8 @@ async function main() {
     if (!Array.isArray(configData.tokenUsage)) configData.tokenUsage = [];
     if (!Array.isArray(configData.commandLinePrompts)) configData.commandLinePrompts = [];
     if (!Array.isArray(configData.toolCallTldrs)) configData.toolCallTldrs = [];
+    if (!Array.isArray(configData.replanHistory)) configData.replanHistory = [];
+    if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
     appendHistory(configData.commandLinePrompts, commandLinePrompt);
     const prompt = buildPrompt(configData.commandLinePrompts, configData.toolCallTldrs);
 
@@ -240,13 +437,28 @@ async function main() {
     new OpenAIResponseWrapper(planningResponse).print();
     recordUsage(configData, planningResponse);
     const plan = responseText(planningResponse);
-    const steps = planSteps(plan);
+    const activeSteps = planSteps(plan);
+    // These records describe this newly created plan; completed work remains intact while it is replanned.
+    configData.completedSteps = [];
+    configData.replanAttemptCount = 0;
+    configData.replanHistory = [];
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
+    configData.activePlanSteps = [...activeSteps];
     saveData(configData);
 
-    status.success(`Plan created with ${steps.length} step${steps.length === 1 ? "" : "s"}.`);
-    for (const [index, step] of steps.entries()) await executePlanStep(step, index, steps, plan, configData);
+    status.success(`Plan created with ${activeSteps.length} step${activeSteps.length === 1 ? "" : "s"}.`);
+    for (let index = 0; index < activeSteps.length; index += 1) {
+        const executedStep = activeSteps[index];
+        const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData);
+        configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null });
+        const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
+        reportAppliedPlanChanges(appliedChanges);
+        await attemptReplan(feedbackEntry, activeSteps, index, configData);
+        configData.activePlanSteps = [...activeSteps];
+        configData.lastAppliedPlanChanges = appliedChanges;
+        saveData(configData);
+    }
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     status.success("Plan complete. Stopping.");
