@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 export type SpecKeeperMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export interface SpecKeeperOptions {
-  /** Absolute API path, e.g. /api/v1/projects/elastic-agent/tasks. */
+  /** Absolute Spec Keeper route, e.g. /tasks. Legacy /api/<route> aliases remain supported. */
   path: string;
   /** HTTP method for the requested Spec Keeper endpoint. */
   method?: SpecKeeperMethod;
@@ -71,6 +71,41 @@ export interface SpecKeeperResult {
   headers: Record<string, string>;
   /** Parsed JSON when possible; otherwise response text. */
   body: unknown;
+}
+
+/**
+ * The hosted deployment exposes its project resources at the origin root.
+ * Keep these aliases so callers built against the former /api/ assumption
+ * continue to reach the discovered routes during the migration.
+ */
+const LEGACY_API_ROUTE_PREFIXES = [
+  "/goals",
+  "/epics",
+  "/tasks",
+  "/task-queue",
+  "/dependencies",
+  "/decisions",
+  "/plans",
+  "/procedures",
+  "/handoffs",
+] as const;
+
+/** Validate an absolute route and map the former /api/<resource> aliases. */
+export function resolveSpecKeeperPath(path: string): string {
+  if (typeof path !== "string" || !path.startsWith("/")) {
+    throw new Error("path must be an absolute Spec Keeper route beginning with '/'.");
+  }
+  if (/[\r\n\0]/.test(path)) {
+    throw new Error("Spec Keeper path must not contain control characters.");
+  }
+
+  for (const prefix of LEGACY_API_ROUTE_PREFIXES) {
+    const legacyPrefix = `/api${prefix}`;
+    if (path === legacyPrefix || path.startsWith(`${legacyPrefix}/`) || path.startsWith(`${legacyPrefix}?`)) {
+      return path.slice(4);
+    }
+  }
+  return path;
 }
 
 interface CognitoAuthenticationResult {
@@ -154,9 +189,7 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
     apiBase,
     userAgent = "elastic-agent-spec-keeper/1.1",
   } = options;
-  if (!path.startsWith("/api/")) {
-    throw new Error("path must be an absolute Spec Keeper API path beginning with /api/.");
-  }
+  const requestPath = resolveSpecKeeperPath(path);
   if (!userAgent.trim()) {
     throw new Error("Spec Keeper requires a non-empty User-Agent header.");
   }
@@ -170,7 +203,7 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
-  const response = await fetch(`${configuredApiBase.replace(/\/+$/, "")}${path}`, {
+  const response = await fetch(`${configuredApiBase.replace(/\/+$/, "")}${requestPath}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -187,7 +220,7 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
   if (!response.ok) {
     // Do not put an arbitrary API/proxy response in an exception. Besides being
     // noisy for callers, an upstream error can echo request-related details.
-    throw new Error(`Spec Keeper request ${method} ${path} failed (${response.status} ${response.statusText}).`);
+    throw new Error(`Spec Keeper request ${method} ${requestPath} failed (${response.status} ${response.statusText}).`);
   }
   return {
     status: response.status,
