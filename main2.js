@@ -131,7 +131,6 @@ async function main() {
         const request = { model: modelList[1], tools, previous_response_id: configData.lastResponseId };
         if (configData.lastToolCallIds?.length > 0) {
             request.input = configData.lastToolCallIds.map((callId) => ({ type: "function_call_output", call_id: callId, output: JSON.stringify(configData.toolCallResponse[callId]) }));
-            console.log(`request.input: ${JSON.stringify(request.input)}`);
         } else {
             request.input = prompt;
         }
