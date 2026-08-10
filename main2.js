@@ -115,6 +115,10 @@ function readData(filename = dataFilename) {
     catch (error) { console.error("Failed to read data:", error); return null; }
 }
 
+function isFinalAnswer(output) {
+    return output.type === "message" && output.status === "completed" && output.phase === "final_answer";
+}
+
 async function main() {
     let configData = readData();
     if (!configData) configData = { responseIds: [] };
@@ -122,57 +126,61 @@ async function main() {
     if (!configData.toolCallResponse || typeof configData.toolCallResponse !== "object") configData.toolCallResponse = {};
     if (!Array.isArray(configData.tokenUsage)) configData.tokenUsage = [];
 
-    const request = { model: modelList[1], tools, previous_response_id: configData.lastResponseId };
-    if (configData.lastToolCallIds?.length > 0) {
-        request.input = configData.lastToolCallIds.map((callId) => ({ type: "function_call_output", call_id: callId, output: JSON.stringify(configData.toolCallResponse[callId]) }));
-        console.log(`request.input: ${JSON.stringify(request.input)}`);
-    } else {
-        request.input = prompt;
-    }
-
-    const response = await client.responses.create(request);
-    new OpenAIResponseWrapper(response).print();
-
-    // Persist the complete cache breakdown for every Responses API result.
-    const { total, cached, totalMinusCache } = usageSummary(response.usage);
-    configData.tokenUsage.push({
-        response_id: response.id,
-        total_tokens: total,
-        cached_tokens: cached,
-        total_minus_cache: totalMinusCache,
-        input_tokens_details: response.usage?.input_tokens_details ?? {},
-    });
-
-    const totals = configData.tokenUsage.reduce((sum, usage) => ({
-        total: sum.total + tokenCount(usage.total_tokens),
-        cached: sum.cached + tokenCount(usage.cached_tokens),
-        totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache),
-    }), { total: 0, cached: 0, totalMinusCache: 0 });
-    console.log(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
-
-    configData.lastResponseId = response.id;
-    configData.lastToolCallIds = [];
-    for (const output of response.output ?? []) {
-        if (output.type === "message") {
-            if (output.status === "completed" && output.phase === "final_answer") configData.lastResponseId = null;
-            continue;
+    let finalAnswerFound = false;
+    while (!finalAnswerFound) {
+        const request = { model: modelList[1], tools, previous_response_id: configData.lastResponseId };
+        if (configData.lastToolCallIds?.length > 0) {
+            request.input = configData.lastToolCallIds.map((callId) => ({ type: "function_call_output", call_id: callId, output: JSON.stringify(configData.toolCallResponse[callId]) }));
+            console.log(`request.input: ${JSON.stringify(request.input)}`);
+        } else {
+            request.input = prompt;
         }
-        if (output.type !== "function_call") continue;
-        console.log(`Executing tool: ${output.name}`);
-        const tool = tools.find((candidate) => candidate.name === output.name);
-        if (!tool?.exec_handler) { console.error(`No exec_handler found for tool: ${output.name}`); continue; }
 
-        const callId = output.call_id;
-        const toolArguments = JSON.parse(output.arguments);
-        try {
-            configData.toolCallResponse[callId] = { toolArguments, toolResponse: await tool.exec_handler(toolArguments) };
-        } catch (error) {
-            configData.toolCallResponse[callId] = { toolArguments, toolResponse: { error: error instanceof Error ? error.message : String(error) } };
+        const response = await client.responses.create(request);
+        new OpenAIResponseWrapper(response).print();
+
+        // Persist the complete cache breakdown for every Responses API result.
+        const { total, cached, totalMinusCache } = usageSummary(response.usage);
+        configData.tokenUsage.push({
+            response_id: response.id,
+            total_tokens: total,
+            cached_tokens: cached,
+            total_minus_cache: totalMinusCache,
+            input_tokens_details: response.usage?.input_tokens_details ?? {},
+        });
+
+        const totals = configData.tokenUsage.reduce((sum, usage) => ({
+            total: sum.total + tokenCount(usage.total_tokens),
+            cached: sum.cached + tokenCount(usage.cached_tokens),
+            totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache),
+        }), { total: 0, cached: 0, totalMinusCache: 0 });
+        console.log(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+
+        configData.lastResponseId = response.id;
+        configData.lastToolCallIds = [];
+        for (const output of response.output ?? []) {
+            if (isFinalAnswer(output)) {
+                finalAnswerFound = true;
+                configData.lastResponseId = null;
+                continue;
+            }
+            if (output.type !== "function_call") continue;
+            console.log(`Executing tool: ${output.name}`);
+            const tool = tools.find((candidate) => candidate.name === output.name);
+            if (!tool?.exec_handler) { console.error(`No exec_handler found for tool: ${output.name}`); continue; }
+
+            const callId = output.call_id;
+            const toolArguments = JSON.parse(output.arguments);
+            try {
+                configData.toolCallResponse[callId] = { toolArguments, toolResponse: await tool.exec_handler(toolArguments) };
+            } catch (error) {
+                configData.toolCallResponse[callId] = { toolArguments, toolResponse: { error: error instanceof Error ? error.message : String(error) } };
+            }
+            configData.lastToolCallIds.push(callId);
+            saveData(configData);
         }
-        configData.lastToolCallIds.push(callId);
         saveData(configData);
     }
-    saveData(configData);
     console.log("Done");
 }
 
