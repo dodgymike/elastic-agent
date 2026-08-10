@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import chalk from "chalk";
 import { readFileSync } from "node:fs";
 import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
@@ -22,6 +23,17 @@ const commandLinePrompt = program.args[0];
 const modelList = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const dataFilename = "/tmp/data.json";
 const historyLimit = 10;
+const planningSuffix = "PROVIDE A CLEAR, STEP-BY-STEP, CONCISE PLAN FOR LATER EXECUTION";
+
+const status = {
+    planning: (message) => console.log(`${chalk.cyan.bold("[PLAN]")} ${message}`),
+    step: (message) => console.log(`${chalk.yellow.bold("[STEP]")} ${message}`),
+    tool: (message) => console.log(`${chalk.blue.bold("[TOOL]")} ${message}`),
+    response: (message) => console.log(`${chalk.gray("[RESPONSE]")} ${message}`),
+    success: (message) => console.log(`${chalk.green.bold("[SUCCESS]")} ${message}`),
+    warning: (message) => console.warn(`${chalk.yellow.bold("[WARNING]")} ${message}`),
+    error: (message) => console.error(`${chalk.red.bold("[ERROR]")} ${message}`),
+};
 
 const tools = [
     {
@@ -148,10 +160,69 @@ function usageSummary(usage) { const total = tokenCount(usage?.total_tokens); co
 function totalUsage(tokenUsage) {
     return tokenUsage.reduce((sum, usage) => ({ total: sum.total + tokenCount(usage.total_tokens), cached: sum.cached + tokenCount(usage.cached_tokens), totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache) }), { total: 0, cached: 0, totalMinusCache: 0 });
 }
-class OpenAIResponseWrapper { constructor(response) { this.response = response; } print() { console.log(summarizeResponse(this.response)); } }
-function saveData(data, filename = dataFilename) { try { require("fs").writeFileSync(filename, JSON.stringify(data, null, 2)); } catch (error) { console.error("Failed to save data:", error); } }
-function readData(filename = dataFilename) { try { return JSON.parse(require("fs").readFileSync(filename, "utf-8")); } catch (error) { console.error("Failed to read data:", error); return null; } }
+class OpenAIResponseWrapper { constructor(response) { this.response = response; } print() { status.response(summarizeResponse(this.response)); } }
+function saveData(data, filename = dataFilename) { try { require("fs").writeFileSync(filename, JSON.stringify(data, null, 2)); } catch (error) { status.error(`Failed to save data: ${error instanceof Error ? error.message : String(error)}`); } }
+function readData(filename = dataFilename) { try { return JSON.parse(require("fs").readFileSync(filename, "utf-8")); } catch (error) { status.warning(`Failed to read saved data; starting with a new configuration: ${error instanceof Error ? error.message : String(error)}`); return null; } }
 function isFinalAnswer(output) { return output.type === "message" && output.status === "completed" && output.phase === "final_answer"; }
+
+function responseText(response) {
+    return (response.output ?? []).filter((output) => output.type === "message").flatMap((output) => output.content ?? [])
+        .filter((item) => item.type === "output_text" || item.type === "text").map((item) => item.text).filter(Boolean).join("\n").trim();
+}
+function planSteps(plan) {
+    const steps = plan.split("\n").map((line) => line.trim())
+        .filter((line) => /^\d+[.)]\s+/.test(line)).map((line) => line.replace(/^\d+[.)]\s+/, "").trim()).filter(Boolean);
+    return steps.length > 0 ? steps : [plan.trim() || "Execute the requested work and report the result."];
+}
+function recordUsage(configData, response) {
+    const { total, cached, totalMinusCache } = usageSummary(response.usage);
+    configData.tokenUsage.push({ response_id: response.id, total_tokens: total, cached_tokens: cached, total_minus_cache: totalMinusCache, input_tokens_details: response.usage?.input_tokens_details ?? {} });
+}
+
+async function executePlanStep(step, index, steps, plan, configData) {
+    status.step(`Current step ${index + 1}/${steps.length}: ${step}`);
+    let previousResponseId;
+    let toolOutputs = [];
+    while (true) {
+        const request = { model: modelList[1], tools };
+        if (previousResponseId) {
+            request.previous_response_id = previousResponseId;
+            request.input = toolOutputs;
+        } else {
+            request.input = `${claudeInstructions}\n\nExecution plan:\n${plan}\n\nYou are executing step ${index + 1} of ${steps.length}: ${step}\nCarry out only this step. Use tools when needed, report the result, and do not begin another plan step.`;
+        }
+        const response = await client.responses.create(request);
+        new OpenAIResponseWrapper(response).print();
+        recordUsage(configData, response);
+        previousResponseId = response.id;
+        toolOutputs = [];
+        for (const output of response.output ?? []) {
+            if (output.type !== "function_call") continue;
+            status.tool(`Executing: ${output.name}`);
+            const tool = tools.find((candidate) => candidate.name === output.name);
+            const callId = output.call_id;
+            let toolArguments;
+            try {
+                toolArguments = JSON.parse(output.arguments);
+                if (!tool?.exec_handler) throw new Error(`No exec_handler found for tool: ${output.name}`);
+                const toolResponse = await tool.exec_handler(toolArguments);
+                toolOutputs.push({ type: "function_call_output", call_id: callId, output: JSON.stringify(toolResponse) });
+                appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments, toolResponse));
+                status.success(`Tool completed: ${output.name}`);
+            } catch (error) {
+                const toolResponse = { error: error instanceof Error ? error.message : String(error) };
+                toolOutputs.push({ type: "function_call_output", call_id: callId, output: JSON.stringify(toolResponse) });
+                appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments ?? {}, toolResponse));
+                status.error(`Tool failed: ${output.name}: ${toolResponse.error}`);
+            }
+        }
+        saveData(configData);
+        if (toolOutputs.length === 0) {
+            status.success(`Step ${index + 1}/${steps.length} completed.`);
+            return;
+        }
+    }
+}
 
 async function main() {
     let configData = readData();
@@ -163,36 +234,21 @@ async function main() {
     if (!Array.isArray(configData.toolCallTldrs)) configData.toolCallTldrs = [];
     appendHistory(configData.commandLinePrompts, commandLinePrompt);
     const prompt = buildPrompt(configData.commandLinePrompts, configData.toolCallTldrs);
+
+    status.planning("Creating an execution plan...");
+    const planningResponse = await client.responses.create({ model: modelList[1], input: `${prompt}\n\n${planningSuffix}` });
+    new OpenAIResponseWrapper(planningResponse).print();
+    recordUsage(configData, planningResponse);
+    const plan = responseText(planningResponse);
+    const steps = planSteps(plan);
+    configData.lastResponseId = null;
+    configData.lastToolCallIds = [];
     saveData(configData);
-    let finalAnswerFound = false;
-    while (!finalAnswerFound) {
-        const request = { model: modelList[1], tools, previous_response_id: configData.lastResponseId };
-        if (configData.lastToolCallIds?.length > 0) request.input = configData.lastToolCallIds.map((callId) => ({ type: "function_call_output", call_id: callId, output: JSON.stringify(configData.toolCallResponse[callId]) }));
-        else request.input = prompt;
-        const response = await client.responses.create(request);
-        new OpenAIResponseWrapper(response).print();
-        const { total, cached, totalMinusCache } = usageSummary(response.usage);
-        configData.tokenUsage.push({ response_id: response.id, total_tokens: total, cached_tokens: cached, total_minus_cache: totalMinusCache, input_tokens_details: response.usage?.input_tokens_details ?? {} });
-        configData.lastResponseId = response.id;
-        configData.lastToolCallIds = [];
-        for (const output of response.output ?? []) {
-            if (isFinalAnswer(output)) { finalAnswerFound = true; configData.lastResponseId = null; continue; }
-            if (output.type !== "function_call") continue;
-            console.log(`Executing tool: ${output.name}`);
-            const tool = tools.find((candidate) => candidate.name === output.name);
-            if (!tool?.exec_handler) { console.error(`No exec_handler found for tool: ${output.name}`); continue; }
-            const callId = output.call_id;
-            const toolArguments = JSON.parse(output.arguments);
-            try { configData.toolCallResponse[callId] = { toolArguments, toolResponse: await tool.exec_handler(toolArguments) }; }
-            catch (error) { configData.toolCallResponse[callId] = { toolArguments, toolResponse: { error: error instanceof Error ? error.message : String(error) } }; }
-            appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments, configData.toolCallResponse[callId].toolResponse));
-            configData.lastToolCallIds.push(callId);
-            saveData(configData);
-        }
-        saveData(configData);
-    }
+
+    status.success(`Plan created with ${steps.length} step${steps.length === 1 ? "" : "s"}.`);
+    for (const [index, step] of steps.entries()) await executePlanStep(step, index, steps, plan, configData);
     const totals = totalUsage(configData.tokenUsage);
-    console.log(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
-    console.log("Done");
+    status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+    status.success("Plan complete. Stopping.");
 }
-main().catch(console.error);
+main().catch((error) => status.error(error instanceof Error ? error.stack ?? error.message : String(error)));

@@ -3,6 +3,7 @@
     "init-db": "node initializeDatabase.js"
   },
   "dependencies": {
+    "chalk": "^4.1.2",
     "commander": "^13.1.0",
     "openai": "^6.49.0",
     "sqlite": "^5.1.1",
