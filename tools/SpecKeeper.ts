@@ -157,6 +157,9 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
   if (!path.startsWith("/api/")) {
     throw new Error("path must be an absolute Spec Keeper API path beginning with /api/.");
   }
+  if (!userAgent.trim()) {
+    throw new Error("Spec Keeper requires a non-empty User-Agent header.");
+  }
 
   const accessToken = await getAccessToken(options);
   const configuredApiBase = apiBase ?? process.env.SPEC_KEEPER_API_BASE ?? loadSecretConfig().apiBase ?? "https://api.spec.elasticninja.com";
@@ -182,7 +185,9 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
     }
   }
   if (!response.ok) {
-    throw new Error(`Spec Keeper request ${method} ${path} failed (${response.status} ${response.statusText}): ${text}`);
+    // Do not put an arbitrary API/proxy response in an exception. Besides being
+    // noisy for callers, an upstream error can echo request-related details.
+    throw new Error(`Spec Keeper request ${method} ${path} failed (${response.status} ${response.statusText}).`);
   }
   return {
     status: response.status,
