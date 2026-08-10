@@ -1,5 +1,4 @@
 import OpenAI from "openai";
-
 import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
 import ListDirectory from "./tools/ListDirectory.ts";
@@ -11,90 +10,50 @@ const program = new Command();
 program.argument("<prompt>");
 program.parse();
 
-const prompt = program.args[0];
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const prompt = program.args[0];
 const modelList = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 
 const tools = [
     {
-        type: "function",
-        name: "Write",
+        type: "function", name: "Write",
         parameters: {
             type: "object",
-            properties: {
-                path: { type: "string" },
-                content: { type: "string" },
-                overwrite: { type: "boolean" },
-                read_hash: { type: "string" },
-            },
+            properties: { path: { type: "string" }, content: { type: "string" }, overwrite: { type: "boolean" }, read_hash: { type: "string" } },
             required: ["path", "content", "read_hash"],
         },
-        exec_handler: async ({ path, content, overwrite, read_hash }) =>
-            Write({ path, content, overwrite, read_hash }),
+        exec_handler: ({ path, content, overwrite, read_hash }) => Write({ path, content, overwrite, read_hash }),
     },
     {
-        type: "function",
-        name: "Read",
-        parameters: {
-            type: "object",
-            properties: { path: { type: "string" } },
-            required: ["path"],
-        },
-        exec_handler: async ({ path }) => Read({ path }),
+        type: "function", name: "Read",
+        parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        exec_handler: ({ path }) => Read({ path }),
     },
     {
-        type: "function",
-        name: "Http",
-        parameters: {
-            type: "object",
-            properties: { url: { type: "string" } },
-            required: ["url"],
-        },
-        exec_handler: async ({ url }) => Http({ url }),
+        type: "function", name: "Http",
+        parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+        exec_handler: ({ url }) => Http({ url }),
     },
     {
-        type: "function",
-        name: "ListDirectory",
-        parameters: {
-            type: "object",
-            properties: { directory: { type: "string" } },
-            required: ["directory"],
-        },
-        exec_handler: async ({ directory }) => ListDirectory({ directory }),
+        type: "function", name: "ListDirectory",
+        parameters: { type: "object", properties: { directory: { type: "string" } }, required: ["directory"] },
+        exec_handler: ({ directory }) => ListDirectory({ directory }),
     },
     {
-        type: "function",
-        name: "Git",
+        type: "function", name: "Git",
         description: "List repository changes, stage selected changes, or commit staged changes.",
         parameters: {
             type: "object",
             properties: {
-                action: {
-                    type: "string",
-                    enum: ["list", "stage", "commit"],
-                    description: "The Git operation to perform.",
-                },
-                cwd: {
-                    type: "string",
-                    description: "Optional repository directory. Defaults to the current working directory.",
-                },
-                paths: {
-                    type: "array",
-                    items: { type: "string" },
-                    description: "Paths to stage. Required for stage unless all is true.",
-                },
-                all: {
-                    type: "boolean",
-                    description: "For stage only: explicitly stage all changes. Do not combine with paths.",
-                },
-                message: {
-                    type: "string",
-                    description: "Non-empty commit message. Required for commit.",
-                },
+                action: { type: "string", enum: ["list", "stage", "commit"] },
+                cwd: { type: "string" },
+                paths: { type: "array", items: { type: "string" } },
+                all: { type: "boolean" },
+                message: { type: "string" },
             },
             required: ["action"],
         },
-        exec_handler: async (options) => Git(options),
+        exec_handler: (options) => Git(options),
     },
 ];
 
@@ -105,139 +64,114 @@ function truncate(value, maxLength = 240) {
 
 function summarizeResponse(response) {
     const summaries = [];
-
     for (const output of response.output ?? []) {
         if (output.type === "function_call") {
-            let argumentsSummary = "";
-            try {
-                argumentsSummary = ` ${truncate(JSON.stringify(JSON.parse(output.arguments)), 160)}`;
-            } catch {
-                argumentsSummary = output.arguments ? ` ${truncate(output.arguments, 160)}` : "";
-            }
-            summaries.push(`Tool call: ${output.name}${argumentsSummary}`);
-            continue;
-        }
-
-        if (output.type === "message") {
-            const text = (output.content ?? [])
-                .filter((content) => content.type === "output_text" || content.type === "text")
-                .map((content) => content.text)
-                .filter(Boolean)
-                .join(" ");
+            let args = output.arguments ?? "";
+            try { args = JSON.stringify(JSON.parse(args)); } catch { /* use raw arguments */ }
+            summaries.push(`Tool call: ${output.name}${args ? ` ${truncate(args, 160)}` : ""}`);
+        } else if (output.type === "message") {
+            const text = (output.content ?? []).filter((item) => item.type === "output_text" || item.type === "text").map((item) => item.text).filter(Boolean).join(" ");
             if (text) summaries.push(`Text response: ${truncate(text)}`);
         }
     }
-
-    return summaries.length > 0 ? summaries.join("\n") : "No text response or tool calls.";
+    return summaries.join("\n") || "No text response or tool calls.";
 }
 
-/** Prints a compact summary rather than the complete raw API response. */
-class OpenAIResponseWrapper {
-    constructor(response) {
-        this.response = response;
-    }
+function tokenCount(value) {
+    return Number.isFinite(value) ? value : 0;
+}
 
+function getCachedTokens(usage) {
+    return tokenCount(usage?.input_tokens_details?.cached_tokens);
+}
+
+function usageSummary(usage) {
+    const total = tokenCount(usage?.total_tokens);
+    const cached = getCachedTokens(usage);
+    return { total, cached, totalMinusCache: total - cached };
+}
+
+class OpenAIResponseWrapper {
+    constructor(response) { this.response = response; }
     print() {
         console.log("response:");
         console.log(summarizeResponse(this.response));
-
-        const { usage } = this.response;
-        if (usage) {
-            console.log(
-                `Usage: input_tokens=${usage.input_tokens ?? 0} output_tokens=${usage.output_tokens ?? 0} total_tokens=${usage.total_tokens ?? 0}`,
-            );
+        if (this.response.usage) {
+            const { total, cached, totalMinusCache } = usageSummary(this.response.usage);
+            console.log(`Usage: total_tokens=${total} cached_tokens=${cached} total_minus_cache=${totalMinusCache}`);
         }
     }
 }
 
 function saveData(data, filename = "data.json") {
-    try {
-        require("fs").writeFileSync(filename, JSON.stringify(data, null, 2));
-    } catch (error) {
-        console.error("Failed to save data:", error);
-    }
+    try { require("fs").writeFileSync(filename, JSON.stringify(data, null, 2)); }
+    catch (error) { console.error("Failed to save data:", error); }
 }
 
 function readData(filename = "data.json") {
-    try {
-        return JSON.parse(require("fs").readFileSync(filename, "utf-8"));
-    } catch (error) {
-        console.error("Failed to read data:", error);
-        return null;
-    }
+    try { return JSON.parse(require("fs").readFileSync(filename, "utf-8")); }
+    catch (error) { console.error("Failed to read data:", error); return null; }
 }
 
 async function main() {
     let configData = readData();
-    if (!configData) {
-        configData = { responseIds: [] };
-        saveData(configData);
-    }
-    if (!configData.requestResponses) {
-        configData.requestResponses = [];
-        saveData(configData);
-    }
-    if (!configData.toolCallResponse) {
-        configData.toolCallResponse = {};
-        saveData(configData);
-    }
+    if (!configData) configData = { responseIds: [] };
+    if (!Array.isArray(configData.requestResponses)) configData.requestResponses = [];
+    if (!configData.toolCallResponse || typeof configData.toolCallResponse !== "object") configData.toolCallResponse = {};
+    if (!Array.isArray(configData.tokenUsage)) configData.tokenUsage = [];
 
-    const request = {
-        model: modelList[1],
-        tools,
-        previous_response_id: configData.lastResponseId,
-    };
-
-    if (configData.lastToolCallIds && configData.lastToolCallIds.length > 0) {
-        request.input = configData.lastToolCallIds.map((callId) => ({
-            type: "function_call_output",
-            call_id: callId,
-            output: JSON.stringify(configData.toolCallResponse[callId]),
-        }));
+    const request = { model: modelList[1], tools, previous_response_id: configData.lastResponseId };
+    if (configData.lastToolCallIds?.length > 0) {
+        request.input = configData.lastToolCallIds.map((callId) => ({ type: "function_call_output", call_id: callId, output: JSON.stringify(configData.toolCallResponse[callId]) }));
         console.log(`request.input: ${JSON.stringify(request.input)}`);
     } else {
         request.input = prompt;
     }
 
-    const responses = await client.responses.create(request);
-    new OpenAIResponseWrapper(responses).print();
-    console.log("Done");
+    const response = await client.responses.create(request);
+    new OpenAIResponseWrapper(response).print();
 
-    configData.lastResponseId = responses.id;
+    // Persist the complete cache breakdown for every Responses API result.
+    const { total, cached, totalMinusCache } = usageSummary(response.usage);
+    configData.tokenUsage.push({
+        response_id: response.id,
+        total_tokens: total,
+        cached_tokens: cached,
+        total_minus_cache: totalMinusCache,
+        input_tokens_details: response.usage?.input_tokens_details ?? {},
+    });
+
+    const totals = configData.tokenUsage.reduce((sum, usage) => ({
+        total: sum.total + tokenCount(usage.total_tokens),
+        cached: sum.cached + tokenCount(usage.cached_tokens),
+        totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache),
+    }), { total: 0, cached: 0, totalMinusCache: 0 });
+    console.log(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+
+    configData.lastResponseId = response.id;
     configData.lastToolCallIds = [];
-
-    for (const response of responses.output) {
-        if (response.type === "message") {
-            if (response.status === "completed" && response.phase === "final_answer") {
-                configData.lastResponseId = null;
-            }
+    for (const output of response.output ?? []) {
+        if (output.type === "message") {
+            if (output.status === "completed" && output.phase === "final_answer") configData.lastResponseId = null;
             continue;
         }
-        if (response.type !== "function_call") continue;
+        if (output.type !== "function_call") continue;
+        console.log(`Executing tool: ${output.name}`);
+        const tool = tools.find((candidate) => candidate.name === output.name);
+        if (!tool?.exec_handler) { console.error(`No exec_handler found for tool: ${output.name}`); continue; }
 
-        console.log(`Executing tool: ${response.name}`);
-        const tool = tools.find((candidate) => candidate.name === response.name);
-        if (!tool?.exec_handler) {
-            console.error(`No exec_handler found for tool: ${response.name}`);
-            continue;
-        }
-
-        const callId = response.call_id;
-        const toolArguments = JSON.parse(response.arguments);
+        const callId = output.call_id;
+        const toolArguments = JSON.parse(output.arguments);
         try {
-            const toolResponse = await tool.exec_handler(toolArguments);
-            configData.toolCallResponse[callId] = { toolArguments, toolResponse };
+            configData.toolCallResponse[callId] = { toolArguments, toolResponse: await tool.exec_handler(toolArguments) };
         } catch (error) {
-            configData.toolCallResponse[callId] = {
-                toolArguments,
-                toolResponse: { error: error instanceof Error ? error.message : String(error) },
-            };
+            configData.toolCallResponse[callId] = { toolArguments, toolResponse: { error: error instanceof Error ? error.message : String(error) } };
         }
         configData.lastToolCallIds.push(callId);
         saveData(configData);
     }
-
     saveData(configData);
+    console.log("Done");
 }
 
 main().catch(console.error);
