@@ -1,6 +1,8 @@
 import OpenAI from "openai";
 import chalk from "chalk";
-import { readFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, basename, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
 import ListDirectory from "./tools/ListDirectory.ts";
@@ -22,6 +24,7 @@ const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
 const commandLinePrompt = program.args[0];
 const modelList = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const dataFilename = "/tmp/data.json";
+const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
 const historyLimit = 10;
 const maxReplanAttempts = 3;
 const maxRevisedPlanSteps = 50;
@@ -188,8 +191,34 @@ function totalUsage(tokenUsage) {
     return tokenUsage.reduce((sum, usage) => ({ total: sum.total + tokenCount(usage.total_tokens), cached: sum.cached + tokenCount(usage.cached_tokens), totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache) }), { total: 0, cached: 0, totalMinusCache: 0 });
 }
 class OpenAIResponseWrapper { constructor(response) { this.response = response; } print() { status.response(summarizeResponse(this.response)); } }
-function saveData(data, filename = dataFilename) { try { require("fs").writeFileSync(filename, JSON.stringify(data, null, 2)); } catch (error) { status.error(`Failed to save data: ${error instanceof Error ? error.message : String(error)}`); } }
-function readData(filename = dataFilename) { try { return JSON.parse(require("fs").readFileSync(filename, "utf-8")); } catch (error) { status.warning(`Failed to read saved data; starting with a new configuration: ${error instanceof Error ? error.message : String(error)}`); return null; } }
+function writeFileAtomically(filename, content) {
+    const directory = dirname(filename);
+    const temporaryFilename = join(directory, `.${basename(filename)}.${process.pid}.${randomUUID()}.tmp`);
+    let descriptor;
+    try {
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        descriptor = openSync(temporaryFilename, "wx", 0o600);
+        writeFileSync(descriptor, content, "utf-8");
+        fsyncSync(descriptor);
+        closeSync(descriptor);
+        descriptor = undefined;
+        renameSync(temporaryFilename, filename);
+        return true;
+    } catch (error) {
+        if (descriptor !== undefined) closeSync(descriptor);
+        try { rmSync(temporaryFilename, { force: true }); } catch { /* Preserve the original write error. */ }
+        throw error;
+    }
+}
+function saveData(data, filename = dataFilename) {
+    try { return writeFileAtomically(filename, JSON.stringify(data, null, 2)); }
+    catch (error) { status.error(`Failed to save data: ${error instanceof Error ? error.message : String(error)}`); return false; }
+}
+function saveMemory(memory, filename = memoryFilename) {
+    try { return writeFileAtomically(filename, JSON.stringify(memory, null, 2)); }
+    catch (error) { status.error(`Failed to save distilled memory: ${error instanceof Error ? error.message : String(error)}`); return false; }
+}
+function readData(filename = dataFilename) { try { return JSON.parse(readFileSync(filename, "utf-8")); } catch (error) { status.warning(`Failed to read saved data; starting with a new configuration: ${error instanceof Error ? error.message : String(error)}`); return null; } }
 function isFinalAnswer(output) { return output.type === "message" && output.status === "completed" && output.phase === "final_answer"; }
 
 function responseText(response) {
@@ -409,6 +438,7 @@ async function executePlanStep(step, index, steps, plan, configData) {
             }
         }
         saveData(configData);
+        if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
         if (toolOutputs.length === 0) {
             const feedbackEntry = captureExecutionFeedback(configData, response, index);
             reportExecutionFeedback(feedbackEntry);
@@ -446,6 +476,7 @@ async function main() {
     configData.lastToolCallIds = [];
     configData.activePlanSteps = [...activeSteps];
     saveData(configData);
+    if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
 
     status.success(`Plan created with ${activeSteps.length} step${activeSteps.length === 1 ? "" : "s"}.`);
     for (let index = 0; index < activeSteps.length; index += 1) {
@@ -458,6 +489,7 @@ async function main() {
         configData.activePlanSteps = [...activeSteps];
         configData.lastAppliedPlanChanges = appliedChanges;
         saveData(configData);
+        if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
     }
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
