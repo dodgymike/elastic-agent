@@ -2,6 +2,23 @@
 
 Spec Keeper is the authoritative source for project goals, specifications, plans, decisions, task state, and learned procedures. This file is an operating guide only; it does not replace the current server state.
 
+## Service routes and client compatibility
+
+The hosted Spec Keeper project resources are served from the API origin root. Use
+root-relative paths such as `/goals`, `/epics`, `/tasks`, `/task-queue`,
+`/dependencies`, `/decisions`, `/plans`, `/procedures`, and `/handoffs`.
+
+`tools/SpecKeeper.ts` preserves compatibility with callers using the former
+`/api/<resource>` form: for the resources above, it removes `/api` before making
+the request. New callers should use the root-relative canonical route. The
+client rejects malformed paths and reports non-2xx responses with a bounded,
+redacted diagnostic; do not copy credentials or raw server errors into task
+notes or handoffs.
+
+Configure the API origin with `SPEC_KEEPER_API_BASE` only when an alternate
+deployment is required. Credentials must come from the approved environment or
+local secret store, never repository files.
+
 ## Required workflow
 
 1. **Before selecting or starting work**, query the Spec Keeper server for the project's current goals, active epics, tasks, dependencies, decisions, and procedures. Do not infer the next task from repository files, chat history, or a local task list when the server is available.
