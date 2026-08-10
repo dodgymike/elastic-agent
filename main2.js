@@ -208,8 +208,6 @@ async function main() {
 
     for (const response of responses.output) {
         if (response.type === "message") {
-            console.log(`RESPONSE: ${JSON.stringify(response.content)}`);
-            console.log(`status: ${response.status}, phase: ${response.phase}`);
             if (response.status === "completed" && response.phase === "final_answer") {
                 configData.lastResponseId = null;
             }
