@@ -98,21 +98,50 @@ const tools = [
     },
 ];
 
-/**
- * Keeps the raw API response available while ensuring token usage is printed
- * once, in a compact and predictable format.
- */
+function truncate(value, maxLength = 240) {
+    const text = String(value).replace(/\s+/g, " ").trim();
+    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function summarizeResponse(response) {
+    const summaries = [];
+
+    for (const output of response.output ?? []) {
+        if (output.type === "function_call") {
+            let argumentsSummary = "";
+            try {
+                argumentsSummary = ` ${truncate(JSON.stringify(JSON.parse(output.arguments)), 160)}`;
+            } catch {
+                argumentsSummary = output.arguments ? ` ${truncate(output.arguments, 160)}` : "";
+            }
+            summaries.push(`Tool call: ${output.name}${argumentsSummary}`);
+            continue;
+        }
+
+        if (output.type === "message") {
+            const text = (output.content ?? [])
+                .filter((content) => content.type === "output_text" || content.type === "text")
+                .map((content) => content.text)
+                .filter(Boolean)
+                .join(" ");
+            if (text) summaries.push(`Text response: ${truncate(text)}`);
+        }
+    }
+
+    return summaries.length > 0 ? summaries.join("\n") : "No text response or tool calls.";
+}
+
+/** Prints a compact summary rather than the complete raw API response. */
 class OpenAIResponseWrapper {
     constructor(response) {
         this.response = response;
     }
 
     print() {
-        // Do not include usage in console.dir: it is rendered below as one line.
-        const { usage, ...responseWithoutUsage } = this.response;
         console.log("response:");
-        console.dir(responseWithoutUsage, { depth: null });
+        console.log(summarizeResponse(this.response));
 
+        const { usage } = this.response;
         if (usage) {
             console.log(
                 `Usage: input_tokens=${usage.input_tokens ?? 0} output_tokens=${usage.output_tokens ?? 0} total_tokens=${usage.total_tokens ?? 0}`,
