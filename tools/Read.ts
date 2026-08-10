@@ -19,13 +19,19 @@ export interface ReadResult {
  * change between a separate check and read cannot result in unchecked content.
  */
 export async function Read({ path }: ReadOptions): Promise<ReadResult> {
-  const bytes = await readFile(path);
-  const actualHash = createHash("sha256").update(bytes).digest("hex");
+  try {
+    const bytes = await readFile(path);
+    const actualHash = createHash("sha256").update(bytes).digest("hex");
 
-  return {
-    content: bytes.toString("utf8"),
-    read_hash: actualHash,
-  };
+    return {
+      content: bytes.toString("utf8"),
+      read_hash: actualHash,
+    };
+  } catch (err) {
+    return {
+      error: JSON.stringify(err),
+    };
+  }
 }
 
 export default Read;

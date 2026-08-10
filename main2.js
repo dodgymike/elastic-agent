@@ -6,6 +6,20 @@ import ListDirectory from "./tools/ListDirectory.ts";
 import Http from "./tools/Http.ts";
 import { config } from "process";
 
+import { Command } from "commander";
+
+const program = new Command();
+
+program
+//   .option("-m, --model <model>", "Model to use")
+//   .option("-v, --verbose", "Verbose output")
+  .argument("<prompt>");
+
+program.parse();
+
+const options = program.opts();
+const prompt = program.args[0];
+
 const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
@@ -138,7 +152,7 @@ async function main() {
         previous_response_id: configData.lastResponseId,
     };
 
-    if (configData.lastToolCallIds) {
+    if (configData.lastToolCallIds && configData.lastToolCallIds.length > 0) {
         // const toolResult = {
         //     type: "function_call_output",
         //     call_id: configData.lastToolCallId,
@@ -168,9 +182,11 @@ async function main() {
 
         console.log(`request.input: ${JSON.stringify(request.input)}`);
     } else {
-        request.input = `
-        Find all the current tool code in the current directory.
-    `;
+    //     request.input = `
+    //     Find all the current tool code in the current directory.
+    // `;
+
+        request.input = prompt;
     }
 
     const responses = await client.responses.create(request);

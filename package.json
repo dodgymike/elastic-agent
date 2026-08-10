@@ -1,7 +1,12 @@
 {
+  "scripts": {
+    "init-db": "node initializeDatabase.js"
+  },
   "dependencies": {
     "commander": "^13.1.0",
     "openai": "^6.49.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
     "typescript": "^7.0.2"
   }
 }
