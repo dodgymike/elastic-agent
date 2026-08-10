@@ -61,7 +61,7 @@ function loadSecretConfig(): SpecKeeperSecretConfig {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     // Do not expose a parsing error or file contents: this is a secret store.
-    throw new Error("Spec Keeper could not load its local credential store.");
+    throw new Error("Spec Keeper could not load its local credential store.", { cause: error });
   }
 }
 
@@ -90,6 +90,9 @@ const LEGACY_API_ROUTE_PREFIXES = [
   "/handoffs",
 ] as const;
 
+const MAX_FAILURE_DIAGNOSTIC_LENGTH = 512;
+const SENSITIVE_DIAGNOSTIC_KEY = /(?:authorization|token|password|secret|credential|api[-_]?key|cookie|session|access[_-]?key|refresh[_-]?token)/i;
+
 /** Validate an absolute route and map the former /api/<resource> aliases. */
 export function resolveSpecKeeperPath(path: string): string {
   if (typeof path !== "string" || !path.startsWith("/")) {
@@ -106,6 +109,37 @@ export function resolveSpecKeeperPath(path: string): string {
     }
   }
   return path;
+}
+
+/** Redact common secret-shaped values before reporting bounded API diagnostics. */
+function redactFailureDiagnostic(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactFailureDiagnostic);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      SENSITIVE_DIAGNOSTIC_KEY.test(key) ? "[REDACTED]" : redactFailureDiagnostic(item),
+    ]));
+  }
+  return value;
+}
+
+/** Convert an API error body into a safe, short diagnostic suitable for an Error message. */
+export function formatSpecKeeperFailureDiagnostic(text: string): string | undefined {
+  if (!text) return undefined;
+
+  let diagnostic = text;
+  try {
+    diagnostic = JSON.stringify(redactFailureDiagnostic(JSON.parse(text)));
+  } catch {
+    // Redact common credential forms from non-JSON proxy and service errors.
+    diagnostic = text
+      .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/=:-]+/gi, "[REDACTED AUTHORIZATION]")
+      .replace(/\b(((?:access|refresh)?_?token|password|secret|api[-_]?key|credential)\b\s*[:=]\s*)([^\s,;]+)/gi, "$1[REDACTED]");
+  }
+  if (diagnostic.length > MAX_FAILURE_DIAGNOSTIC_LENGTH) {
+    return `${diagnostic.slice(0, MAX_FAILURE_DIAGNOSTIC_LENGTH)}…`;
+  }
+  return diagnostic;
 }
 
 interface CognitoAuthenticationResult {
@@ -144,21 +178,26 @@ async function getAccessToken(options: SpecKeeperOptions): Promise<string> {
     ? { REFRESH_TOKEN: refreshToken.trim() }
     : { USERNAME: username!.trim(), PASSWORD: password!.trim() };
   const authFlow = refreshToken?.trim() ? "REFRESH_TOKEN_AUTH" : "USER_PASSWORD_AUTH";
-  const response = await fetch(`https://cognito-idp.${region.trim()}.amazonaws.com/`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-amz-json-1.1",
-      "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
-      // Unlike the Spec Keeper API, Cognito does not mandate a User-Agent, but
-      // declare one explicitly for reliable proxy behavior.
-      "User-Agent": options.userAgent ?? "elastic-agent-spec-keeper/1.1",
-    },
-    body: JSON.stringify({
-      AuthFlow: authFlow,
-      ClientId: clientId.trim(),
-      AuthParameters: authParameters,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`https://cognito-idp.${region.trim()}.amazonaws.com/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
+        // Unlike the Spec Keeper API, Cognito does not mandate a User-Agent, but
+        // declare one explicitly for reliable proxy behavior.
+        "User-Agent": options.userAgent ?? "elastic-agent-spec-keeper/1.1",
+      },
+      body: JSON.stringify({
+        AuthFlow: authFlow,
+        ClientId: clientId.trim(),
+        AuthParameters: authParameters,
+      }),
+    });
+  } catch (error) {
+    throw new Error("Spec Keeper authentication request could not be sent.", { cause: error });
+  }
   const text = await response.text();
   let payload: CognitoResponse = {};
   try {
@@ -203,11 +242,16 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
-  const response = await fetch(`${configuredApiBase.replace(/\/+$/, "")}${requestPath}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${configuredApiBase.replace(/\/+$/, "")}${requestPath}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    throw new Error(`Spec Keeper request ${method} ${requestPath} could not be sent.`, { cause: error });
+  }
   const text = await response.text();
   let responseBody: unknown = text;
   if (text) {
@@ -218,9 +262,9 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
     }
   }
   if (!response.ok) {
-    // Do not put an arbitrary API/proxy response in an exception. Besides being
-    // noisy for callers, an upstream error can echo request-related details.
-    throw new Error(`Spec Keeper request ${method} ${requestPath} failed (${response.status} ${response.statusText}).`);
+    const diagnostic = formatSpecKeeperFailureDiagnostic(text);
+    const suffix = diagnostic ? `; diagnostics: ${diagnostic}` : "";
+    throw new Error(`Spec Keeper request ${method} ${requestPath} failed (${response.status} ${response.statusText})${suffix}.`);
   }
   return {
     status: response.status,
