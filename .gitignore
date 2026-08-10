@@ -1,3 +1,4 @@
 data.json
-
-
+# One-time enrollment links and deployment credentials; keep outside the repository.
+agent-bus-invite-*.json
+spec-keeper-enrolment.json
