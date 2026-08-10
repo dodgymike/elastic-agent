@@ -14,6 +14,8 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const prompt = program.args[0];
 const modelList = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 
+const dataFilename = "/tmp/data.json";
+
 const tools = [
     {
         type: "function", name: "Write",
@@ -103,12 +105,12 @@ class OpenAIResponseWrapper {
     }
 }
 
-function saveData(data, filename = "data.json") {
+function saveData(data, filename = dataFilename) {
     try { require("fs").writeFileSync(filename, JSON.stringify(data, null, 2)); }
     catch (error) { console.error("Failed to save data:", error); }
 }
 
-function readData(filename = "data.json") {
+function readData(filename = dataFilename) {
     try { return JSON.parse(require("fs").readFileSync(filename, "utf-8")); }
     catch (error) { console.error("Failed to read data:", error); return null; }
 }
