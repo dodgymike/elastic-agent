@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "init-db": "node initializeDatabase.js"
+    "init-db": "node initializeDatabase.js",
+    "test:llm-adapters": "rm -rf test/.llm-adapter-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.llm-adapter-build llm/adapter-contract.ts llm/adapter-registry.ts llm/openai-adapter.ts llm/bedrock-claude-adapter.ts llm/deepseek-v4-adapter.ts test/llm-adapters.test.ts && node test/.llm-adapter-build/test/llm-adapters.test.js; status=$?; rm -rf test/.llm-adapter-build; exit $status"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1107.0",
