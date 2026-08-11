@@ -20,7 +20,7 @@ Before starting any task, consult Spec Keeper for goals, epics, tasks, dependenc
 ## Configuration
 
 - **Project slug**: `elastic-agent`
-- **Credential store**: `/tmp/spec-keeper.json` (default `SPEC_KEEPER_CONFIG_PATH`), or set the `SPEC_KEEPER_CONFIG_PATH` env var to point at the approved secret store
+- **Credential store**: `.spec.local.json` (default `SPEC_KEEPER_CONFIG_PATH`), or set the `SPEC_KEEPER_CONFIG_PATH` env var to point at the approved secret store
 - **API base**: `https://api.spec.elasticninja.com` (default; override via `SPEC_KEEPER_API_BASE` only when needed)
 - **Auth**: Cognito username/password stored in the credential config. The `SpecKeeper` tool loads them automatically from the config file and mints short-lived access tokens.
 - Credentials are NEVER stored in the repository. Do not copy credentials into CLAUDE.md, SPEC_KEEPER.md, task notes, or handoffs.

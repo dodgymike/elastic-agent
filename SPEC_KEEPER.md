@@ -10,7 +10,7 @@ Spec Keeper is the authoritative source for project goals, specifications, plans
 | **API base** | `https://api.spec.elasticninja.com` |
 | **Cognito region** | `eu-west-1` |
 | **Client ID** | `4tnoco9jd6f1bfde6ps0bldqca` |
-| **Credential store** | `/tmp/spec-keeper.json` (default `SPEC_KEEPER_CONFIG_PATH`) |
+| **Credential store** | `.spec.local.json` (default `SPEC_KEEPER_CONFIG_PATH`) |
 | **Auth mechanism** | Cognito `USER_PASSWORD_AUTH` or `REFRESH_TOKEN_AUTH` via the `SpecKeeper` tool |
 
 ## Service routes and client configuration
@@ -30,9 +30,12 @@ visible projects).
 ## Credential loading
 
 The `SpecKeeper` tool loads credentials automatically from the local secret
-store. The default path is `/tmp/spec-keeper.json`, but this can be overridden
+store. The default path is `.spec.local.json`, but this can be overridden
 by setting the `SPEC_KEEPER_CONFIG_PATH` environment variable. The config file
 contains the Cognito username, password, API base, region, and client ID.
+Its human-friendly keys (for example `Username`, `Password`, `API base`,
+`Region`, `Client ID`, `Project`) are normalized by the tool to the camelCase
+fields it reads internally.
 
 Credentials and the project slug must come from the approved environment or
 local secret store, never repository files. Do NOT copy credentials or raw
@@ -49,7 +52,7 @@ The tool is invoked with project resource paths and optional explicit config:
 - `body`: JSON payload for write operations
 
 The tool resolves resource shorthand to `/api/v1/projects/elastic-agent/<resource>`.
-When no explicit config is passed, it reads `/tmp/spec-keeper.json` for
+When no explicit config is passed, it reads `.spec.local.json` for
 credentials and project slug.
 
 ### Reliable patterns from bootstrap usage

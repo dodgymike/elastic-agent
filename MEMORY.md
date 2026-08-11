@@ -36,4 +36,4 @@ These are the durable lessons from the bootstrap execution plan (tracked in Spec
 
 - Spec Keeper is the authoritative task/decision/handoff system for this project (`elastic-agent`).
 - Agent Bus is not currently configured because `AGENT_BUS_BASE_URL` is absent; this does not block the legacy renderer task.
-- Spec Keeper bookkeeping requires a URL-safe project slug; the project is `elastic-agent`. The Spec Keeper client reads credentials from the local secret store `/tmp/spec-keeper.json`; pass `projectSlug: "elastic-agent"` explicitly when the secret store lacks a project slug.
+- Spec Keeper bookkeeping requires a URL-safe project slug; the project is `elastic-agent`. The Spec Keeper client reads credentials from the local secret store `.spec.local.json` (default `SPEC_KEEPER_CONFIG_PATH`); pass `projectSlug: "elastic-agent"` explicitly when the secret store lacks a project slug.

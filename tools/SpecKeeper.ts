@@ -50,18 +50,41 @@ interface SpecKeeperSecretConfig {
 }
 
 /**
+ * Normalize the local credential store's field names to the camelCase keys the
+ * client reads. The local secret store uses human-friendly keys (for example
+ * "Username", "Password", "API base", "Region", "Client ID", "Project"), so map
+ * those well-known variants to the canonical shape before use.
+ */
+function normalizeSecretConfig(raw: Record<string, unknown>): SpecKeeperSecretConfig {
+  const value = (key: string) => {
+    const v = raw[key];
+    return typeof v === "string" ? v : undefined;
+  };
+  return {
+    accessToken: value("accessToken") ?? value("Access Token") ?? value("AccessToken"),
+    refreshToken: value("refreshToken") ?? value("Refresh Token") ?? value("RefreshToken"),
+    username: value("username") ?? value("Username") ?? value("USERNAME"),
+    password: value("password") ?? value("Password") ?? value("PASSWORD"),
+    clientId: value("clientId") ?? value("Client ID") ?? value("ClientId") ?? value("client_id"),
+    region: value("region") ?? value("Region") ?? value("REGION"),
+    apiBase: value("apiBase") ?? value("API base") ?? value("API Base") ?? value("api_base"),
+    projectSlug: value("projectSlug") ?? value("project_slug") ?? value("Project") ?? value("project"),
+  };
+}
+
+/**
  * Load the enrolled agent credentials from the local, permission-restricted
  * secret store. Explicit call options and environment variables always take
  * precedence, so deployments can continue to use their normal secret manager.
  */
 function loadSecretConfig(): SpecKeeperSecretConfig {
-  const filename = process.env.SPEC_KEEPER_CONFIG_PATH ?? "/tmp/spec-keeper.json";
+  const filename = process.env.SPEC_KEEPER_CONFIG_PATH ?? ".spec.local.json";
   try {
     const value: unknown = JSON.parse(readFileSync(filename, "utf8"));
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error("not an object");
     }
-    return value as SpecKeeperSecretConfig;
+    return normalizeSecretConfig(value as Record<string, unknown>);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     // Do not expose a parsing error or file contents: this is a secret store.
