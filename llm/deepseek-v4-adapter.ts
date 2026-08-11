@@ -107,17 +107,41 @@ function translateToolChoice(choice: GenerateRequest["toolChoice"]): unknown {
   return { type: "function", function: { name: choice.name } };
 }
 
+/**
+ * Try to parse a JSON object from a string. Falls back to extracting JSON from
+ * a fenced code block (```json ... ```) and then to the first `{` to last `}`
+ * span when the value is wrapped in prose. Returns undefined when none succeed.
+ */
+function parseJsonObject(value: string): JsonObject | undefined {
+  const tryParse = (candidate: string): JsonObject | undefined => {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+      return parsed as JsonObject;
+    } catch {
+      return undefined;
+    }
+  };
+  const direct = tryParse(value);
+  if (direct !== undefined) return direct;
+  // Fallback: extract JSON from a fenced code block (```json ... ```).
+  const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) {
+    const extracted = tryParse(fenced[1].trim());
+    if (extracted !== undefined) return extracted;
+  }
+  return undefined;
+}
+
 function parseArguments(value: string | undefined, name: string): JsonObject {
   if (value === undefined) {
     throw new LlmAdapterError(PROVIDER, "provider", `DeepSeek returned function call '${name}' without arguments.`);
   }
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-    return parsed as JsonObject;
-  } catch {
-    throw new LlmAdapterError(PROVIDER, "provider", `DeepSeek returned invalid JSON arguments for function call '${name}'.`);
+  const parsed = parseJsonObject(value);
+  if (parsed === undefined) {
+    throw new LlmAdapterError(PROVIDER, "provider", `DeepSeek returned invalid JSON arguments for function call '${name}': ${value}`);
   }
+  return parsed;
 }
 
 function responseMessage(response: DeepSeekChatCompletion): AssistantMessage {
