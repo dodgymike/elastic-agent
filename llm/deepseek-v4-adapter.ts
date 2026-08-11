@@ -17,6 +17,18 @@ import type { AdapterOptions, LlmAdapterFactory } from "./adapter-registry.js";
 const PROVIDER = "deepseek-v4";
 const DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 
+/**
+ * Prompt-hint injected as a trailing system message when a DeepSeek response
+ * returns tool-call arguments that could not be parsed as JSON (even after all
+ * repair strategies fail). The retry asks the model to return pure, well-formed
+ * JSON so the second attempt has a better chance of producing valid arguments.
+ */
+const JSON_RETRY_HINT =
+  "Your previous response returned tool-call arguments that could not be parsed as JSON. " +
+  "Please respond again with pure, well-formed JSON in every tool-call arguments value: " +
+  "no prose before or after, no markdown code fences, all keys and string values double-quoted, " +
+  "no comments, no trailing commas, and all special characters properly escaped.";
+
 /** Settings accepted by the DeepSeek V4 factory. `apiKey` takes precedence over DEEPSEEK_API_KEY. */
 export interface DeepSeekV4AdapterOptions {
   readonly apiKey?: string;
@@ -105,6 +117,48 @@ function translateMessage(message: ConversationMessage): Record<string, unknown>
 function translateToolChoice(choice: GenerateRequest["toolChoice"]): unknown {
   if (choice === undefined || typeof choice === "string") return choice;
   return { type: "function", function: { name: choice.name } };
+}
+
+/** Build the OpenAI-compatible Chat Completions payload for `request`. */
+function buildPayload(request: GenerateRequest): Record<string, unknown> {
+  return {
+    model: request.model,
+    messages: request.messages.map(translateMessage),
+    stream: false,
+    ...(request.tools === undefined ? {} : {
+      tools: request.tools.map((tool) => ({
+        type: "function",
+        function: {
+          name: tool.name,
+          ...(tool.description === undefined ? {} : { description: tool.description }),
+          parameters: tool.parameters,
+        },
+      })),
+    }),
+    ...(request.toolChoice === undefined ? {} : { tool_choice: translateToolChoice(request.toolChoice) }),
+    ...(request.maxOutputTokens === undefined ? {} : { max_tokens: request.maxOutputTokens }),
+    ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+  };
+}
+
+/**
+ * Append the JSON purity hint as a trailing system message to the already-built
+ * payload. This is used only for the single retry issued when tool-call
+ * arguments cannot be parsed after exhaustive repair.
+ */
+function buildRetryPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const messages = [...(payload.messages as unknown[])];
+  messages.push({ role: "system", content: JSON_RETRY_HINT });
+  return { ...payload, messages };
+}
+
+/** True when `error` is the invalid tool-call JSON arguments provider failure. */
+function isJsonArgumentsError(error: unknown): boolean {
+  return (
+    error instanceof LlmAdapterError &&
+    error.code === "provider" &&
+    error.message.includes("invalid JSON arguments")
+  );
 }
 
 function tryParseObject(candidate: string): JsonObject | undefined {
@@ -483,57 +537,63 @@ export class DeepSeekV4Adapter implements LlmAdapter {
     private readonly fetcher: DeepSeekFetch = fetch,
   ) {}
 
-  async generate(request: GenerateRequest): Promise<GenerateResponse> {
-    const payload: Record<string, unknown> = {
-      model: request.model,
-      messages: request.messages.map(translateMessage),
-      stream: false,
-      ...(request.tools === undefined ? {} : {
-        tools: request.tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            ...(tool.description === undefined ? {} : { description: tool.description }),
-            parameters: tool.parameters,
-          },
-        })),
-      }),
-      ...(request.toolChoice === undefined ? {} : { tool_choice: translateToolChoice(request.toolChoice) }),
-      ...(request.maxOutputTokens === undefined ? {} : { max_tokens: request.maxOutputTokens }),
-      ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
-    };
+  /**
+   * Perform one Chat Completions request against the supplied payload and
+   * return the normalized portable response. Errors (including invalid
+   * tool-call JSON arguments, transport failures, and provider HTTP failures)
+   * propagate to the caller for classification or retry.
+   */
+  private async postCompletion(model: string, payload: Record<string, unknown>, signal: AbortSignal | undefined): Promise<GenerateResponse> {
+    const response = await this.fetcher(endpoint(this.baseURL), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (!response.ok) throw providerFailure(response.status, response.statusText);
+    let completion: unknown;
     try {
-      const response = await this.fetcher(endpoint(this.baseURL), {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(payload),
-        signal: request.signal,
-      });
-      if (!response.ok) throw providerFailure(response.status, response.statusText);
-      let completion: unknown;
-      try {
-        completion = await response.json();
-      } catch (error) {
-        throw new LlmAdapterError(PROVIDER, "provider", "DeepSeek returned an invalid JSON response.", false, { cause: error });
-      }
-      if (!completion || typeof completion !== "object" || Array.isArray(completion)) {
-        throw new LlmAdapterError(PROVIDER, "provider", "DeepSeek returned an invalid completion response.");
-      }
-      const decoded = completion as DeepSeekChatCompletion;
-      const message = responseMessage(decoded);
-      const tokenUsage = usage(decoded);
-      return {
-        ...(decoded.id === undefined ? {} : { id: decoded.id }),
-        model: decoded.model ?? request.model,
-        message,
-        finishReason: finishReason(decoded.choices?.[0]?.finish_reason, message.toolCalls !== undefined && message.toolCalls.length > 0),
-        ...(tokenUsage === undefined ? {} : { usage: tokenUsage }),
-      };
+      completion = await response.json();
     } catch (error) {
+      throw new LlmAdapterError(PROVIDER, "provider", "DeepSeek returned an invalid JSON response.", false, { cause: error });
+    }
+    if (!completion || typeof completion !== "object" || Array.isArray(completion)) {
+      throw new LlmAdapterError(PROVIDER, "provider", "DeepSeek returned an invalid completion response.");
+    }
+    const decoded = completion as DeepSeekChatCompletion;
+    const message = responseMessage(decoded);
+    const tokenUsage = usage(decoded);
+    return {
+      ...(decoded.id === undefined ? {} : { id: decoded.id }),
+      model: decoded.model ?? model,
+      message,
+      finishReason: finishReason(decoded.choices?.[0]?.finish_reason, message.toolCalls !== undefined && message.toolCalls.length > 0),
+      ...(tokenUsage === undefined ? {} : { usage: tokenUsage }),
+    };
+  }
+
+  async generate(request: GenerateRequest): Promise<GenerateResponse> {
+    const payload = buildPayload(request);
+    try {
+      return await this.postCompletion(request.model, payload, request.signal);
+    } catch (error) {
+      // On the first call where exhaustive JSON repair of tool-call arguments
+      // still failed, retry the API call once with a prompt hint asking the
+      // model to return pure, valid JSON. The retry is limited to exactly one
+      // extra request; if it also yields invalid arguments or any other error,
+      // the diagnostic (preferring the retry's) is returned to the caller.
+      if (isJsonArgumentsError(error)) {
+        try {
+          return await this.postCompletion(request.model, buildRetryPayload(payload), request.signal);
+        } catch (retryError) {
+          if (isJsonArgumentsError(retryError)) throw retryError;
+          throw error;
+        }
+      }
       throw classifyError(error);
     }
   }

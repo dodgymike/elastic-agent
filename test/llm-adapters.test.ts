@@ -178,6 +178,27 @@ function deepSeekWithArguments(argumentsValue: string): DeepSeekV4Adapter {
   return new DeepSeekV4Adapter("test-key", "https://deepseek.example/v1", fetcher);
 }
 
+/** Adapter fixture whose first call returns unrepairable JSON arguments and whose second returns valid arguments. */
+function deepSeekWithRetry(argumentsValues: [string, string]): {
+  adapter: DeepSeekV4Adapter;
+  calls: Array<{ payload: { messages: Array<{ role: string; content: string }> }; url: string }>;
+} {
+  const calls: Array<{ payload: { messages: Array<{ role: string; content: string }> }; url: string }> = [];
+  let attempt = 0;
+  const fetcher = async (input: string, init: RequestInit): Promise<Response> => {
+    attempt++;
+    const payload = JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> };
+    calls.push({ payload, url: input });
+    const args = argumentsValues[Math.min(attempt, argumentsValues.length) - 1];
+    return new Response(JSON.stringify({
+      id: `chat-retry-${attempt}`,
+      model: "deepseek-v4-pro",
+      choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: `call-r${attempt}`, type: "function", function: { name: "weather", arguments: args } }] } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  return { adapter: new DeepSeekV4Adapter("test-key", "https://deepseek.example/v1", fetcher), calls };
+}
+
 async function testDeepSeekJsonRepair(): Promise<void> {
   // Common LLM-produced malformations that fail strict JSON.parse but are repaired.
   const cases: Array<[string, Record<string, unknown>]> = [
@@ -249,7 +270,45 @@ async function testDeepSeekJsonRepair(): Promise<void> {
     assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `progressive truncation: ${raw}`);
   }
 
-  // Unrepairable input must still raise a provider error (not crash) and surface
+  // Retry with prompt hint: when repair of tool-call arguments fails on the
+  // first call, the adapter retries the API call exactly once with an appended
+  // system hint asking for pure JSON, and returns the repaired result.
+  {
+    const { adapter, calls } = deepSeekWithRetry(["not json at all", '{"city":"Paris","temp":22}']);
+    const result = await adapter.generate(request);
+    assert.deepEqual(result.message.toolCalls, [{ id: "call-r2", name: "weather", arguments: { city: "Paris", temp: 22 } }]);
+    assert.equal(calls.length, 2, "retry should issue exactly two API calls");
+    assert.equal(calls[0].url, "https://deepseek.example/v1/chat/completions");
+    assert.equal(calls[1].url, "https://deepseek.example/v1/chat/completions");
+    // The retry payload must carry the JSON purity hint as a trailing system message.
+    const firstMessages = calls[0].payload.messages;
+    const retryMessages = calls[1].payload.messages;
+    assert.equal(retryMessages.length, firstMessages.length + 1, "retry adds one hint message");
+    const hint = retryMessages[retryMessages.length - 1];
+    assert.equal(hint.role, "system");
+    assert.match(hint.content, /pure, well-formed JSON/i);
+    assert.match(hint.content, /no markdown code fences/i);
+  }
+
+  // Retry also fails: when both the first call and the retry return unrepairable
+  // arguments, the adapter propagates the (retry) provider error and only issues
+  // two calls total.
+  {
+    const { adapter, calls } = deepSeekWithRetry(["not json at all", "still not json"]);
+    await assert.rejects(() => adapter.generate(request), (error: unknown) => {
+      assert.ok(error instanceof LlmAdapterError);
+      assert.equal(error.provider, "deepseek-v4");
+      assert.equal(error.code, "provider");
+      assert.equal(error.retryable, false);
+      assert.match(error.message, /invalid JSON arguments/);
+      assert.match(error.message, /All parsing strategies failed/);
+      return true;
+    });
+    assert.equal(calls.length, 2, "retry should still limit to two calls when both fail");
+  }
+
+  // Unrepairable input on both calls (single-argument fixture returns the same
+  // value each time) must still raise a provider error (not crash) and surface
   // the raw arguments plus the attempted strategies in the message for debugging.
   const rawArguments = "not json at all";
   const broken = deepSeekWithArguments(rawArguments);
