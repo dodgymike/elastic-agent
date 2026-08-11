@@ -4,8 +4,9 @@
  *
  * This probe exercises the actual adapter parsing chain via an injected
  * fetcher, reproducing realistic Write-tool arguments, and reports which
- * patterns pass or fail. Each repair strategy from the robust-JSON-repair plan
- * is represented:
+ * patterns pass or fail, the exact repair strategy that resolved each one, and
+ * a per-strategy coverage summary. Each repair strategy from the
+ * robust-JSON-repair plan is represented:
  *   - brace matching (missing `{`/`}` balance)
  *   - bracket matching (missing `[`/`]` balance)
  *   - quote/violation tolerance (strip leading prose before the first `{`)
@@ -14,7 +15,7 @@
  *   - clean retry (retry once with a pure-JSON hint)
  */
 import assert from "node:assert/strict";
-import { DeepSeekV4Adapter, type DeepSeekFetch } from "../llm/deepseek-v4-adapter.js";
+import { DeepSeekV4Adapter, diagnoseJsonObjectParse, type DeepSeekFetch } from "../llm/deepseek-v4-adapter.js";
 import type { GenerateRequest } from "../llm/adapter-contract.js";
 
 const request: GenerateRequest = {
@@ -183,31 +184,44 @@ const cases: Case[] = [
 interface Result {
   readonly name: string;
   readonly ok: boolean;
+  readonly strategy?: string;
   readonly error?: string;
 }
 
 async function main(): Promise<void> {
   const results: Result[] = [];
   for (const c of cases) {
+    // Exercise the adapter's real parsing chain to confirm end-to-end behavior.
+    let adapterOk = false;
+    let adapterError: string | undefined;
     try {
       const adapter = deepSeekWithArguments(c.raw);
       const response = await adapter.generate(request);
       const hasToolCall = response.message.toolCalls !== undefined && response.message.toolCalls.length > 0;
-      const ok = c.expectFail === true ? !hasToolCall : hasToolCall;
-      results.push({ name: c.name, ok, error: hasToolCall ? undefined : "no tool calls returned" });
+      adapterOk = c.expectFail === true ? !hasToolCall : hasToolCall;
+      if (!adapterOk) adapterError = "no tool calls returned";
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const ok = c.expectFail === true;
-      results.push({ name: c.name, ok, error: message });
+      adapterOk = c.expectFail === true;
+      adapterError = error instanceof Error ? error.message : String(error);
     }
+    // Enhanced diagnostic: report exactly which repair strategy resolved the
+    // arguments, independent of the expected-pass/fail assertion.
+    const diagnosis = diagnoseJsonObjectParse(c.raw);
+    const strategy = diagnosis.value !== undefined ? diagnosis.strategy : undefined;
+    // A case passes when (a) it was expected to pass and the adapter produced a
+    // tool call, or (b) it was expected to fail and the adapter did not.
+    const ok = adapterOk;
+    results.push({ name: c.name, ok, strategy, error: adapterError });
   }
 
-  console.log("=== DeepSeek JSON parsing/repair probe results ===");
+  console.log("=== DeepSeek JSON parsing/repair probe results (enhanced diagnostics) ===");
   console.log("");
   for (const r of results) {
     const marker = r.ok ? "PASS" : "FAIL";
     console.log(`[${marker}] ${r.name}`);
-    if (!r.ok && r.error) {
+    if (r.strategy !== undefined) {
+      console.log(`      resolved by: ${r.strategy}`);
+    } else if (!r.ok && r.error) {
       // Show a condensed error (first line only, capped).
       const firstLine = r.error.split("\n")[0];
       console.log(`      ${firstLine.slice(0, 200)}`);
@@ -219,6 +233,22 @@ async function main(): Promise<void> {
   if (failures.length > 0) {
     console.log("\nFailing patterns:");
     for (const f of failures) console.log(`  - ${f.name}`);
+  }
+
+  // Per-strategy coverage summary: how many cases each repair path resolved.
+  console.log("");
+  console.log("Repair-strategy coverage (cases resolved by each strategy):");
+  const byStrategy = new Map<string, number>();
+  for (const r of results) {
+    if (r.strategy === undefined) continue;
+    byStrategy.set(r.strategy, (byStrategy.get(r.strategy) ?? 0) + 1);
+  }
+  if (byStrategy.size === 0) {
+    console.log("  (none; every case resolved by the direct JSON parse)");
+  } else {
+    for (const [strategy, count] of [...byStrategy.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  - ${strategy}: ${count}`);
+    }
   }
 }
 

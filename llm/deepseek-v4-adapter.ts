@@ -442,6 +442,41 @@ function parseJsonObject(value: string): JsonObject | undefined {
   return parseJsonObjectWithDiagnostics(value, { attempts: [] });
 }
 
+/**
+ * Outcome of parsing a tool-call arguments string: the parsed object (when a
+ * strategy succeeded) plus the exact strategy that resolved it, and the ordered
+ * list of fallback strategies attempted. `value` is undefined when no strategy
+ * produced a JSON object. Exposed for the parse-failure probe's enhanced
+ * diagnostics so it can report which repair path handled each malformed input
+ * (rather than only pass/fail).
+ */
+export interface JsonParseDiagnosis {
+  /** The parsed JSON object, or undefined when no strategy succeeded. */
+  readonly value?: JsonObject;
+  /** The strategy that produced `value`, or undefined when parsing failed. */
+  readonly strategy?: string;
+  /** All fallback strategies attempted, in order, before the winning strategy. */
+  readonly attempts: readonly string[];
+}
+
+/**
+ * Diagnose how a candidate tool-call arguments string resolves (or fails to).
+ * Reuses the adapter's exact parsing chain and reports the winning strategy and
+ * the ordered list of attempted strategies. Returns `{ value, strategy,
+ * attempts }` with `value`/`strategy` undefined on total failure.
+ */
+export function diagnoseJsonObjectParse(value: string): JsonParseDiagnosis {
+  const diagnostics: ParseDiagnostics = { attempts: [] };
+  const parsed = parseJsonObjectWithDiagnostics(value, diagnostics);
+  if (parsed === undefined) return { attempts: diagnostics.attempts };
+  // The winning strategy is the last recorded attempt when a fallback was
+  // needed, or "direct JSON parse" when the raw input parsed immediately.
+  const strategy = diagnostics.attempts.length > 0
+    ? diagnostics.attempts[diagnostics.attempts.length - 1]
+    : "direct JSON parse";
+  return { value: parsed, strategy, attempts: diagnostics.attempts };
+}
+
 function parseArguments(value: string | undefined, name: string): JsonObject {
   if (value === undefined) {
     throw new LlmAdapterError(PROVIDER, "provider", `DeepSeek returned function call '${name}' without arguments.`);
