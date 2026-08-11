@@ -107,37 +107,80 @@ function translateToolChoice(choice: GenerateRequest["toolChoice"]): unknown {
   return { type: "function", function: { name: choice.name } };
 }
 
+function tryParseObject(candidate: string): JsonObject | undefined {
+  try {
+    const parsed: unknown = JSON.parse(candidate);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as JsonObject;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Best-effort repair of common malformations in LLM-produced JSON: trailing
+ * commas, unquoted and single-quoted keys/strings, `undefined` and bare or
+ * Python-style identifier values, and comments. Each repair is applied in
+ * sequence with a parse attempt; the first that yields a JSON object wins.
+ * Returns undefined when no repair succeeds.
+ */
+function repairJson(candidate: string): JsonObject | undefined {
+  let cleaned = candidate.replace(/^\uFEFF/, "");
+  // Strip /* */ block comments and // line comments (outside string literals).
+  cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"\\])\/\/[^\n\r]*/g, "$1");
+  let parsed = tryParseObject(cleaned);
+  if (parsed !== undefined) return parsed;
+  // Remove trailing commas before a closing bracket/brace.
+  cleaned = cleaned.replace(/,\s*([}\]])/g, "$1");
+  parsed = tryParseObject(cleaned);
+  if (parsed !== undefined) return parsed;
+  // Quote unquoted object keys (a bare identifier immediately before a colon).
+  cleaned = cleaned.replace(/([{\[,]\s*)([A-Za-z_$][A-Za-z0-9_$-]*)\s*:/g, '$1"$2":');
+  parsed = tryParseObject(cleaned);
+  if (parsed !== undefined) return parsed;
+  // Convert single-quoted strings to double-quoted strings (outside the quoted-key step above).
+  cleaned = cleaned.replace(/'(?:\\.|[^'\\])*'/g, (m) => {
+    const inner = m.slice(1, -1);
+    return `"${inner.replace(/"/g, '\\"')}"`;
+  });
+  parsed = tryParseObject(cleaned);
+  if (parsed !== undefined) return parsed;
+  // Normalize Python-style booleans/none and JS undefined/bare identifiers to JSON values.
+  cleaned = cleaned
+    .replace(/\bTrue\b/g, "true")
+    .replace(/\bFalse\b/g, "false")
+    .replace(/\bNone\b|\bundefined\b|\bNaN\b|\bInfinity\b/g, "null");
+  return tryParseObject(cleaned);
+}
+
 /**
  * Try to parse a JSON object from a string. Falls back to extracting JSON from
- * a fenced code block (```json ... ```) and then to the first `{` to last `}`
- * span when the value is wrapped in prose. Returns undefined when none succeed.
+ * a fenced code block (```json ... ```), then to the first `{` to last `}`
+ * span, and finally to repairing common malformations in the extracted
+ * candidate. Returns undefined when none succeed.
  */
 function parseJsonObject(value: string): JsonObject | undefined {
-  const tryParse = (candidate: string): JsonObject | undefined => {
-    try {
-      const parsed: unknown = JSON.parse(candidate);
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-      return parsed as JsonObject;
-    } catch {
-      return undefined;
-    }
-  };
-  const direct = tryParse(value);
+  const direct = tryParseObject(value);
   if (direct !== undefined) return direct;
   // Fallback: extract JSON from a fenced code block (```json ... ```).
+  let candidate: string | undefined;
   const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenced) {
-    const extracted = tryParse(fenced[1].trim());
+    candidate = fenced[1].trim();
+    const extracted = tryParseObject(candidate);
     if (extracted !== undefined) return extracted;
   }
   // Fallback: extract JSON from the first `{` to the last `}` when the value is wrapped in prose.
   const start = value.indexOf("{");
   const end = value.lastIndexOf("}");
   if (start !== -1 && end !== -1 && end > start) {
-    const extracted = tryParse(value.slice(start, end + 1).trim());
+    candidate = value.slice(start, end + 1).trim();
+    const extracted = tryParseObject(candidate);
     if (extracted !== undefined) return extracted;
   }
-  return undefined;
+  // Fallback: repair common malformations in the best candidate available.
+  if (candidate === undefined) candidate = value.trim();
+  return repairJson(candidate);
 }
 
 function parseArguments(value: string | undefined, name: string): JsonObject {

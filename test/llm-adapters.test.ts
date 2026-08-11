@@ -168,12 +168,51 @@ async function testDeepSeek(): Promise<void> {
   await expectAdapterError(() => failing.generate(request), "deepseek-v4", "unavailable", true);
 }
 
+/** Build a DeepSeek adapter whose fetcher returns the supplied function arguments verbatim. */
+function deepSeekWithArguments(argumentsValue: string): DeepSeekV4Adapter {
+  const fetcher = async (): Promise<Response> => new Response(JSON.stringify({
+    id: "chat-repair",
+    model: "deepseek-v4-pro",
+    choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: "call-r", type: "function", function: { name: "weather", arguments: argumentsValue } }] } }],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  return new DeepSeekV4Adapter("test-key", "https://deepseek.example/v1", fetcher);
+}
+
+async function testDeepSeekJsonRepair(): Promise<void> {
+  // Common LLM-produced malformations that fail strict JSON.parse but are repaired.
+  const cases: Array<[string, Record<string, unknown>]> = [
+    // Trailing comma.
+    ['{"city":"Paris","temp":22,}', { city: "Paris", temp: 22 }],
+    // Unquoted keys.
+    ['{city: "Paris", temp: 22}', { city: "Paris", temp: 22 }],
+    // Single-quoted keys and string values.
+    ["{'city': 'Paris', 'temp': 22}", { city: "Paris", temp: 22 }],
+    // Single quotes plus unquoted values and undefined.
+    ["{city: 'Paris', note: undefined}", { city: "Paris", note: null }],
+    // Comments and trailing prose wrapped around an object.
+    ["Here is the result: { city: 'Paris', /* ok */ temp: 22, } // done", { city: "Paris", temp: 22 }],
+  ];
+  for (const [raw, expected] of cases) {
+    const result = await deepSeekWithArguments(raw).generate(request);
+    assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `repairing: ${raw}`);
+  }
+
+  // Unrepairable input must still raise a provider error rather than crash.
+  const broken = deepSeekWithArguments("not json at all");
+  await expectAdapterError(() => broken.generate(request), "deepseek-v4", "provider", false);
+
+  // Valid JSON must be parsed identically (no regression).
+  const valid = await deepSeekWithArguments('{"city":"Oslo","temp":5}').generate(request);
+  assert.deepEqual(valid.message.toolCalls, [{ id: "call-r", name: "weather", arguments: { city: "Oslo", temp: 5 } }]);
+}
+
 (async () => {
   await testRegistry();
   await testRuntimeComposition();
   await testOpenAi();
   await testBedrock();
   await testDeepSeek();
+  await testDeepSeekJsonRepair();
   console.log("LLM adapter fixtures passed");
 })().catch((error) => {
   console.error(error);
