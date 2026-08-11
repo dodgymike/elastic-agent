@@ -202,16 +202,38 @@ if (call) {
 - Pass an `AbortSignal` through `GenerateRequest.signal` to cancel a provider request.
 - Set provider model IDs deliberately per environment. `LLM_PROVIDER` chooses an adapter, not a default model.
 
-## Runtime startup
+## Runtime CLI startup
 
-The application composition in `llm/application.ts` registers the DeepSeek V4 factory and resolves `LLM_PROVIDER` only after loading the runtime environment. The launch command also asks Node to load `.env` when it is present; the composition repeats this safely for embedded use. Existing process environment values (including values injected by a secret manager) take precedence.
+`main.ts` is the plan-and-execute CLI. Select a provider with `--provider <id>` or set `LLM_PROVIDER`; the command-line option takes precedence. The supported IDs are `openai`, `bedrock-claude`, and `deepseek-v4`. There is no implicit provider default, so a normal launch must provide one of those selection sources.
 
 ```sh
-# Supply these through the runtime environment or secret manager, not source control.
-export LLM_PROVIDER=deepseek-v4
-export DEEPSEEK_API_KEY="..."
-export DEEPSEEK_MODEL=deepseek-chat # optional; this is the launch default
-npm start -- "Reply with the selected provider and model."
+npm start -- --help
+npm start -- --provider openai "Plan the deployment work."
+# Equivalent environment-selected launch:
+LLM_PROVIDER=deepseek-v4 npm start -- "Plan the deployment work."
 ```
 
-`.env` and build output are ignored by Git. A successful launch constructs only the registered `deepseek-v4` adapter and sends the prompt with `DEEPSEEK_MODEL` (or `deepseek-chat`) to DeepSeek's Chat Completions API.
+The CLI help lists the selected-provider credential and model variables. Pass credentials only through the runtime environment or a deployment secret manager; never put credentials in command-line arguments, `.env` committed to source control, or examples. The launch command asks Node to load an untracked `.env` when present, and application composition repeats that safely for embedded use. Existing process environment values (including secret-manager injection) take precedence.
+
+### Provider runtime settings
+
+| Selected provider | Credential/runtime requirements | Default model | Optional model override |
+| --- | --- | --- | --- |
+| `openai` | `OPENAI_API_KEY` | `gpt-4.1-mini` | `OPENAI_MODEL` |
+| `bedrock-claude` | `AWS_REGION` or `AWS_DEFAULT_REGION`, plus the standard AWS credential-provider chain | `anthropic.claude-sonnet-4-20250514-v1:0` | `BEDROCK_CLAUDE_MODEL` |
+| `deepseek-v4` | `DEEPSEEK_API_KEY` | `deepseek-chat` | `DEEPSEEK_MODEL` |
+
+Only the selected provider's credential and model variables are read. A selected-provider model override must be non-blank; otherwise the documented default is used. Model availability and Bedrock access remain account- and region-specific.
+
+For example, configure DeepSeek without persisting a credential in the repository:
+
+```sh
+export LLM_PROVIDER=deepseek-v4
+export DEEPSEEK_API_KEY="..." # inject from a secret manager in production
+export DEEPSEEK_MODEL=deepseek-chat # optional
+npm start -- "Plan the deployment work."
+```
+
+The multi-turn CLI uses the compatibility runtime to retain its plan/tool-call continuation, in-process response chaining, normalized usage accounting, and provider error propagation while provider adapters remain stateless. `LLM_PROVIDER` and `--provider` select an adapter; the model resolver selects the matching default or provider-specific override.
+
+`.env` and build output are ignored by Git. The Dockerfile declares `LLM_PROVIDER=deepseek-v4` as a non-secret image default; override it with `--provider` or a runtime environment value as needed, and inject the selected provider's credentials at launch.

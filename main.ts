@@ -18,9 +18,25 @@ import SpecKeeperEnroll from "./tools/SpecKeeperEnroll.ts";
 import { Command } from "commander";
 
 const program = new Command();
+program
+    .name("elastic-agent")
+    .description("Plan and execute a prompt with the selected LLM provider.")
+    .argument("<prompt>", "task or request to plan and execute")
+    .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
+    .addHelpText("after", `
+Provider selection:
+  --provider <provider-id> takes precedence over LLM_PROVIDER.
+  Set one of them to openai, bedrock-claude, or deepseek-v4.
+
+Selected-provider configuration:
+  openai          OPENAI_API_KEY [OPENAI_MODEL]
+  bedrock-claude  AWS_REGION or AWS_DEFAULT_REGION plus AWS credentials [BEDROCK_CLAUDE_MODEL]
+  deepseek-v4     DEEPSEEK_API_KEY [DEEPSEEK_MODEL]
+
+Credentials must be supplied through the runtime environment or secret manager, never command-line arguments or source control.
+`);
+program.parse(process.argv);
 const providerSelection = selectCliProvider(process.argv.slice(2));
-program.argument("<prompt>");
-program.parse([process.argv[0], process.argv[1], ...providerSelection.remainingArgs]);
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
 let client: MultiTurnLlmRuntime;
