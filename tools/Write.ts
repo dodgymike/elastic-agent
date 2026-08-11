@@ -34,7 +34,6 @@ export default async function Write({ path, content, overwrite, read_hash, }: Wr
                 throw new TypeError("read_hash is required");
             }
 
-            console.log("File exists");
             const expectedHash = read_hash.trim().toLowerCase();
             if (!/^[a-f0-9]{64}$/.test(expectedHash)) {
                 throw new TypeError("read_hash must be a SHA-256 hash encoded as 64 hexadecimal characters");
