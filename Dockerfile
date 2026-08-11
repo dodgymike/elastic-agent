@@ -2,6 +2,10 @@ FROM ubuntu:latest
 
 WORKDIR /elastic-agent/
 
+# The selected provider is non-secret configuration. DEEPSEEK_API_KEY is supplied
+# separately by the runtime environment and must never be baked into this image.
+ENV LLM_PROVIDER=deepseek-v4
+
 RUN apt update
 RUN apt -y install npm
 
