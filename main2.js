@@ -164,6 +164,21 @@ function truncate(value, maxLength = 240) {
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 function stringify(value) { try { return JSON.stringify(value); } catch { return String(value); } }
+function toolCallArgumentSummary(argumentsText) {
+    if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
+    try { return truncate(stringify(JSON.parse(argumentsText)), 160); }
+    catch { return truncate(argumentsText, 160); }
+}
+function renderToolCallPending(toolCall) {
+    const argumentsSummary = toolCallArgumentSummary(toolCall.arguments);
+    status.tool(`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`);
+}
+function renderToolCallSucceeded(toolCall, result) {
+    status.success(`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`);
+}
+function renderToolCallFailed(toolCall, error) {
+    status.error(`Failed: ${toolCall.name}: ${error}`);
+}
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
 function buildPrompt(commandPrompts, toolCallTldrs) {
     const promptHistory = commandPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n") || "(none)";
@@ -419,9 +434,8 @@ async function executePlanStep(step, index, steps, plan, configData) {
         toolOutputs = [];
         for (const output of response.output ?? []) {
             if (output.type !== "function_call") continue;
-            status.tool(`Executing: ${output.name}`);
+            renderToolCallPending(output);
             const tool = tools.find((candidate) => candidate.name === output.name);
-            const callId = output.call_id;
             let toolArguments;
             try {
                 toolArguments = JSON.parse(output.arguments);
@@ -429,12 +443,12 @@ async function executePlanStep(step, index, steps, plan, configData) {
                 const toolResponse = await tool.exec_handler(toolArguments);
                 toolOutputs.push(functionCallOutput(output, toolResponse));
                 appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments, toolResponse));
-                status.success(`Tool completed: ${output.name}`);
+                renderToolCallSucceeded(output, toolResponse);
             } catch (error) {
                 const toolResponse = { error: error instanceof Error ? error.message : String(error) };
                 toolOutputs.push(functionCallOutput(output, toolResponse));
                 appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments ?? {}, toolResponse));
-                status.error(`Tool failed: ${output.name}: ${toolResponse.error}`);
+                renderToolCallFailed(output, toolResponse.error);
             }
         }
         saveData(configData);
