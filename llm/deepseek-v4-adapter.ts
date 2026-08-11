@@ -153,19 +153,25 @@ function repairJson(candidate: string): JsonObject | undefined {
   return tryParseObject(cleaned);
 }
 
+/** Mutable ledger of the strategy names attempted while resolving tool-call arguments. */
+type ParseDiagnostics = { readonly attempts: string[] };
+
 /**
  * Try to parse a JSON object from a string. Falls back to extracting JSON from
  * a fenced code block (```json ... ```), then to the first `{` to last `}`
  * span, and finally to repairing common malformations in the extracted
- * candidate. Returns undefined when none succeed.
+ * candidate. Returns undefined when none succeed. Records each attempted
+ * fallback strategy in `diagnostics` for debugging when all attempts fail.
  */
-function parseJsonObject(value: string): JsonObject | undefined {
+function parseJsonObjectWithDiagnostics(value: string, diagnostics: ParseDiagnostics): JsonObject | undefined {
   const direct = tryParseObject(value);
   if (direct !== undefined) return direct;
+
   // Fallback: extract JSON from a fenced code block (```json ... ```).
   let candidate: string | undefined;
   const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenced) {
+    diagnostics.attempts.push("fenced code block extraction");
     candidate = fenced[1].trim();
     const extracted = tryParseObject(candidate);
     if (extracted !== undefined) return extracted;
@@ -174,22 +180,35 @@ function parseJsonObject(value: string): JsonObject | undefined {
   const start = value.indexOf("{");
   const end = value.lastIndexOf("}");
   if (start !== -1 && end !== -1 && end > start) {
+    diagnostics.attempts.push("first-{ to last-} extraction");
     candidate = value.slice(start, end + 1).trim();
     const extracted = tryParseObject(candidate);
     if (extracted !== undefined) return extracted;
   }
   // Fallback: repair common malformations in the best candidate available.
   if (candidate === undefined) candidate = value.trim();
+  diagnostics.attempts.push("malformation repair");
   return repairJson(candidate);
+}
+
+function parseJsonObject(value: string): JsonObject | undefined {
+  return parseJsonObjectWithDiagnostics(value, { attempts: [] });
 }
 
 function parseArguments(value: string | undefined, name: string): JsonObject {
   if (value === undefined) {
     throw new LlmAdapterError(PROVIDER, "provider", `DeepSeek returned function call '${name}' without arguments.`);
   }
-  const parsed = parseJsonObject(value);
+  const diagnostics: ParseDiagnostics = { attempts: [] };
+  const parsed = parseJsonObjectWithDiagnostics(value, diagnostics);
   if (parsed === undefined) {
-    throw new LlmAdapterError(PROVIDER, "provider", `DeepSeek returned invalid JSON arguments for function call '${name}': ${value}`);
+    const attempts = diagnostics.attempts.length > 0 ? diagnostics.attempts.join(", ") : "direct JSON parse";
+    throw new LlmAdapterError(
+      PROVIDER,
+      "provider",
+      `DeepSeek returned invalid JSON arguments for function call '${name}'. ` +
+      `All parsing strategies failed (${attempts}). Raw arguments for debugging: ${value}`,
+    );
   }
   return parsed;
 }

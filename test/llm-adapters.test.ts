@@ -197,9 +197,22 @@ async function testDeepSeekJsonRepair(): Promise<void> {
     assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `repairing: ${raw}`);
   }
 
-  // Unrepairable input must still raise a provider error rather than crash.
-  const broken = deepSeekWithArguments("not json at all");
-  await expectAdapterError(() => broken.generate(request), "deepseek-v4", "provider", false);
+  // Unrepairable input must still raise a provider error (not crash) and surface
+  // the raw arguments plus the attempted strategies in the message for debugging.
+  const rawArguments = "not json at all";
+  const broken = deepSeekWithArguments(rawArguments);
+  await assert.rejects(() => broken.generate(request), (error: unknown) => {
+    assert.ok(error instanceof LlmAdapterError);
+    assert.equal(error.provider, "deepseek-v4");
+    assert.equal(error.code, "provider");
+    assert.equal(error.retryable, false);
+    assert.match(error.message, /invalid JSON arguments/);
+    assert.match(error.message, /weather/);
+    assert.match(error.message, /Raw arguments for debugging/);
+    assert.ok(error.message.includes(rawArguments), `error should include raw arguments: ${error.message}`);
+    assert.match(error.message, /All parsing strategies failed/);
+    return true;
+  });
 
   // Valid JSON must be parsed identically (no regression).
   const valid = await deepSeekWithArguments('{"city":"Oslo","temp":5}').generate(request);
