@@ -4,7 +4,14 @@
  *
  * This probe exercises the actual adapter parsing chain via an injected
  * fetcher, reproducing realistic Write-tool arguments, and reports which
- * patterns pass or fail.
+ * patterns pass or fail. Each repair strategy from the robust-JSON-repair plan
+ * is represented:
+ *   - brace matching (missing `{`/`}` balance)
+ *   - bracket matching (missing `[`/`]` balance)
+ *   - quote/violation tolerance (strip leading prose before the first `{`)
+ *   - trailing garbage removal (trim content after the last `}`)
+ *   - progressive truncation (truncate from the end and append closers)
+ *   - clean retry (retry once with a pure-JSON hint)
  */
 import assert from "node:assert/strict";
 import { DeepSeekV4Adapter, type DeepSeekFetch } from "../llm/deepseek-v4-adapter.js";
@@ -36,9 +43,31 @@ const cases: Case[] = [
     name: "valid JSON",
     raw: '{"path":"a.txt","content":"hello world"}',
   },
+  // Brace matching (plan step 1): missing closing braces appended by balance.
   {
     name: "missing closing brace (incomplete JSON)",
     raw: '{"path":"a.txt","content":"line1\\nline2"',
+  },
+  {
+    name: "missing closing brace (nested object)",
+    raw: '{"meta":{"a":"b"},"path":"a.txt"',
+  },
+  {
+    name: "embedded braces in string value (balance scan ignores string literals)",
+    raw: '{"content":"a}b}","path":"a.txt"',
+  },
+  // Bracket matching (plan step 2): missing closing brackets appended by balance.
+  {
+    name: "missing closing bracket (array)",
+    raw: '{"files":["a.txt","b.txt","c.txt"',
+  },
+  {
+    name: "missing closing bracket (nested arrays)",
+    raw: '{"matrix":[[1,2],[3,4]',
+  },
+  {
+    name: "missing closing bracket (array inside closed object)",
+    raw: '{"list":[1,2,3]}',
   },
   {
     name: "missing comma between properties",
@@ -68,6 +97,7 @@ const cases: Case[] = [
     name: "single-quoted keys/strings (already repaired)",
     raw: "{'path': 'a.txt', 'content': 'hi'}",
   },
+  // Quote/violation tolerance (plan step 3): leading prose before first `{`.
   {
     name: "prose wrapper with fenced json block",
     raw: 'Here is the result:\n```json\n{"path":"a.txt","content":"hi"}\n```',
@@ -77,8 +107,12 @@ const cases: Case[] = [
     raw: 'The file is: {"path":"a.txt","content":"hi"} Enjoy.',
   },
   {
+    name: "leading prose wrapping JSON object",
+    raw: 'Here are the contents: {"path":"a.txt","content":"hi"}',
+  },
+  {
     name: "missing closing brace with fenced block",
-    raw: 'Here:\\n```json\n{"path":"a.txt","content":"hi"',
+    raw: 'Here:\n```json\n{"path":"a.txt","content":"hi"',
   },
   {
     name: "missing closing brace with prose trailing",
@@ -130,6 +164,19 @@ const cases: Case[] = [
   {
     name: "nested object with trailing garbage",
     raw: '{"path":"a.txt","meta":{"x":1}} trailing',
+  },
+  // Progressive truncation (plan step 5): output truncated mid-value/string.
+  {
+    name: "truncated mid-string value",
+    raw: '{"path":"a.txt","content":"The file is at',
+  },
+  {
+    name: "truncated before a value",
+    raw: '{"path":"a.txt","temp":',
+  },
+  {
+    name: "truncated mid-array value",
+    raw: '{"items":["a","b","c',
   },
 ];
 

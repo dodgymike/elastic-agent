@@ -218,11 +218,68 @@ async function testDeepSeekJsonRepair(): Promise<void> {
     assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `repairing: ${raw}`);
   }
 
-  // Trailing garbage removal: prose/markup appended after the object's closing
-  // brace must be trimmed without corrupting the object, even when that garbage
-  // itself contains brace characters or the payload's string values embed
-  // braces. `outerObjectEnd` locates the real top-level closing brace rather
-  // than relying on `lastIndexOf("}")`.
+  // Brace matching (plan step 1): missing closing braces are appended by
+  // balance count. Values whose strings embed braces must not corrupt the scan.
+  const braceMatchingCases: Array<[string, Record<string, unknown>]> = [
+    // Missing a single top-level closing brace.
+    ['{"city":"Paris","temp":22', { city: "Paris", temp: 22 }],
+    // Missing both the nested and the top-level closing brace.
+    ['{"nested":{"a":"b"},"x":1', { nested: { a: "b" }, x: 1 }],
+    // Missing braces where a string value itself embeds a brace (balance scan
+    // must ignore braces inside string literals).
+    ['{"content":"a}b}","x":1', { content: "a}b}", x: 1 }],
+    // BOM prefix stripped before balancing.
+    ['\uFEFF{"city":"Paris","temp":22', { city: "Paris", temp: 22 }],
+  ];
+  for (const [raw, expected] of braceMatchingCases) {
+    const result = await deepSeekWithArguments(raw).generate(request);
+    assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `brace matching: ${raw}`);
+  }
+
+  // Bracket matching (plan step 2): missing closing brackets are appended by
+  // balance count, including nested arrays and arrays inside objects. The naive
+  // concatenation of all missing closers is also retried per kind so a trailing
+  // `]` before the final `}` parses.
+  const bracketMatchingCases: Array<[string, Record<string, unknown>]> = [
+    // Missing a closing `]` for the array (and the object `}`).
+    ['{"items":["a","b","c"', { items: ["a", "b", "c"] }],
+    // Missing only the closing `]` (object already closed).
+    ['{"list":[1,2,3]}', { list: [1, 2, 3] }],
+    // Nested arrays: missing inner and outer `]` plus the object `}`.
+    ['{"matrix":[[1,2],[3,4]', { matrix: [[1, 2], [3, 4]] }],
+    // Array inside object where the top-level object is closed but the array is
+    // missing its closing bracket.
+    ['{"files":["a.txt","b.txt"', { files: ["a.txt", "b.txt"] }],
+  ];
+  for (const [raw, expected] of bracketMatchingCases) {
+    const result = await deepSeekWithArguments(raw).generate(request);
+    assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `bracket matching: ${raw}`);
+  }
+
+  // Quote/violation tolerance (plan step 3): strip leading non-JSON text before
+  // the first `{` and trailing garbage after the matching `}`. The extraction
+  // uses the real top-level closing brace (outerObjectEnd) so embedded braces
+  // inside string values do not corrupt the span.
+  const quoteToleranceCases: Array<[string, Record<string, unknown>]> = [
+    // Leading prose only.
+    ["Sure, here: {\"city\":\"Paris\",\"temp\":22}", { city: "Paris", temp: 22 }],
+    // Leading prose plus trailing prose.
+    ["Here it is: {\"city\":\"Paris\"} Best regards.", { city: "Paris" }],
+    // Fenced code block with prose around it.
+    ["Result:\n```json\n{\"city\":\"Paris\",\"temp\":22}\n```", { city: "Paris", temp: 22 }],
+    // Leading prose wrapping object on its own line (no stray braces in prose).
+    ["The answer is\n{\"city\":\"Paris\",\"temp\":22}", { city: "Paris", temp: 22 }],
+  ];
+  for (const [raw, expected] of quoteToleranceCases) {
+    const result = await deepSeekWithArguments(raw).generate(request);
+    assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `quote tolerance: ${raw}`);
+  }
+
+  // Trailing garbage removal (plan step 4): prose/markup appended after the
+  // object's closing brace must be trimmed without corrupting the object, even
+  // when that garbage itself contains brace characters or the payload's string
+  // values embed braces. `outerObjectEnd` locates the real top-level closing
+  // brace rather than relying on `lastIndexOf("}")`.
   const trailingGarbageCases: Array<[string, Record<string, unknown>]> = [
     // Simple trailing comment.
     ['{"city":"Paris"} // Enjoy', { city: "Paris" }],
@@ -240,10 +297,10 @@ async function testDeepSeekJsonRepair(): Promise<void> {
     assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `trailing garbage: ${raw}`);
   }
 
-  // Progressive truncation: output truncated mid-way through a value/string
-  // cannot be repaired by simple brace balancing (the unterminated string
-  // swallows the balance scan). The adapter must walk backward, truncating at
-  // structural boundaries, re-completing delimiters, and recover the longest
+  // Progressive truncation (plan step 5): output truncated mid-way through a
+  // value/string cannot be repaired by simple brace balancing (the unterminated
+  // string swallows the balance scan). The adapter must walk backward, truncating
+  // at structural boundaries, re-completing delimiters, and recover the longest
   // valid prefix.
   const truncationCases: Array<[string, Record<string, unknown>]> = [
     // Truncated mid-string value: unterminated `content` string.
