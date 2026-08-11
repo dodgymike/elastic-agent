@@ -44,7 +44,7 @@ Before starting any task, consult Spec Keeper for goals, epics, tasks, dependenc
 
 ## Invocation pattern
 
-Use the `SpecKeeper` tool with project-scoped resource paths (e.g., `/tasks`, `/epics`, `/goals`, `/decisions`). The tool automatically resolves these to `/api/v1/projects/elastic-agent/<resource>` using the project slug and credentials from the config. Do NOT use obsolete root paths like `/goals` or `/task-queue` — use only project resources or documented absolute `/api/v1/...` routes.
+Use the `SpecKeeper` tool with project-scoped resource paths (e.g., `/tasks`, `/epics`, `/decisions`, `/notes`). The tool automatically resolves these to `/api/v1/projects/elastic-agent/<resource>` using the project slug and credentials from the config. Do NOT use obsolete root paths like `/goals` or `/task-queue` — use only supported project resources (agents, epics, tasks, reservations, counters, locks, import, export, events, notes, changes, decisions, chain-runs, jira-config, jira) or documented absolute `/api/v1/...` routes.
 
 ## Failure handling
 
