@@ -118,11 +118,105 @@ function tryParseObject(candidate: string): JsonObject | undefined {
 }
 
 /**
- * Best-effort repair of common malformations in LLM-produced JSON: trailing
- * commas, unquoted and single-quoted keys/strings, `undefined` and bare or
- * Python-style identifier values, and comments. Each repair is applied in
- * sequence with a parse attempt; the first that yields a JSON object wins.
- * Returns undefined when no repair succeeds.
+ * Count the net open-brace balance of `candidate` ({ count minus } count),
+ * ignoring braces that occur inside double-quoted string literals (including
+ * escaped characters). A positive result means closing braces are missing.
+ */
+function braceBalance(candidate: string): number {
+  let balance = 0;
+  let inString = false;
+  for (let i = 0; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (inString) {
+      if (ch === "\\") {
+        i++; // Skip the escaped character.
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      balance++;
+    } else if (ch === "}") {
+      balance--;
+    }
+  }
+  return balance;
+}
+
+/**
+ * Count the net open-bracket balance of `candidate` ([ count minus ] count),
+ * ignoring brackets that occur inside double-quoted string literals (including
+ * escaped characters). A positive result means closing brackets are missing.
+ */
+function bracketBalance(candidate: string): number {
+  let balance = 0;
+  let inString = false;
+  for (let i = 0; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (inString) {
+      if (ch === "\\") {
+        i++; // Skip the escaped character.
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "[") {
+      balance++;
+    } else if (ch === "]") {
+      balance--;
+    }
+  }
+  return balance;
+}
+
+/**
+ * Scan `candidate` forward from `openAt` (the index of an opening `{`) and
+ * return the index of the `}` that closes that top-level object, i.e. the
+ * first point where the brace depth (measured outside string literals) returns
+ * to zero. Braces embedded in double-quoted string values (and their escape
+ * sequences) are ignored, so values like `"a}b"` do not prematurely close the
+ * object. Returns -1 when the object is truncated (no matching closing brace),
+ * in which case the caller retains everything after `openAt` and completes the
+ * missing closers during repair.
+ */
+function outerObjectEnd(candidate: string, openAt: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = openAt; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (inString) {
+      if (ch === "\\") {
+        i++; // Skip the escaped character.
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1; // Truncated: the top-level object is never closed.
+}
+
+/**
+ * Best-effort repair of common malformations in LLM-produced JSON: incomplete
+ * JSON (missing closing braces/brackets), trailing commas, unquoted and
+ * single-quoted keys/strings, `undefined` and bare or Python-style identifier
+ * values, and comments. Each repair is applied in sequence with a parse
+ * attempt; the first that yields a JSON object wins. Returns undefined when no
+ * repair succeeds.
  */
 function repairJson(candidate: string): JsonObject | undefined {
   let cleaned = candidate.replace(/^\uFEFF/, "");
@@ -130,6 +224,30 @@ function repairJson(candidate: string): JsonObject | undefined {
   cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"\\])\/\/[^\n\r]*/g, "$1");
   let parsed = tryParseObject(cleaned);
   if (parsed !== undefined) return parsed;
+  // Complete missing closing braces/brackets by appending the net missing
+  // count for each delimiter kind. Delimiters inside string literals (for
+  // example content text) are ignored so embedded curly/square braces do not
+  // corrupt the balance.
+  const missingBraces = braceBalance(cleaned);
+  const missingBrackets = bracketBalance(cleaned);
+  if (missingBraces > 0 || missingBrackets > 0) {
+    // Close nested arrays/objects in a tentative reverse order so a trailing
+    // `]` before the final `}` in object-argument output parses.
+    const closers = `${"]".repeat(missingBrackets)}${"}".repeat(missingBraces)}`;
+    parsed = tryParseObject(cleaned + closers);
+    if (parsed !== undefined) return parsed;
+    // Fall back to closing each delimiter kind independently; this handles
+    // cases where the naive concatenation order is rejected but a simpler
+    // brace/bracket-only completion yields a parsable object.
+    if (missingBrackets > 0) {
+      parsed = tryParseObject(cleaned + "]".repeat(missingBrackets));
+      if (parsed !== undefined) return parsed;
+    }
+    if (missingBraces > 0) {
+      parsed = tryParseObject(cleaned + "}".repeat(missingBraces));
+      if (parsed !== undefined) return parsed;
+    }
+  }
   // Remove trailing commas before a closing bracket/brace.
   cleaned = cleaned.replace(/,\s*([}\]])/g, "$1");
   parsed = tryParseObject(cleaned);
@@ -158,10 +276,11 @@ type ParseDiagnostics = { readonly attempts: string[] };
 
 /**
  * Try to parse a JSON object from a string. Falls back to extracting JSON from
- * a fenced code block (```json ... ```), then to the first `{` to last `}`
- * span, and finally to repairing common malformations in the extracted
- * candidate. Returns undefined when none succeed. Records each attempted
- * fallback strategy in `diagnostics` for debugging when all attempts fail.
+ * a fenced code block (```json ... ```), then to the first `{` to the matching
+ * closing `}` span (stripping leading prose and trailing garbage), and finally
+ * to repairing common malformations of the best candidate. Returns undefined
+ * when none succeed. Records each attempted fallback strategy in
+ * `diagnostics` for debugging when all attempts fail.
  */
 function parseJsonObjectWithDiagnostics(value: string, diagnostics: ParseDiagnostics): JsonObject | undefined {
   const direct = tryParseObject(value);
@@ -176,14 +295,30 @@ function parseJsonObjectWithDiagnostics(value: string, diagnostics: ParseDiagnos
     const extracted = tryParseObject(candidate);
     if (extracted !== undefined) return extracted;
   }
-  // Fallback: extract JSON from the first `{` to the last `}` when the value is wrapped in prose.
+  // Fallback: strip leading non-JSON text before the first `{` and trailing
+  // garbage after the matching `}` when the value is wrapped in prose (or a
+  // model preamble). Locating the true closing brace with `outerObjectEnd`
+  // (rather than `lastIndexOf("}")`) keeps braces embedded in string values
+  // from corrupting the span and trims trailing prose even when it itself
+  // contains braces. When the object is truncated (no closing brace found),
+  // everything after the first `{` is taken and the missing closers are
+  // completed by the repair stage.
   const start = value.indexOf("{");
-  const end = value.lastIndexOf("}");
-  if (start !== -1 && end !== -1 && end > start) {
-    diagnostics.attempts.push("first-{ to last-} extraction");
-    candidate = value.slice(start, end + 1).trim();
+  if (start !== -1) {
+    const end = outerObjectEnd(value, start);
+    diagnostics.attempts.push("first-{ to matching-} extraction");
+    candidate = value.slice(start, end === -1 ? undefined : end + 1).trim();
     const extracted = tryParseObject(candidate);
     if (extracted !== undefined) return extracted;
+    // The stripped span may itself be malformed (missing closing
+    // braces/brackets, unescaped quotes, missing commas, unquoted keys, ...).
+    // Run the full repair on the stripped span so surrounding prose cannot
+    // pollute the repair (for example misbalancing brace/bracket counts or
+    // corrupting quote normalization). This extends quote/violation tolerance
+    // to prose-wrapped malformed output.
+    diagnostics.attempts.push("malformation repair (stripped span)");
+    const repaired = repairJson(candidate);
+    if (repaired !== undefined) return repaired;
   }
   // Fallback: repair common malformations in the best candidate available.
   if (candidate === undefined) candidate = value.trim();

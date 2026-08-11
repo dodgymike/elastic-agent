@@ -197,6 +197,28 @@ async function testDeepSeekJsonRepair(): Promise<void> {
     assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `repairing: ${raw}`);
   }
 
+  // Trailing garbage removal: prose/markup appended after the object's closing
+  // brace must be trimmed without corrupting the object, even when that garbage
+  // itself contains brace characters or the payload's string values embed
+  // braces. `outerObjectEnd` locates the real top-level closing brace rather
+  // than relying on `lastIndexOf("}")`.
+  const trailingGarbageCases: Array<[string, Record<string, unknown>]> = [
+    // Simple trailing comment.
+    ['{"city":"Paris"} // Enjoy', { city: "Paris" }],
+    // Trailing prose containing a stray closing brace (would break lastIndexOf).
+    ['{"city":"Paris"} done } more', { city: "Paris" }],
+    // Leading prose plus trailing prose.
+    ["Here is the result: {\"city\":\"Paris\"} Regards, Bob.", { city: "Paris" }],
+    // Trailing markup with braces after a value that itself contains a brace.
+    ['{"content":"a}b"} trailing } more', { content: "a}b" }],
+    // Nested object: trailing garbage must not strip the nested closing braces.
+    ['{"nested":{"a":"b"},"x":1} trailing', { nested: { a: "b" }, x: 1 }],
+  ];
+  for (const [raw, expected] of trailingGarbageCases) {
+    const result = await deepSeekWithArguments(raw).generate(request);
+    assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `trailing garbage: ${raw}`);
+  }
+
   // Unrepairable input must still raise a provider error (not crash) and surface
   // the raw arguments plus the attempted strategies in the message for debugging.
   const rawArguments = "not json at all";
