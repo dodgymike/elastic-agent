@@ -3,11 +3,15 @@
     "init-db": "node initializeDatabase.js"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1107.0",
     "chalk": "^4.1.2",
     "commander": "^13.1.0",
     "openai": "^6.49.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
     "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1"
   }
 }
