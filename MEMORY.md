@@ -1,5 +1,11 @@
 # Project Memory
 
+## Tool error trends
+
+- ERROR_TRENDS.md documents observed tool use error patterns and their resolution status.
+- Key patterns: Spec Keeper API route contract drift (resolved), Agent Bus connectivity (blocked), full TypeScript build failures (blocked), deleted-main2 lifecycle test (blocked), and missing DeepSeek API key (blocked).
+- The document tracks which tools currently work and which have known failures for handoff continuity.
+
 ## Tool-call terminal rendering
 
 - The tool-call terminal rendering lifecycle is intentionally scoped to the legacy `main2.js` executor.
@@ -17,4 +23,4 @@
 
 - Spec Keeper is the authoritative task/decision/handoff system for this project (`elastic-agent`).
 - Agent Bus is not currently configured because `AGENT_BUS_BASE_URL` is absent; this does not block the legacy renderer task.
-- Spec Keeper bookkeeping is currently blocked because no URL-safe `SPEC_KEEPER_PROJECT_SLUG` is configured; obtain the project slug before updating task state, decisions, or handoffs.
+- Spec Keeper bookkeeping is currently blocked because no URL-safe `SPEC_KEEPER_PROJECT_SLUG` is configured; obtain the project slug before updating task state, decisions, or handoffs. (This is from an earlier context when the project slug was not yet known; it is now resolved to `elastic-agent`.)
