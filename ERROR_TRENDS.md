@@ -82,7 +82,9 @@
 
 **Resolution:** None. Task is blocked until the credential is supplied through the approved secret manager or protected runtime environment.
 
-**Status:** ❌ Blocked.
+**Status:** ✅ **Recovered.** `DEEPSEEK_API_KEY` is now present in the runtime environment, so this blocker is cleared and the task's step 3 secret persistence can resume.
+
+**Note:** The value/format was not inspected; only the presence (non-empty) was confirmed. The value must still be persisted securely by the owning task.
 
 **Recurring risk:** Any provider whose API key is not in the environment will cause the runtime composition to fail when the adapter factory is constructed.
 
@@ -119,6 +121,21 @@
 
 **Status:** ✅ Resolved (through `npm ci` workaround).
 
+## Recovery Status (Step 2)
+
+Snapshot of whether previously failing tools/commands are working again, verified during the bootstrap's recovery-tracking pass:
+
+| Previously failing item | Was | Now | Verified by |
+|-------------------------|-----|-----|-------------|
+| SpecKeeper (project-scoped client) | ✅ Resolved | ✅ Still working | `GET /tasks` + `GET /api/v1/projects` returned 200 |
+| DeepSeek API key (`DEEPSEEK_API_KEY`) | ❌ Missing | ✅ **Recovered** | Non-empty env var present |
+| npm run build | ❌ Failing | ❌ Still failing | TS7006/TS2304/TS2353/TS2339 errors in main.ts + tool modules |
+| test/main2-tool-rendering | ❌ Failing | ❌ Still failing | ENOENT `open main2.js` |
+| Agent Bus (`AGENT_BUS_BASE_URL`) | ❌ Blocked | ❌ Still blocked | Env var still unset |
+| npm run test:llm-adapters | ✅ Passing (focused) | ✅ Still passing | `LLM adapter fixtures passed` |
+
+**Recovery summary:** Of the previously failing runtime dependencies, only the DeepSeek API key has recovered (it is now present in the environment). The full-build TypeScript failures, the deleted-main2 lifecycle test, and Agent Bus connectivity remain unresolved.
+
 ## Cross-Tool Pattern Summary
 
 1. **Route/API contract drift** — External API contracts (Spec Keeper) changed, and client tool assumptions lagged. Resolution required updating the client contract.
@@ -138,6 +155,7 @@
 | Git | ✅ Working | Log, status, diff, commit all functional |
 | Http / HttpRequest | ✅ Working | GET and mutating requests work |
 | AgentBus | ❌ Blocked | No base URL configured |
+| DeepSeek adapter | ✅ Working | DEEPSEEK_API_KEY now present in runtime env |
 
 ## Tools with Known Failures
 
@@ -147,4 +165,3 @@
 | AgentBus | Transport-level failures, no base URL | ❌ Blocked | Requires renewed invite + configured base URL |
 | npm run build | TS compilation failures in main.ts | ❌ Blocked | Legacy tool import paths need fixing |
 | test/main2-tool-rendering | References deleted main2.js | ❌ Blocked | Needs retain/migrate/retire decision |
-| DeepSeek adapter | DEEPSEEK_API_KEY missing | ❌ Blocked | Requires credential injection |
