@@ -219,6 +219,36 @@ async function testDeepSeekJsonRepair(): Promise<void> {
     assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `trailing garbage: ${raw}`);
   }
 
+  // Progressive truncation: output truncated mid-way through a value/string
+  // cannot be repaired by simple brace balancing (the unterminated string
+  // swallows the balance scan). The adapter must walk backward, truncating at
+  // structural boundaries, re-completing delimiters, and recover the longest
+  // valid prefix.
+  const truncationCases: Array<[string, Record<string, unknown>]> = [
+    // Truncated mid-string value: unterminated `content` string.
+    ['{"city":"Paris","content":"The file is at', { city: "Paris" }],
+    // Truncated before a value: `temp` key has no value.
+    ['{"city":"Paris","temp":', { city: "Paris" }],
+    // Truncated after `temp` key name.
+    ['{"city":"Paris","temp', { city: "Paris" }],
+    // Truncated inside a comma-separated list (would have had more fields).
+    ['{"city":"Paris","temp":22,', { city: "Paris", temp: 22 }],
+    // Truncated mid-write-content (realistic: content string cut off).
+    ['{"path":"a.txt","content":"line1\\nline2', { path: "a.txt" }],
+    // Truncated nested object: array of files cut off mid-list.
+    ['{"files":[{"path":"a.txt","content":"hi"},{"path":"b.txt","cont', { files: [{ path: "a.txt", content: "hi" }] }],
+    // Truncated mid-array value.
+    ['{"items":["a","b","c', { items: ["a", "b"] }],
+    // Truncation with a trailing comma after complete value.
+    ['{"path":"a.txt","content":"done",', { path: "a.txt", content: "done" }],
+    // Truncated multi-line content with embedded brace inside the string.
+    ['{"path":"src/app.ts","content":"export function foo() {\\n  return {', { path: "src/app.ts" }],
+  ];
+  for (const [raw, expected] of truncationCases) {
+    const result = await deepSeekWithArguments(raw).generate(request);
+    assert.deepEqual(result.message.toolCalls, [{ id: "call-r", name: "weather", arguments: expected }], `progressive truncation: ${raw}`);
+  }
+
   // Unrepairable input must still raise a provider error (not crash) and surface
   // the raw arguments plus the attempted strategies in the message for debugging.
   const rawArguments = "not json at all";

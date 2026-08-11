@@ -210,6 +210,58 @@ function outerObjectEnd(candidate: string, openAt: number): number {
   return -1; // Truncated: the top-level object is never closed.
 }
 
+/** True when `ch` is a structural JSON delimiter at which truncation is safe. */
+function isTruncationBoundary(ch: string): boolean {
+  return ch === "," || ch === ":" || ch === "{" || ch === "[" || ch === "}" || ch === "]" || ch === '"';
+}
+
+/** Append missing closing braces/brackets to `candidate` per balance counts. */
+function completeDelimiters(candidate: string): string {
+  const missingBraces = braceBalance(candidate);
+  const missingBrackets = bracketBalance(candidate);
+  if (missingBraces <= 0 && missingBrackets <= 0) return candidate;
+  // Close nested arrays/objects in tentative reverse order so a trailing `]`
+  // before the final `}` in object-argument output parses.
+  const closers = `${"]".repeat(missingBrackets)}${"}".repeat(missingBraces)}`;
+  return candidate + closers;
+}
+
+/**
+ * Progressive truncation repair: try truncating from the end at structural
+ * boundary characters (`,`, `:`, `{`, `[`, `}`, `]`, `"`) and re-completing the
+ * missing closing braces/brackets at each point. This recovers output whose
+ * trailing value/string was cut mid-way, where simple brace balancing fails
+ * because the unterminated string or value defers the parse. Returns the first
+ * truncated-and-completed object that parses, or undefined when no truncation
+ * succeeds.
+ */
+function progressiveTruncateRepair(candidate: string): JsonObject | undefined {
+  const start = candidate.indexOf("{");
+  if (start === -1) return undefined;
+  const minLength = start + 1; // Keep at least the opening `{`.
+  // Scan backward from the end; only positions at structural boundaries need
+  // testing. This limits the number of attempts to the count of delimiters
+  // rather than the full string length.
+  for (let i = candidate.length - 1; i >= minLength; i--) {
+    if (!isTruncationBoundary(candidate[i])) continue;
+    const truncated = candidate.slice(0, i).trim();
+    if (truncated.length < minLength) continue;
+    // A truncation immediately after a structural delimiter may leave a
+    // dangling `,` at the end (for example cutting mid-value). Try both the
+    // raw truncated fragment and the fragment with a trailing comma removed.
+    const completedFromTruncated = completeDelimiters(truncated);
+    let parsed = tryParseObject(completedFromTruncated);
+    if (parsed !== undefined) return parsed;
+    const withoutTrailingComma = truncated.replace(/,\s*$/, "");
+    if (withoutTrailingComma.length >= minLength) {
+      const completedWithoutComma = completeDelimiters(withoutTrailingComma);
+      parsed = tryParseObject(completedWithoutComma);
+      if (parsed !== undefined) return parsed;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Best-effort repair of common malformations in LLM-produced JSON: incomplete
  * JSON (missing closing braces/brackets), trailing commas, unquoted and
@@ -248,6 +300,12 @@ function repairJson(candidate: string): JsonObject | undefined {
       if (parsed !== undefined) return parsed;
     }
   }
+  // Progressive truncation: when the tail is malformed (e.g. an unterminated
+  // string from truncated output), walk backward from the end re-completing
+  // delimiters at each structural boundary. This recovers the longest valid
+  // prefix of the object.
+  parsed = progressiveTruncateRepair(cleaned);
+  if (parsed !== undefined) return parsed;
   // Remove trailing commas before a closing bracket/brace.
   cleaned = cleaned.replace(/,\s*([}\]])/g, "$1");
   parsed = tryParseObject(cleaned);
