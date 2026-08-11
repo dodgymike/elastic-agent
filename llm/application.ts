@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { LlmAdapter } from "./adapter-contract.js";
-import { LlmAdapterRegistry, type AdapterConfigurationInput, type AdapterEnvironment } from "./adapter-registry.js";
+import { LlmAdapterRegistry, resolveAdapterConfiguration, type AdapterConfigurationInput, type AdapterEnvironment } from "./adapter-registry.js";
 import { bedrockClaudeAdapterFactory } from "./bedrock-claude-adapter.js";
 import { deepSeekV4AdapterFactory } from "./deepseek-v4-adapter.js";
+import { resolveModelConfiguration, type ModelConfiguration } from "./model-defaults.js";
 import { openAiAdapterFactory } from "./openai-adapter.js";
 
 /** Runtime settings used to load non-secret provider selection and compose adapters. */
@@ -41,6 +42,17 @@ export function createRuntimeLlmRegistry(): LlmAdapterRegistry {
     bedrockClaudeAdapterFactory,
     deepSeekV4AdapterFactory,
   ]);
+}
+
+/**
+ * Resolve the selected provider's default model without constructing an
+ * adapter. Each built-in provider has an explicit default and may be
+ * overridden only through its own model environment variable.
+ */
+export function resolveRuntimeLlmModel(options: RuntimeLlmOptions = {}): ModelConfiguration {
+  const environment = options.environment ?? loadRuntimeEnvironment(options.envFile);
+  const configuration = resolveAdapterConfiguration(options.configuration, environment);
+  return resolveModelConfiguration(configuration.provider, environment);
 }
 
 /**
