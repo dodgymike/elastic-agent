@@ -210,7 +210,7 @@ function summarizeResponse(response) {
     for (const output of response.output ?? []) {
         if (output.type === "function_call") {
             let args = output.arguments ?? ""; try { args = JSON.stringify(JSON.parse(args)); } catch { /* use raw arguments */ }
-            summaries.push(`Tool call: ${output.name}${args ? ` ${truncate(args, 160)}` : ""}`);
+            // summaries.push(`Tool call: ${output.name}${args ? ` ${truncate(args, 160)}` : ""}`);
         } else if (output.type === "message") {
             const text = (output.content ?? []).filter((item) => item.type === "output_text" || item.type === "text").map((item) => item.text).filter(Boolean).join(" ");
             if (text) summaries.push(`Text response: ${truncate(text)}`);
