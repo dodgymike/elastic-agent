@@ -130,6 +130,13 @@ function parseJsonObject(value: string): JsonObject | undefined {
     const extracted = tryParse(fenced[1].trim());
     if (extracted !== undefined) return extracted;
   }
+  // Fallback: extract JSON from the first `{` to the last `}` when the value is wrapped in prose.
+  const start = value.indexOf("{");
+  const end = value.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    const extracted = tryParse(value.slice(start, end + 1).trim());
+    if (extracted !== undefined) return extracted;
+  }
   return undefined;
 }
 
