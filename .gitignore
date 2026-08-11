@@ -3,5 +3,7 @@ data.json
 agent-bus-invite-*.json
 spec-keeper-enrolment.json
 
+node_modules/
+
 .env
 dist/
