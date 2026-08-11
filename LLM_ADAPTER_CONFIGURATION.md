@@ -201,3 +201,17 @@ if (call) {
 - Catch `LlmAdapterError` to distinguish `configuration`, `authentication`, `invalid_request`, `rate_limited`, `unavailable`, and other `provider` errors. Only `rate_limited` and `unavailable` errors are marked retryable.
 - Pass an `AbortSignal` through `GenerateRequest.signal` to cancel a provider request.
 - Set provider model IDs deliberately per environment. `LLM_PROVIDER` chooses an adapter, not a default model.
+
+## Runtime startup
+
+The application composition in `llm/application.ts` registers the DeepSeek V4 factory and resolves `LLM_PROVIDER` only after loading the runtime environment. The launch command also asks Node to load `.env` when it is present; the composition repeats this safely for embedded use. Existing process environment values (including values injected by a secret manager) take precedence.
+
+```sh
+# Supply these through the runtime environment or secret manager, not source control.
+export LLM_PROVIDER=deepseek-v4
+export DEEPSEEK_API_KEY="..."
+export DEEPSEEK_MODEL=deepseek-chat # optional; this is the launch default
+npm start -- "Reply with the selected provider and model."
+```
+
+`.env` and build output are ignored by Git. A successful launch constructs only the registered `deepseek-v4` adapter and sends the prompt with `DEEPSEEK_MODEL` (or `deepseek-chat`) to DeepSeek's Chat Completions API.

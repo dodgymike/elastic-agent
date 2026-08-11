@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { LlmAdapterError, type GenerateRequest, type LlmAdapter } from "../llm/adapter-contract.js";
 import { LlmAdapterRegistry, resolveAdapterConfiguration } from "../llm/adapter-registry.js";
+import { createRuntimeLlmAdapter, createRuntimeLlmRegistry, loadRuntimeEnvironment } from "../llm/application.js";
 import { OpenAiAdapter } from "../llm/openai-adapter.js";
 import { BedrockClaudeAdapter } from "../llm/bedrock-claude-adapter.js";
 import { DeepSeekV4Adapter } from "../llm/deepseek-v4-adapter.js";
@@ -52,6 +56,29 @@ async function testRegistry(): Promise<void> {
   assert.ok(Object.isFrozen(factoryOptions));
   await assert.rejects(() => registry.create({ provider: "missing" }), /No LLM adapter factory/);
   assert.throws(() => registry.register({ provider: "MOCK", create: () => adapter }), /already registered/);
+}
+
+async function testRuntimeComposition(): Promise<void> {
+  assert.deepEqual(createRuntimeLlmRegistry().providers(), ["deepseek-v4"]);
+
+  const directory = mkdtempSync(join(tmpdir(), "elastic-agent-runtime-"));
+  const filename = join(directory, ".env");
+  const originalProvider = process.env.LLM_PROVIDER;
+  const originalKey = process.env.DEEPSEEK_API_KEY;
+  try {
+    delete process.env.LLM_PROVIDER;
+    delete process.env.DEEPSEEK_API_KEY;
+    writeFileSync(filename, "LLM_PROVIDER=deepseek-v4\nDEEPSEEK_API_KEY=test-runtime-key\n", { mode: 0o600 });
+    const environment = loadRuntimeEnvironment(filename);
+    assert.equal(environment.LLM_PROVIDER, "deepseek-v4");
+    assert.equal((await createRuntimeLlmAdapter({ environment })).provider, "deepseek-v4");
+  } finally {
+    if (originalProvider === undefined) delete process.env.LLM_PROVIDER;
+    else process.env.LLM_PROVIDER = originalProvider;
+    if (originalKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = originalKey;
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 async function testOpenAi(): Promise<void> {
@@ -143,6 +170,7 @@ async function testDeepSeek(): Promise<void> {
 
 (async () => {
   await testRegistry();
+  await testRuntimeComposition();
   await testOpenAi();
   await testBedrock();
   await testDeepSeek();
