@@ -59,7 +59,7 @@ async function testRegistry(): Promise<void> {
 }
 
 async function testRuntimeComposition(): Promise<void> {
-  assert.deepEqual(createRuntimeLlmRegistry().providers(), ["deepseek-v4"]);
+  assert.deepEqual(createRuntimeLlmRegistry().providers(), ["bedrock-claude", "deepseek-v4", "openai"]);
 
   const directory = mkdtempSync(join(tmpdir(), "elastic-agent-runtime-"));
   const filename = join(directory, ".env");
