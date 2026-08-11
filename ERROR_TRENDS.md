@@ -121,6 +121,40 @@
 
 **Status:** ✅ Resolved (through `npm ci` workaround).
 
+### 8. DeepSeek Adapter Invalid Tool-Call JSON Arguments
+
+**Pattern:** DeepSeek (OpenAI-compatible Chat Completions) returns `function.arguments` strings for tool calls (e.g. the `Write` tool) that are malformed, so `JSON.parse` fails. Observed malformations span several families:
+
+- **Missing closing braces/brackets** — truncated or incompletely closed objects/arrays.
+- **Leading non-JSON prose / fenced code blocks** — the model wraps JSON in prose or ```json fences.
+- **Trailing garbage / comments** — content after the final `}` that must be trimmed.
+- **Truncated mid-string or mid-value output** — the tail is cut off inside a value.
+- **Quoting/typing violations** — unquoted or single-quoted keys/strings, trailing commas, `undefined`/Python-style `True`/`False`/`None` values, comments, unescaped inner quotes.
+
+**Observed instances:** Realistic `Write` arguments observed while running the adapter against DeepSeek. The failure surfaced as the provider error `DeepSeek returned invalid JSON arguments for function call '<name>'. All parsing strategies failed (...)`. Verified with the injected-fetcher probe in `test/parse-failure-probe.ts` and the mode-driven harness in `test/call-adapter.ts`.
+
+**Root cause:** LLM generation is not guaranteed to emit schema-perfect JSON; models may wrap, truncate, or loosely quote tool-call argument output.
+
+**Resolution:** Implemented a layered, best-effort repair chain in `llm/deepseek-v4-adapter.ts` (`repairJson` / `parseJsonObjectWithDiagnostics` / `diagnoseJsonObjectParse`) that, in order:
+1. Parses directly, extracting JSON from a ```json fence when needed;
+2. Strips leading prose before the first `{` and trailing garbage after the matching `}` (`outerObjectEnd`, which ignores braces inside string literals);
+3. Balances and appends missing closing braces/brackets (`braceBalance`/`bracketBalance`, also string-aware);
+4. Performs progressive truncation: walks backward from the end at structural boundaries, re-completing delimiters at each point to recover the longest valid prefix;
+5. Repairs trailing commas, unquoted keys, single-quoted strings, comments, and Python/JS bare values.
+
+When exhaustive repair still fails, `generate()` retries the API call **once** with a trailing pure-JSON hint (`JSON_RETRY_HINT`) via `buildRetryPayload`, then surfaces the diagnostic. Enhanced diagnostics are exposed through `diagnoseJsonObjectParse` and the `parse-failure-probe.ts` runner.
+
+Deliverables and commits (task plan steps 14–17):
+- `llm/deepseek-v4-adapter.ts` — main repair logic (commits `a593441` → `8e1458f`)
+- `test/call-adapter.ts` — mode-driven harness calling the adapter
+- `test/parse-failure-probe.ts` — per-pattern diagnostics and repair-strategy coverage (commit `44e11ef`)
+- `test/llm-adapters.test.ts` — test coverage
+- `ERROR_TRENDS.md` — this documentation
+
+**Status:** ✅ Resolved. `npm run test:llm-adapters` passes (focused) and the probe reports PASS for the full battery of repair patterns (brace, bracket, quote tolerance, trailing-garbage removal, progressive truncation, clean retry, and the expected-fail array case).
+
+**Recurring risk:** New malformation families (for example deeply mixed quote styles or truncated string escapes across a truncation boundary) may not be covered; if a new pattern fails, add a probe case and extend `repairJson` rather than special-casing callers.
+
 ## Recovery Status (Step 2)
 
 Snapshot of whether previously failing tools/commands are working again, verified during the bootstrap's recovery-tracking pass:
@@ -133,8 +167,9 @@ Snapshot of whether previously failing tools/commands are working again, verifie
 | test/main2-tool-rendering | ❌ Failing | ❌ Still failing | ENOENT `open main2.js` |
 | Agent Bus (`AGENT_BUS_BASE_URL`) | ❌ Blocked | ❌ Still blocked | Env var still unset |
 | npm run test:llm-adapters | ✅ Passing (focused) | ✅ Still passing | `LLM adapter fixtures passed` |
+| DeepSeek tool-call JSON argument parsing | ⚠️ Brittle (single fallbacks) | ✅ **Repaired** | Layered repair chain + retry landing; parse-failure probe passes each repair family |
 
-**Recovery summary:** Of the previously failing runtime dependencies, only the DeepSeek API key has recovered (it is now present in the environment). The full-build TypeScript failures, the deleted-main2 lifecycle test, and Agent Bus connectivity remain unresolved.
+**Recovery summary:** Of the previously failing runtime dependencies, the DeepSeek API key has recovered (it is now present in the environment) and the DeepSeek tool-call JSON argument parsing has been hardened from a set of single fallbacks into a layered repair chain with a clean-retry fallback. The full-build TypeScript failures, the deleted-main2 lifecycle test, and Agent Bus connectivity remain unresolved.
 
 ## Cross-Tool Pattern Summary
 
@@ -142,6 +177,7 @@ Snapshot of whether previously failing tools/commands are working again, verifie
 2. **Blocked by missing external resources** — Agent Bus endpoint unreachable, DeepSeek API key unavailable. These block tasks but are resolvable once external prerequisites are met.
 3. **Legacy code conflicting with new architecture** — main2.js/main.ts/chooser relocation left the working tree in a state that blocked subsequent work until a compatibility layer was built.
 4. **Build verification gaps** — Full `npm run build` failures mask that individual focused compilation checks pass. The team should fix tsconfig and tool import paths to enable full verification.
+5. **LLM output is not schema-guaranteed** — Provider tool-call argument strings routinely violate JSON strictness (prose wrapping, truncation, loose quoting). The robust fix is a layered, best-effort repair chain plus a single clean-retry, verified by a pattern-driven probe, rather than a single fallback or a hard fail.
 
 ## Tools Currently Working
 
@@ -155,7 +191,7 @@ Snapshot of whether previously failing tools/commands are working again, verifie
 | Git | ✅ Working | Log, status, diff, commit all functional |
 | Http / HttpRequest | ✅ Working | GET and mutating requests work |
 | AgentBus | ❌ Blocked | No base URL configured |
-| DeepSeek adapter | ✅ Working | DEEPSEEK_API_KEY now present in runtime env |
+| DeepSeek adapter | ✅ Working | DEEPSEEK_API_KEY now present in runtime env; JSON argument repair chain verified |
 
 ## Tools with Known Failures
 
