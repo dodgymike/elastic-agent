@@ -2,6 +2,27 @@
 
 **Scope:** Records observed patterns of tool use errors across the bootstrap agent's operational history. This complements ERROR_HANDLING.md (contract) by documenting actual observed failures, their root causes, resolution status, and recurring patterns.
 
+## Error Recovery Principle: Try a Different Approach Rather Than Repeating the Same Method
+
+When a task fails, do not repeat the identical failing method. Analyse why it failed, then change the approach and re-test. This section records the concrete instances where this principle was applied (and one where ignoring it caused wasted effort).
+
+**Observed instances that succeeded by switching approach:**
+
+1. **DeepSeek tool-call JSON argument repair (task `43b3c126`).** Repeated failures were caused by a small set of single, brittle fallbacks in the DeepSeek adapter that could not repair realistic `Write` arguments (large multi-line content with embedded quotes/braces, truncation, prose wrapping, loose quoting). Rather than adding more isolated one-off fallbacks (the same failing method that kept breaking), the approach changed to a **layered, best-effort repair chain** plus a single clean retry with a pure-JSON hint. This different approach succeeded and is fully verified (33/33 probe cases passing). Lesson: when a class of inputs keeps defeating incremental patches to one code path, replace the path's strategy rather than patching it again.
+
+2. **Stale-blocker reconciliation in `select-deepseek-adapter-configuration`.** The task sat in `blocked` status after 07:05 with a note claiming `DEEPSEEK_API_KEY` was absent, even though the key had recovered by 09:56 and was recorded as present. The repeated-attempt trap predicted that each revisit would re-report the same cleared blocker. The different approach was to **verify whether a recorded blocker is still live before re-executing**; a cleared blocker unblocks the task rather than being re-reported. This reconciled the task to `in_progress` and prevented futile repeated attempts. Lesson: before resuming a "failed" or "blocked" step, re-check the actual blocker state instead of trusting a stale note.
+
+3. **Truncation hypothesis investigation (task `1d78a8a9`).** A plan proposed fixing the DeepSeek invalid-JSON error by chunking stdout output for large Write calls. Rather than proceeding with that (incorrect) premise, the different approach was to **investigate the root cause against the code first**: tool-call arguments flow directly from the DeepSeek API response and never pass through stdout, so the truncation-to-stdout fix could not work. The plan was discarded and the work consolidated under the correct root cause (task `43b3c126`). Lesson: before committing to a fix, validate its causal hypothesis; if it is wrong, change approach rather than implementing a fix that cannot address the reported failure.
+
+**When is it appropriate to change approach?**
+
+- After a method has failed on the same task/input more than once with the same result.
+- When the current approach's underlying assumption/causal hypothesis has been shown to be incorrect.
+- When a recorded blocker no longer exists (verify it is live first).
+- When an approach can only be rescued by an unbounded number of one-off special cases (the pattern of brittle single fallbacks that the layered repair chain replaced).
+
+**What not to do:** silently start unrelated work, re-report a cleared blocker, or apply the same failing method a third time hoping for a different outcome.
+
 ## Observed Error Categories
 
 ### 1. Spec Keeper API Route Contract Errors
@@ -178,6 +199,7 @@ Snapshot of whether previously failing tools/commands are working again, verifie
 3. **Legacy code conflicting with new architecture** — main2.js/main.ts/chooser relocation left the working tree in a state that blocked subsequent work until a compatibility layer was built.
 4. **Build verification gaps** — Full `npm run build` failures mask that individual focused compilation checks pass. The team should fix tsconfig and tool import paths to enable full verification.
 5. **LLM output is not schema-guaranteed** — Provider tool-call argument strings routinely violate JSON strictness (prose wrapping, truncation, loose quoting). The robust fix is a layered, best-effort repair chain plus a single clean-retry, verified by a pattern-driven probe, rather than a single fallback or a hard fail.
+6. **Recovery requires changing approach, not repeating it** — Repeated application of the same failing method is the recurring cause of wasted effort. Re-verify the blocker/root cause is live, then adopt a different strategy (see the Error Recovery Principle section above).
 
 ## Tools Currently Working
 
@@ -185,7 +207,7 @@ Snapshot of whether previously failing tools/commands are working again, verifie
 |------|--------|-------|
 | SpecKeeper | ✅ Working | Project-scoped routes resolve correctly; auth via secret store works |
 | Read | ✅ Working | Returns correct content + hash |
-| Write | ✅ Working | Writes and validates |
+| Write | ✅ Working | Writes and validates; content is chunked in 64 KiB writes |
 | ListDirectory | ✅ Working | Returns file/directory listings |
 | ExecuteCommand | ✅ Working | Returns exitCode/stdout/stderr |
 | Git | ✅ Working | Log, status, diff, commit all functional |
