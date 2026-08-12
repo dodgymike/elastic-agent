@@ -288,6 +288,9 @@ function captureExecutionFeedback(configData, response, stepIndex) {
     else {
         entry.validationError = parsed.reason;
         entry.rawResponse = rawResponse;
+        // Execution-plan step 1: explicitly log the parsing error so it is
+        // visible before any prompt amendment or retry is attempted.
+        status.error(`Step ${stepIndex + 1} response was not valid JSON: ${parsed.reason}`);
     }
     configData.executionFeedback.push(entry);
     return entry;
