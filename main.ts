@@ -230,10 +230,10 @@ function renderToolCallPending(toolCall) {
     status.tool(`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`);
 }
 function renderToolCallSucceeded(toolCall, result) {
-    status.success(`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`);
+    status.success(`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`, toolChildIndent);
 }
 function renderToolCallFailed(toolCall, error) {
-    status.error(`Failed: ${toolCall.name}: ${error}`);
+    status.error(`Failed: ${toolCall.name}: ${error}`, toolChildIndent);
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
 /**
@@ -273,7 +273,7 @@ function usageSummary(usage) { const total = tokenCount(usage?.total_tokens); co
 function totalUsage(tokenUsage) {
     return tokenUsage.reduce((sum, usage) => ({ total: sum.total + tokenCount(usage.total_tokens), cached: sum.cached + tokenCount(usage.cached_tokens), totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache) }), { total: 0, cached: 0, totalMinusCache: 0 });
 }
-class CompatibleResponseWrapper { constructor(response) { this.response = response; } print() { status.response(summarizeResponse(this.response)); } }
+class CompatibleResponseWrapper { constructor(response) { this.response = response; } print(prefix = "") { status.response(summarizeResponse(this.response), prefix); } }
 function writeFileAtomically(filename, content) {
     const directory = dirname(filename);
     const temporaryFilename = join(directory, `.${basename(filename)}.${process.pid}.${randomUUID()}.tmp`);
@@ -594,7 +594,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
         }
         const response = await client.create(request);
-        new CompatibleResponseWrapper(response).print();
+        new CompatibleResponseWrapper(response).print(toolChildIndent);
         recordUsage(configData, response);
         previousResponseId = response.id;
         toolOutputs = [];
@@ -630,7 +630,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
                 status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`);
                 const retryResponse = await client.create({ input: configData.retryPrompt });
-                new CompatibleResponseWrapper(retryResponse).print();
+                new CompatibleResponseWrapper(retryResponse).print(toolChildIndent);
                 recordUsage(configData, retryResponse);
                 saveData(configData);
                 if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
