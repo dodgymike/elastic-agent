@@ -479,6 +479,15 @@ async function executePlanStep(step, index, steps, plan, configData) {
             const feedbackEntry = captureExecutionFeedback(configData, response, index);
             reportExecutionFeedback(feedbackEntry);
             saveData(configData);
+            // Execution-plan step 2: when the execution-feedback response is
+            // not valid JSON, append the parsing error to the step prompt so
+            // the retry request (step 3) tells the model exactly what went wrong.
+            if (!feedbackEntry.valid) {
+                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat });
+                configData.retryPrompt =
+                    `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
+                    `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
+            }
             status.success(`Step ${index + 1}/${steps.length} completed.`);
             return feedbackEntry;
         }
