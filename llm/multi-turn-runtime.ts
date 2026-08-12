@@ -8,6 +8,15 @@ import {
   type ToolDefinition,
   type ToolResultMessage,
 } from "./adapter-contract.js";
+import {
+  appendLlmLog,
+  formatPrompt,
+  formatResponse,
+  nowIso,
+  REQUEST_TYPE_INITIAL,
+  REQUEST_TYPE_TOOL_CONTINUATION,
+  type LlmLogRecord,
+} from "./llm-log.js";
 
 /** OpenAI-Responses-shaped subset consumed by the legacy main.ts executor. */
 export interface CompatibleResponse {
@@ -98,9 +107,20 @@ export class MultiTurnLlmRuntime {
       return { role: "tool", toolCallId: result.call_id, content, isError: Boolean(content && typeof content === "object" && !Array.isArray(content) && "error" in content) };
     }) : [];
     const messages = prior ? [...prior.messages, ...continuation] : [textMessage("user", request.input as string)];
+    const requestType = prior ? REQUEST_TYPE_TOOL_CONTINUATION : REQUEST_TYPE_INITIAL;
     const generated = await this.adapter.generate({ model: this.model, messages, tools: request.tools });
     const id = `compat-${++this.nextResponseId}`;
     this.responseStates.set(id, { messages: Object.freeze([...messages, generated.message]), toolCalls: new Map((generated.message.toolCalls ?? []).map((call) => [call.id, call.name])) });
+    const record: LlmLogRecord = {
+      timestamp: nowIso(),
+      requestType,
+      model: this.model,
+      prompt: formatPrompt(messages),
+      response: formatResponse(generated.message),
+      usage: generated.usage,
+      responseId: id,
+    };
+    appendLlmLog(record);
     return { id, output: outputOf(generated.message), usage: usageOf(generated) };
   }
 }

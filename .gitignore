@@ -16,3 +16,6 @@ dist/
 .history_tmp_mike_2
 data/
 spec-server-setup.md
+
+# Generated runtime LLM prompt/response log; keep out of the repository.
+llm.log
