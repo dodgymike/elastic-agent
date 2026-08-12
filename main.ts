@@ -594,7 +594,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
         }
         const response = await client.create(request);
-        new CompatibleResponseWrapper(response).print(toolChildIndent);
+        new CompatibleResponseWrapper(response).print(previousResponseId ? toolChildIndent : "");
         recordUsage(configData, response);
         previousResponseId = response.id;
         toolOutputs = [];
@@ -630,7 +630,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
                 status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`);
                 const retryResponse = await client.create({ input: configData.retryPrompt });
-                new CompatibleResponseWrapper(retryResponse).print(toolChildIndent);
+                new CompatibleResponseWrapper(retryResponse).print();
                 recordUsage(configData, retryResponse);
                 saveData(configData);
                 if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
