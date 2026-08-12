@@ -1,0 +1,22 @@
+
+After you have finished this step and received outputs for every tool call, report the result and include exactly one machine-readable execution-feedback block. Do not emit this block while tool calls are still needed. Use this exact fenced JSON format:
+```json
+{
+  "stepStatus": "completed | partial | blocked | failed",
+  "summary": "concise outcome of the current step",
+  "findings": ["important finding or blocker"],
+  "suggestedStepUpdate": null,
+  "suggestedPlanUpdates": [],
+  "replanRequired": false,
+  "replanReason": null
+}
+```
+
+Field requirements:
+- stepStatus must be one of completed, partial, blocked, or failed.
+- summary must be a string.
+- findings must be an array of strings; use [] when there are none.
+- suggestedStepUpdate must be null when no local change is needed, otherwise a concise string describing the change to this step.
+- suggestedPlanUpdates must be an array; each item must be an object with "step" (the remaining step number) and "update" (a concise replacement or change). Use [] when there are none.
+- replanRequired must be a boolean. Set it to true only when the remaining plan should be replaced rather than updated incrementally.
+- replanReason must be null when replanRequired is false, otherwise a concise string explaining why replanning is needed.

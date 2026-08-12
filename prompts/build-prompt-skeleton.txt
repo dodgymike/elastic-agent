@@ -1,0 +1,10 @@
+${claudeInstructions}
+
+Recent command line prompts (oldest to newest; last ${historyLimit}):
+${promptHistory}
+
+Recent tool call TLDRs (oldest to newest; last ${historyLimit}):
+${toolHistory}
+
+Current command line prompt:
+${commandLinePrompt}

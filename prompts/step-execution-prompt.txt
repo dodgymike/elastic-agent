@@ -1,0 +1,8 @@
+${claudeInstructions}
+
+Execution plan:
+${plan}
+
+You are executing step ${index + 1} of ${steps.length}: ${step}
+Carry out only this step. Use tools when needed, report the result, and do not begin another plan step.
+${executionFeedbackFormat}

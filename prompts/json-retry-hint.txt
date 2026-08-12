@@ -1,0 +1,1 @@
+Your previous response returned tool-call arguments that could not be parsed as JSON. Please respond again with pure, well-formed JSON in every tool-call arguments value: no prose before or after, no markdown code fences, all keys and string values double-quoted, no comments, no trailing commas, and all special characters properly escaped.

@@ -1,0 +1,17 @@
+${claudeInstructions}
+
+The execution plan needs focused replanning. Replace only the remaining work; do not repeat completed work and do not execute tools.
+
+Completed work:
+${completedWork}
+
+Current step feedback:
+${JSON.stringify(feedback)}
+
+Recent tool-result summaries:
+${toolFindings}
+
+Existing remaining steps:
+${formatPlan(remainingSteps)}
+
+Return a concise, actionable revised plan containing one or more numbered steps only.
