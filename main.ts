@@ -3,6 +3,7 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { extractPlanJson, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain } from "./worktree.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -50,6 +51,13 @@ const historyLimit = 10;
 const maxReplanAttempts = 3;
 const maxReviewAttempts = 3;
 const maxRevisedPlanSteps = 50;
+// Execution worktree: plan steps stage their changes in a dedicated worktree
+// (git add --all) and never commit. The worktree is kept alive across review
+// attempts so the review step can inspect the staged changes before committing.
+const executionWorktreeBranch = "review-worktree";
+const mainCwd = process.cwd();
+let executionWorktreePath: string | null = null;
+let inExecutionPhase = false;
 // Prompts are loaded from external files under /elastic-agent/prompts/
 // (relative to the process working directory, which is the repository root).
 const planningSuffix = readFileSync("prompts/planning-suffix.txt", "utf-8");
@@ -129,7 +137,14 @@ const tools = [
                 paths: { type: "array", items: { type: "string" } }, all: { type: "boolean" }, message: { type: "string" },
             }, required: ["action"],
         },
-        exec_handler: (options) => Git(options),
+        exec_handler: (options) => {
+            // Execution steps stage changes in the worktree and never commit;
+            // committing is performed only by the review step when it is happy.
+            if (options.action === "commit" && inExecutionPhase) {
+                return Promise.resolve({ error: "The Git tool cannot commit during the execution phase. Changes are staged in the execution worktree; only the review step commits when it is satisfied." });
+            }
+            return Git(options);
+        },
     },
     {
         type: "function", name: "AgentBus",
@@ -210,7 +225,6 @@ function summarizeResponse(response) {
     for (const output of response.output ?? []) {
         if (output.type === "function_call") {
             let args = output.arguments ?? ""; try { args = JSON.stringify(JSON.parse(args)); } catch { /* use raw arguments */ }
-            // summaries.push(`Tool call: ${output.name}${args ? ` ${truncate(args, 160)}` : ""}`);
         } else if (output.type === "message") {
             const text = (output.content ?? []).filter((item) => item.type === "output_text" || item.type === "text").map((item) => item.text).filter(Boolean).join(" ");
             if (text) summaries.push(`Text response: ${truncate(text)}`);
@@ -323,6 +337,16 @@ function formatLearnings(learnings) {
     return learnings.map((learning, index) => `${index + 1}. ${learning}`).join("\n");
 }
 /**
+ * Build a concise summary of a happy review for use in the review commit message.
+ * When the review carried learnings, those are used; otherwise the generic
+ * "review passed" summary is returned.
+ */
+function summarizeReview(review: { passed: boolean; reasons?: string[]; learnings?: string[] } | undefined) {
+    const learnings = Array.isArray(review?.learnings) ? review.learnings.filter(Boolean) : [];
+    if (learnings.length > 0) return truncate(learnings.join("; "), 160);
+    return "completed work passed all four review criteria";
+}
+/**
  * Issue the review prompt to the model and return a validated review result.
  * If the response is not valid JSON, append the parsing error and issue a
  * retry request, up to a small number of retries. Every request flows through
@@ -354,8 +378,6 @@ function captureExecutionFeedback(configData, response, stepIndex) {
     else {
         entry.validationError = parsed.reason;
         entry.rawResponse = rawResponse;
-        // Execution-plan step 1: explicitly log the parsing error so it is
-        // visible before any prompt amendment or retry is attempted.
         status.error(`Step ${stepIndex + 1} response was not valid JSON: ${parsed.reason}`);
     }
     configData.executionFeedback.push(entry);
@@ -545,10 +567,6 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             let feedbackEntry = captureExecutionFeedback(configData, response, index);
             reportExecutionFeedback(feedbackEntry);
             saveData(configData);
-            // Execution-plan steps 2-3: when the execution-feedback response is
-            // not valid JSON, append the parsing error to the ambient step prompt,
-            // then send that amended prompt to the LLM as a retry request and
-            // re-capture the execution feedback from the retry response.
             if (!feedbackEntry.valid) {
                 const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
                 configData.retryPrompt =
@@ -580,17 +598,36 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     configData.lastToolCallIds = [];
     saveData(configData);
     if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
-    for (let index = 0; index < activeSteps.length; index += 1) {
-        const executedStep = activeSteps[index];
-        const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
-        configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null });
-        const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
-        reportAppliedPlanChanges(appliedChanges);
-        await attemptReplan(feedbackEntry, activeSteps, index, configData);
-        configData.activePlanSteps = [...activeSteps];
-        configData.lastAppliedPlanChanges = appliedChanges;
-        saveData(configData);
-        if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+    // Execution staging: plan steps write into a dedicated worktree and stage
+    // their changes there (git add -A) without ever committing. The worktree is
+    // created once and reused across review attempts so staged work accumulates
+    // for the review step to inspect. On entry we chdir into the worktree so the
+    // file tools (Write, ExecuteCommand, etc.) resolve paths inside it, and we
+    // restore the main working directory when the phase ends.
+    inExecutionPhase = true;
+    const worktree = ensureWorktree(executionWorktreeBranch, mainCwd);
+    executionWorktreePath = worktree;
+    const originalCwd = process.cwd();
+    process.chdir(worktree);
+    try {
+        for (let index = 0; index < activeSteps.length; index += 1) {
+            const executedStep = activeSteps[index];
+            const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
+            configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null });
+            const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
+            reportAppliedPlanChanges(appliedChanges);
+            await attemptReplan(feedbackEntry, activeSteps, index, configData);
+            configData.activePlanSteps = [...activeSteps];
+            configData.lastAppliedPlanChanges = appliedChanges;
+            // Stage all changes this step produced into the worktree. We never
+            // commit here; the review step commits only when it is satisfied.
+            stageAllInWorktree(worktree);
+            saveData(configData);
+            if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+        }
+    } finally {
+        process.chdir(originalCwd);
+        inExecutionPhase = false;
     }
 }
 
@@ -664,9 +701,14 @@ async function main() {
 
     status.success(`Plan created with ${activeSteps.length} step${activeSteps.length === 1 ? "" : "s"}.`);
 
-    // Review loop: execute the plan, then review the result. If the review
-    // fails and the retry budget remains, restart execution (not planning)
-    // with the review feedback and learnings injected into the execution prompts.
+    // Review loop: execute the plan, then review the result. The execution
+    // phase stages changes in the execution worktree and NEVER commits. The
+    // review step commits ONLY when it is happy (review.passed === true): it
+    // stages, commits the staged work in the worktree, and merges the worktree
+    // branch into the main branch, then finishes. On a failing review the loop
+    // restarts from the execution phase (with the same retained worktree) and
+    // does NOT commit. After maxReviewAttempts failures, an explicit error is
+    // thrown and the work is left uncommitted.
     const accumulatedLearnings = [];
     let reviewAttempt = 0;
     let executionContext = "(none)";
@@ -676,6 +718,28 @@ async function main() {
         const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt);
         if (review.passed) {
             status.success(`Review passed on attempt ${reviewAttempt}.`);
+            // The review step is happy: commit the staged execution work.
+            if (executionWorktreePath) {
+                try {
+                    // Stage once more (idempotent) to pick up anything staged during
+                    // the just-completed execution phase, then commit in the worktree
+                    // and merge the worktree branch into the current (main) branch.
+                    stageAllInWorktree(executionWorktreePath);
+                    const summary = summarizeReview(review);
+                    commitInWorktree(executionWorktreePath, `review happy: ${summary}`);
+                    mergeWorktreeIntoMain(executionWorktreeBranch, mainCwd);
+                    status.success(`Committed satisfied review work into main (review happy: ${summary}).`);
+                } catch (error) {
+                    const reason = error instanceof Error ? error.message : String(error);
+                    status.error(`Review passed but committing the staged work failed: ${reason}`);
+                    cleanupExecutionWorktree();
+                    throw new Error(`Review passed but the review commit failed: ${reason}`);
+                }
+            } else {
+                status.warning("Review passed but there is no execution worktree in which to commit the work.");
+            }
+            // Mark the task as done (the completed-plan message below signals
+            // completion and the runner records the task in Spec Keeper).
             break;
         }
 
@@ -686,11 +750,11 @@ async function main() {
         saveData(configData);
 
         if (reviewAttempt >= maxReviewAttempts) {
+            // 4th review loop: do NOT commit. Throw an explicit error explaining
+            // why the loop is not finishing.
             throw new Error(
-                `The review phase did not finish: after ${maxReviewAttempts} review attempt(s) the completed work ` +
-                `still did not pass the review. Maximum review attempts (${maxReviewAttempts}) have been reached, so the ` +
-                `loop is stopping rather than repeating forever. Review reasons: ${
-                (review.reasons ?? []).map((reason) => JSON.stringify(reason)).join("; ") || "none"}.`);
+                `Review failed after ${maxReviewAttempts} attempts: ${
+                (review.reasons ?? []).map((reason) => JSON.stringify(reason)).join("; ") || "none"}; must fix issues before committing.`);
         }
 
         status.replan(`Restarting execution phase with review feedback and learnings (attempt ${reviewAttempt}).`);
@@ -704,5 +768,23 @@ async function main() {
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     status.success("Plan complete. Stopping.");
+    cleanupExecutionWorktree();
 }
-main().catch((error) => status.error(error instanceof Error ? error.stack ?? error.message : String(error)));
+
+// Remove the execution worktree and its branch once the run finishes (or fails),
+// so the main repository is left clean of staged execution work.
+function cleanupExecutionWorktree() {
+    if (!executionWorktreePath) return;
+    try {
+        cleanupWorktree(executionWorktreeBranch, mainCwd);
+        executionWorktreePath = null;
+    } catch (error) {
+        status.warning(`Failed to clean up execution worktree: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+main()
+    .catch((error) => {
+        cleanupExecutionWorktree();
+        status.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    });

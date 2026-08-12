@@ -21,6 +21,14 @@ ${learnings}
 
 Review attempt: ${reviewAttempt} of ${maxReviewAttempts}
 
+WORKFLOW — LOOP-RESTART AND COMMIT BEHAVIOR
+
+- Execution work is staged in a dedicated git worktree and is never committed during the execution phase.
+- The review phase is the only step that commits, and it commits ONLY when the review is happy (this is when you return "passed": true).
+- If any criterion fails ("passed": false), NO commit is made: the workflow restarts from the beginning of the execution phase with your reasons and learnings injected as feedback, and the staged work is retained and re-worked.
+- The review runs at most ${maxReviewAttempts} times. On the loop after the final failed attempt, an explicit error is thrown and no commit is made (the work must be fixed before committing).
+- Therefore be precise and honest: return "passed": true only when ALL four criteria genuinely pass.
+
 REVIEW CRITERIA — assess ALL four:
 
 (a) Prompt request fulfillment — Has the original prompt request been fully fulfilled by the executed work?
