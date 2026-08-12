@@ -13,6 +13,7 @@ import {
   type TokenUsage,
 } from "./adapter-contract.js";
 import type { AdapterOptions, LlmAdapterFactory } from "./adapter-registry.js";
+import { readFileSync } from "node:fs";
 
 const PROVIDER = "deepseek-v4";
 const DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
@@ -22,12 +23,10 @@ const DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
  * returns tool-call arguments that could not be parsed as JSON (even after all
  * repair strategies fail). The retry asks the model to return pure, well-formed
  * JSON so the second attempt has a better chance of producing valid arguments.
+ * Loaded from the external prompt file under /elastic-agent/prompts/ (relative
+ * to the process working directory, which is the repository root).
  */
-const JSON_RETRY_HINT =
-  "Your previous response returned tool-call arguments that could not be parsed as JSON. " +
-  "Please respond again with pure, well-formed JSON in every tool-call arguments value: " +
-  "no prose before or after, no markdown code fences, all keys and string values double-quoted, " +
-  "no comments, no trailing commas, and all special characters properly escaped.";
+const JSON_RETRY_HINT = readFileSync("prompts/json-retry-hint.txt", "utf-8");
 
 /** Settings accepted by the DeepSeek V4 factory. `apiKey` takes precedence over DEEPSEEK_API_KEY. */
 export interface DeepSeekV4AdapterOptions {

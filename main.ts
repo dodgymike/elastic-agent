@@ -47,30 +47,13 @@ const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-ag
 const historyLimit = 10;
 const maxReplanAttempts = 3;
 const maxRevisedPlanSteps = 50;
-const planningSuffix = "PROVIDE A CLEAR, STEP-BY-STEP, CONCISE PLAN FOR LATER EXECUTION";
-const executionFeedbackFormat = `
-After you have finished this step and received outputs for every tool call, report the result and include exactly one machine-readable execution-feedback block. Do not emit this block while tool calls are still needed. Use this exact fenced JSON format:
-\`\`\`json
-{
-  "stepStatus": "completed | partial | blocked | failed",
-  "summary": "concise outcome of the current step",
-  "findings": ["important finding or blocker"],
-  "suggestedStepUpdate": null,
-  "suggestedPlanUpdates": [],
-  "replanRequired": false,
-  "replanReason": null
-}
-\`\`\`
-
-Field requirements:
-- stepStatus must be one of completed, partial, blocked, or failed.
-- summary must be a string.
-- findings must be an array of strings; use [] when there are none.
-- suggestedStepUpdate must be null when no local change is needed, otherwise a concise string describing the change to this step.
-- suggestedPlanUpdates must be an array; each item must be an object with "step" (the remaining step number) and "update" (a concise replacement or change). Use [] when there are none.
-- replanRequired must be a boolean. Set it to true only when the remaining plan should be replaced rather than updated incrementally.
-- replanReason must be null when replanRequired is false, otherwise a concise string explaining why replanning is needed.
-`;
+// Prompts are loaded from external files under /elastic-agent/prompts/
+// (relative to the process working directory, which is the repository root).
+const planningSuffix = readFileSync("prompts/planning-suffix.txt", "utf-8");
+const executionFeedbackFormat = readFileSync("prompts/execution-feedback-format.txt", "utf-8");
+const buildPromptTemplate = readFileSync("prompts/build-prompt-skeleton.txt", "utf-8");
+const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.txt", "utf-8");
+const replanPromptTemplate = readFileSync("prompts/replan-prompt.txt", "utf-8");
 
 const status = {
     planning: (message) => console.log(`${chalk.cyan.bold("[PLAN]")} ${message}`),
@@ -199,10 +182,23 @@ function renderToolCallFailed(toolCall, error) {
     status.error(`Failed: ${toolCall.name}: ${error}`);
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
+/**
+ * Render a prompt template by evaluating its `${...}` interpolation expressions
+ * against the supplied variable map. The template text comes from the external
+ * prompt files under /elastic-agent/prompts/; all `${...}` occurrences are
+ * interpolation points resolved at call time. Backticks in the template are
+ * escaped so JSON fence markers in prompt text cannot break the evaluation.
+ */
+function renderPrompt(template, variables) {
+    const names = Object.keys(variables);
+    const values = names.map((name) => variables[name]);
+    const evaluator = new Function(...names, `return \`${template.replace(/`/g, "\\`")}\`;`);
+    return evaluator(...values);
+}
 function buildPrompt(commandPrompts, toolCallTldrs) {
     const promptHistory = commandPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n") || "(none)";
     const toolHistory = toolCallTldrs.map((tldr, index) => `${index + 1}. ${tldr}`).join("\n") || "(none)";
-    return `${claudeInstructions}\n\nRecent command line prompts (oldest to newest; last ${historyLimit}):\n${promptHistory}\n\nRecent tool call TLDRs (oldest to newest; last ${historyLimit}):\n${toolHistory}\n\nCurrent command line prompt:\n${commandLinePrompt}`;
+    return renderPrompt(buildPromptTemplate, { claudeInstructions, historyLimit, promptHistory, toolHistory, commandLinePrompt });
 }
 function summarizeToolCall(name, toolArguments, toolResponse) { return truncate(`${name}(${truncate(stringify(toolArguments), 160)}) → ${truncate(stringify(toolResponse), 240)}`, 480); }
 function summarizeResponse(response) {
@@ -328,7 +324,7 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
     status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`);
     const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
-    const request = `${claudeInstructions}\n\nThe execution plan needs focused replanning. Replace only the remaining work; do not repeat completed work and do not execute tools.\n\nCompleted work:\n${completedWork}\n\nCurrent step feedback:\n${JSON.stringify(feedback)}\n\nRecent tool-result summaries:\n${toolFindings}\n\nExisting remaining steps:\n${formatPlan(remainingSteps)}\n\nReturn a concise, actionable revised plan containing one or more numbered steps only.`;
+    const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps });
     try {
         const response = await client.create({ input: request });
         new CompatibleResponseWrapper(response).print();
@@ -444,7 +440,7 @@ async function executePlanStep(step, index, steps, plan, configData) {
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
         } else {
-            request.input = `${claudeInstructions}\n\nExecution plan:\n${plan}\n\nYou are executing step ${index + 1} of ${steps.length}: ${step}\nCarry out only this step. Use tools when needed, report the result, and do not begin another plan step.\n${executionFeedbackFormat}`;
+            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat });
         }
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print();
