@@ -2,6 +2,7 @@ import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/applicati
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
+import { extractPlanJson, printPlan } from "./plan-printer.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -636,6 +637,15 @@ async function main() {
     new CompatibleResponseWrapper(planningResponse).print();
     recordUsage(configData, planningResponse);
     const plan = responseText(planningResponse);
+    // Best-effort pretty-print of the structured plan JSON (when the model
+    // supplied one). This is display-only: the downstream text-based
+    // planSteps()/formatPlan() flow is left untouched.
+    const parsedPlan = extractPlanJson(plan);
+    if (parsedPlan.valid) {
+        printPlan(parsedPlan.plan);
+    } else {
+        status.warning(`Planning response was not parseable as plan JSON (${parsedPlan.reason}); showing the raw response only.`);
+    }
     const activeSteps = planSteps(plan);
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
