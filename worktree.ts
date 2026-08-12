@@ -105,6 +105,24 @@ export function stagedChangesSummary(worktreePath: string, maxPatchChars = 60000
   return `CHANGED FILES (staged vs HEAD):\n${nameLines}\n\nDIFF STAT:\n${statBlock}\n\nDIFF PATCH:\n${truncatedPatch}`;
 }
 
+/**
+ * Build a human-readable summary of committed work on the worktree branch for
+ * the review phase's fallback when `git diff --cached` is empty (for example a
+ * previous run already committed the execution work, so there is nothing
+ * staged). The summary includes the latest commit hash + subject, a file stat,
+ * and the commit patch so a reviewer still sees concrete changes instead of a
+ * blank "(no staged changes)" block. The patch is truncated to the same
+ * generous cap used by stagedChangesSummary.
+ */
+export function committedChangesSummary(worktreePath: string, maxPatchChars = 60000): string {
+  const commit = runGit(worktreePath, ["show", "-s", "--format=%H %s", "HEAD"]);
+  const stat = runGit(worktreePath, ["show", "--stat", "--format=", "HEAD"]);
+  const patch = runGit(worktreePath, ["show", "--format=", "HEAD"]);
+  if (!commit) return "(no committed changes available)";
+  const truncatedPatch = patch.length > maxPatchChars ? `${patch.slice(0, maxPatchChars)}\n…(diff truncated: ${patch.length} chars total)` : patch;
+  return `COMMITTED WORK (latest commit on the worktree branch, since nothing is staged):\n  - ${commit}\n\nSTAT:\n${stat || "(no stat available)"}\n\nPATCH:\n${truncatedPatch || "(no patch available)"}`;
+}
+
 /** Commit the staged changes inside the worktree with the given message. */
 export function commitInWorktree(worktreePath: string, message: string): void {
   if (!message || typeof message !== "string") {

@@ -175,7 +175,9 @@ to assess all four review criteria: (a) prompt request fulfillment,
 (b) end-result quality, (c) SDLC.md compliance, and (d) noted learnings. It
 requires a structured JSON review result (`{ "passed": boolean, "reasons":
 [string], "learnings": [string] }`), validated by `validateReviewResult` /
-`parseReviewResult` in `main.ts`.
+`parseReviewResult` in `main.ts`. The `${changes}` block contains the concrete
+staged diff, or the latest committed work from the execution worktree when the
+staged diff is empty (so committed work is still visible to the reviewer).
 
 Interpolation points:
 
@@ -185,6 +187,7 @@ Interpolation points:
 | `${originalPrompt}` | the original command-line prompt request |
 | `${plan}` | the full formatted plan |
 | `${executedSteps}` | the list of executed steps |
+| `${changes}` | staged diff (`git diff --cached`) or, when empty, the latest committed work from the execution worktree |
 | `${reviewPlan}` | the review plan created at the start of the review phase |
 | `${learnings}` | accumulated learnings from earlier review attempts |
 | `${reviewAttempt}` | the current one-based review attempt |

@@ -10,6 +10,7 @@
 import {
     createWorktree, ensureWorktree, stageAllInWorktree, commitInWorktree,
     mergeWorktreeIntoMain, cleanupWorktree, listWorktrees, stagedChangesSummary,
+    committedChangesSummary,
 } from "../worktree.js";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
@@ -129,6 +130,14 @@ try {
     const mergedFiles = runGit(repoRoot, ["show", "--name-only", "--format=", "HEAD"]);
     assert.ok(mergedFiles.includes("feature.txt") && mergedFiles.includes("fix.txt"),
         "main must contain the committed execution work after merge");
+
+    //  5d. committedChangesSummary surfaces committed work when the staged diff
+    //      is empty (the review phase fallback so committed execution work is
+    //      still visible in the review prompt).
+    const committed = committedChangesSummary(worktreePath);
+    assert.ok(committed.includes("feature.txt") && committed.includes("fix.txt"),
+        "committedChangesSummary must include the committed changed files");
+    assert.ok(committed.includes("PATCH"), "committedChangesSummary must include the committed patch");
 
     // 6. cleanupWorktree removes the worktree and its branch.
     cleanupWorktree(branch, repoRoot);

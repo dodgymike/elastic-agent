@@ -3,7 +3,7 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
-import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary } from "./worktree.js";
+import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary } from "./worktree.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -715,6 +715,16 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
             changes = stagedChangesSummary(executionWorktreePath);
         } catch (error) {
             status.warning(`Could not read staged changes for review: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (changes.includes("(no staged changes against HEAD)")) {
+            // The staged diff is empty (for example the execution work was
+            // already committed). Surface the committed work so the reviewer
+            // still sees concrete changes instead of a blank staged block.
+            try {
+                changes = `${changes}\n\n${committedChangesSummary(executionWorktreePath)}`;
+            } catch (error) {
+                status.warning(`Could not read committed changes for review: ${error instanceof Error ? error.message : String(error)}`);
+            }
         }
     }
     const reviewRequest = renderPrompt(reviewPromptTemplate, {

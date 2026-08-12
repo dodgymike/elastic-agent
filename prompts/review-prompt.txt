@@ -13,7 +13,7 @@ ${plan}
 Executed steps:
 ${executedSteps}
 
-ACTUAL STAGED CHANGES (the concrete work produced by the executed steps, staged in the execution worktree against HEAD — review THIS, not just the prose above):
+ACTUAL CHANGES (the concrete work produced by the executed steps — staged in the execution worktree against HEAD, or committed work when the staged diff is empty — review THIS, not just the prose above):
 ${changes}
 
 Review plan (created at the start of the review phase):
