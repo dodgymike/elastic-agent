@@ -47,6 +47,7 @@ const dataFilename = "/tmp/data.json";
 const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
 const historyLimit = 10;
 const maxReplanAttempts = 3;
+const maxReviewAttempts = 3;
 const maxRevisedPlanSteps = 50;
 // Prompts are loaded from external files under /elastic-agent/prompts/
 // (relative to the process working directory, which is the repository root).
@@ -55,6 +56,7 @@ const executionFeedbackFormat = readFileSync("prompts/execution-feedback-format.
 const buildPromptTemplate = readFileSync("prompts/build-prompt-skeleton.txt", "utf-8");
 const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.txt", "utf-8");
 const replanPromptTemplate = readFileSync("prompts/replan-prompt.txt", "utf-8");
+const reviewPromptTemplate = readFileSync("prompts/review-prompt.txt", "utf-8");
 
 const status = {
     planning: (message) => console.log(`${chalk.cyan.bold("[PLAN]")} ${message}`),
@@ -279,6 +281,69 @@ function parseExecutionFeedback(text) {
         return { valid: false, reason: `Feedback JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
     }
 }
+function validateReviewResult(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { valid: false, reason: "Review result must be a JSON object." };
+    if (typeof value.passed !== "boolean") return { valid: false, reason: "passed must be a boolean." };
+    if ("reasons" in value && (!Array.isArray(value.reasons) || value.reasons.some((reason) => typeof reason !== "string"))) return { valid: false, reason: "reasons must be an array of strings." };
+    if ("learnings" in value && (!Array.isArray(value.learnings) || value.learnings.some((learning) => typeof learning !== "string"))) return { valid: false, reason: "learnings must be an array of strings." };
+    const reasons = Array.isArray(value.reasons) ? value.reasons : [];
+    const learnings = Array.isArray(value.learnings) ? value.learnings : [];
+    if (!value.passed) {
+        if (reasons.length === 0) return { valid: false, reason: "A failing review must provide at least one reason." };
+        return { valid: true, review: { passed: false, reasons, learnings } };
+    }
+    return { valid: true, review: { passed: true, reasons, learnings } };
+}
+function parseReviewResult(text) {
+    const trimmed = String(text).trim();
+    let jsonText = trimmed;
+    const fenced = trimmed.match(/```json\s*([\s\S]*?)\s*```/);
+    if (fenced) jsonText = fenced[1].trim();
+    if (!jsonText.startsWith("{")) {
+        const start = jsonText.indexOf("{");
+        if (start === -1) return { valid: false, reason: "Review response did not contain a JSON object." };
+        jsonText = jsonText.slice(start);
+    }
+    const end = jsonText.lastIndexOf("}");
+    if (end === -1) return { valid: false, reason: "Review response did not contain a closing JSON brace." };
+    jsonText = jsonText.slice(0, end + 1);
+    try {
+        return validateReviewResult(JSON.parse(jsonText));
+    } catch (error) {
+        return { valid: false, reason: `Review JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+}
+function formatExecutedSteps(completedSteps) {
+    if (!Array.isArray(completedSteps) || completedSteps.length === 0) return "(none)";
+    return completedSteps.map((entry) => `${entry.step}. ${entry.text}`).join("\n");
+}
+function formatLearnings(learnings) {
+    if (!Array.isArray(learnings) || learnings.length === 0) return "(none)";
+    return learnings.map((learning, index) => `${index + 1}. ${learning}`).join("\n");
+}
+/**
+ * Issue the review prompt to the model and return a validated review result.
+ * If the response is not valid JSON, append the parsing error and issue a
+ * retry request, up to a small number of retries. Every request flows through
+ * client.create, so all prompts and responses are recorded to llm.log.
+ */
+async function runReview(client, configData, reviewRequest, validationError) {
+    let lastParsed;
+    for (let retry = 0; retry <= 2; retry += 1) {
+        const promptToSend = retry === 0 && !validationError
+            ? reviewRequest
+            : `${reviewRequest}\n\nThe previous response was not valid JSON. Here's the error: ${
+                validationError ?? lastParsed?.reason ?? "unknown"}. Please return valid JSON following this exact structure.`;
+        const response = await client.create({ input: promptToSend });
+        new CompatibleResponseWrapper(response).print();
+        recordUsage(configData, response);
+        lastParsed = parseReviewResult(responseText(response));
+        if (lastParsed.valid) return lastParsed.review as NonNullable<typeof lastParsed.review>;
+    }
+    status.error(`Review response was not valid JSON after retries: ${lastParsed?.reason ?? "unknown"}`);
+    return { passed: false, reasons: [`Review response could not be parsed as JSON: ${lastParsed?.reason ?? "unknown"}`], learnings: [] };
+}
+
 function captureExecutionFeedback(configData, response, stepIndex) {
     if (!Array.isArray(configData.executionFeedback)) configData.executionFeedback = [];
     const rawResponse = responseText(response);
@@ -434,7 +499,7 @@ function functionCallOutput(toolCall, resultOrError) {
     };
 }
 
-async function executePlanStep(step, index, steps, plan, configData) {
+async function executePlanStep(step, index, steps, plan, configData, executionContext) {
     const color = typeof process.stdout.isTTY === "boolean" && process.stdout.isTTY;
     for (const line of buildPrettyStepLines(index, steps.length, step, { color, remainingSteps: steps.slice(index + 1) })) {
         status.step(line);
@@ -447,7 +512,7 @@ async function executePlanStep(step, index, steps, plan, configData) {
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
         } else {
-            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat });
+            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
         }
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print();
@@ -484,7 +549,7 @@ async function executePlanStep(step, index, steps, plan, configData) {
             // then send that amended prompt to the LLM as a retry request and
             // re-capture the execution feedback from the retry response.
             if (!feedbackEntry.valid) {
-                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat });
+                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
                 configData.retryPrompt =
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
@@ -503,6 +568,53 @@ async function executePlanStep(step, index, steps, plan, configData) {
             return feedbackEntry;
         }
     }
+}
+
+async function runExecutionPhase(activeSteps, plan, configData, executionContext = "(none)") {
+    configData.completedSteps = [];
+    configData.replanAttemptCount = 0;
+    configData.replanHistory = [];
+    configData.activePlanSteps = [...activeSteps];
+    configData.lastResponseId = null;
+    configData.lastToolCallIds = [];
+    saveData(configData);
+    if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+    for (let index = 0; index < activeSteps.length; index += 1) {
+        const executedStep = activeSteps[index];
+        const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
+        configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null });
+        const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
+        reportAppliedPlanChanges(appliedChanges);
+        await attemptReplan(feedbackEntry, activeSteps, index, configData);
+        configData.activePlanSteps = [...activeSteps];
+        configData.lastAppliedPlanChanges = appliedChanges;
+        saveData(configData);
+        if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+    }
+}
+
+async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
+    // The review phase starts with a plan step: ask the model to plan how to
+    // conduct the review of the executed work against the four review criteria.
+    status.planning("Creating a review plan...");
+    const reviewPlanGoal =
+        "Plan how to conduct a review of the just-executed work. Assess the original prompt request, " +
+        "the end-result quality, SDLC.md compliance, and record any learnings. Return a concise step-by-step plan.";
+    const reviewPlanPrompt = `${reviewPlanGoal}\n\n${planningSuffix}`;
+    const reviewPlanResponse = await client.create({ input: reviewPlanPrompt });
+    new CompatibleResponseWrapper(reviewPlanResponse).print();
+    recordUsage(configData, reviewPlanResponse);
+    const reviewPlan = responseText(reviewPlanResponse);
+    saveData(configData);
+
+    status.planning(`Reviewing the completed work (attempt ${reviewAttempt}/${maxReviewAttempts})...`);
+    const executedSteps = formatExecutedSteps(configData.completedSteps);
+    const learnings = formatLearnings(configData.reviewLearnings ?? []);
+    const reviewRequest = renderPrompt(reviewPromptTemplate, {
+        claudeInstructions, originalPrompt: commandLinePrompt, plan: formatPlan(activeSteps),
+        executedSteps, reviewPlan, learnings, reviewAttempt, maxReviewAttempts,
+    });
+    return runReview(client, configData, reviewRequest, null);
 }
 
 async function main() {
@@ -525,29 +637,52 @@ async function main() {
     recordUsage(configData, planningResponse);
     const plan = responseText(planningResponse);
     const activeSteps = planSteps(plan);
-    // These records describe this newly created plan; completed work remains intact while it is replanned.
-    configData.completedSteps = [];
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
-    configData.activePlanSteps = [...activeSteps];
     saveData(configData);
     if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
 
     status.success(`Plan created with ${activeSteps.length} step${activeSteps.length === 1 ? "" : "s"}.`);
-    for (let index = 0; index < activeSteps.length; index += 1) {
-        const executedStep = activeSteps[index];
-        const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData);
-        configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null });
-        const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
-        reportAppliedPlanChanges(appliedChanges);
-        await attemptReplan(feedbackEntry, activeSteps, index, configData);
-        configData.activePlanSteps = [...activeSteps];
-        configData.lastAppliedPlanChanges = appliedChanges;
+
+    // Review loop: execute the plan, then review the result. If the review
+    // fails and the retry budget remains, restart execution (not planning)
+    // with the review feedback and learnings injected into the execution prompts.
+    const accumulatedLearnings = [];
+    let reviewAttempt = 0;
+    let executionContext = "(none)";
+    while (true) {
+        await runExecutionPhase(activeSteps, plan, configData, executionContext);
+        reviewAttempt += 1;
+        const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt);
+        if (review.passed) {
+            status.success(`Review passed on attempt ${reviewAttempt}.`);
+            break;
+        }
+
+        for (const learning of review.learnings ?? []) if (learning) accumulatedLearnings.push(learning);
+        configData.reviewLearnings = accumulatedLearnings;
+        status.warning(`Review did not pass on attempt ${reviewAttempt}/${maxReviewAttempts}: ${
+            (review.reasons ?? []).map((reason) => truncate(reason, 160)).join("; ") || "no reasons provided"}`);
         saveData(configData);
-        if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+
+        if (reviewAttempt >= maxReviewAttempts) {
+            throw new Error(
+                `The review phase did not finish: after ${maxReviewAttempts} review attempt(s) the completed work ` +
+                `still did not pass the review. Maximum review attempts (${maxReviewAttempts}) have been reached, so the ` +
+                `loop is stopping rather than repeating forever. Review reasons: ${
+                (review.reasons ?? []).map((reason) => JSON.stringify(reason)).join("; ") || "none"}.`);
+        }
+
+        status.replan(`Restarting execution phase with review feedback and learnings (attempt ${reviewAttempt}).`);
+        executionContext =
+            "REVIEW FEEDBACK FROM THE PREVIOUS ATTEMPT — address these issues in the executed work:\n" +
+            (review.reasons ?? []).map((reason) => `- ${reason}`).join("\n") +
+            "\n\nLEARNINGS FROM EARLIER REVIEWS:" +
+            accumulatedLearnings.map((learning) => `\n- ${learning}`).join("");
     }
+
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     status.success("Plan complete. Stopping.");

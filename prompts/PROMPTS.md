@@ -17,7 +17,12 @@ provider (OpenAI, Bedrock Claude Sonnet, or DeepSeek V4). The loop:
 3. executes each numbered plan step (potentially invoking tools),
 4. asks the model to return a machine-readable execution-feedback block per step,
 5. applies local/plan updates and, when replanning is requested, builds a focused
-   replan prompt.
+   replan prompt,
+6. after the plan is complete, runs a post-plan **review phase** that begins with
+   a plan step and then asks the model to review the completed work against four
+   criteria, returning a structured JSON review result, and
+7. if the review does not pass and the retry budget remains, restarts execution
+   with the review feedback and learnings injected; otherwise it fails.
 
 Each stage uses a distinct prompt, captured in the files below. CLAUDE.md
 agent-facing operating instructions are not part of this extraction.
@@ -31,11 +36,12 @@ agent-facing operating instructions are not part of this extraction.
 | `build-prompt-skeleton.txt`     | `buildPromptTemplate`                  | `main.ts`     |
 | `step-execution-prompt.txt`     | `stepExecutionPromptTemplate`          | `main.ts`     |
 | `replan-prompt.txt`             | `replanPromptTemplate`                 | `main.ts`     |
+| `review-prompt.txt`             | `reviewPromptTemplate`                 | `main.ts`     |
 | `json-retry-hint.txt`           | `JSON_RETRY_HINT`                      | `llm/deepseek-v4-adapter.ts` |
 
 ## Loading mechanism
 
-All six files are read synchronously at module load with Node's `readFileSync`,
+All seven files are read synchronously at module load with Node's `readFileSync`,
 resolved relative to the process working directory (the repository root).
 
 In `main.ts`:
@@ -46,6 +52,7 @@ const executionFeedbackFormat   = readFileSync("prompts/execution-feedback-forma
 const buildPromptTemplate       = readFileSync("prompts/build-prompt-skeleton.txt", "utf-8");
 const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.txt", "utf-8");
 const replanPromptTemplate      = readFileSync("prompts/replan-prompt.txt", "utf-8");
+const reviewPromptTemplate      = readFileSync("prompts/review-prompt.txt", "utf-8");
 ```
 
 In `llm/deepseek-v4-adapter.ts`:
@@ -56,10 +63,10 @@ const JSON_RETRY_HINT = readFileSync("prompts/json-retry-hint.txt", "utf-8");
 
 ### Template interpolation
 
-`build-prompt-skeleton.txt`, `step-execution-prompt.txt`, and
-`replan-prompt.txt` are templates containing `${...}` interpolation
-expressions. They are rendered at call time by the `renderPrompt(template,
-variables)` helper in `main.ts`:
+`build-prompt-skeleton.txt`, `step-execution-prompt.txt`,
+`replan-prompt.txt`, and `review-prompt.txt` are templates containing `${...}`
+interpolation expressions. They are rendered at call time by the
+`renderPrompt(template, variables)` helper in `main.ts`:
 
 ```ts
 function renderPrompt(template, variables) {
@@ -85,9 +92,9 @@ verbatim.
 
 ### `planning-suffix.txt`
 
-The exact suffix appended to the end of the planning request so the model
+The exact suffix appended to the end of a planning request so the model
 returns a concrete, later-executable plan rather than just answering. Used in
-the planning stage of `main()`:
+the planning stage and the review-phase plan step of `main()`:
 
 ```ts
 const planningResponse = await client.create({ input: `${prompt}\n\n${planningSuffix}` });
@@ -139,6 +146,7 @@ Interpolation points:
 | `${steps.length}` | total number of plan steps |
 | `${step}` | the current step's text |
 | `${executionFeedbackFormat}` | the contents of `execution-feedback-format.txt` |
+| `${executionContext}` | review feedback/learnings from earlier attempts, or `(none)` on the first execution |
 
 ### `replan-prompt.txt`
 
@@ -159,6 +167,29 @@ Interpolation points:
 | `${formatPlan(remainingSteps)}` | formatted remaining steps |
 | `${...}` (as needed) | remaining interpolation via `renderPrompt` |
 
+### `review-prompt.txt`
+
+The post-plan review prompt used by `runReviewPhase` / `runReview` after the
+plan has completed. It includes the full review instructions and asks the model
+to assess all four review criteria: (a) prompt request fulfillment,
+(b) end-result quality, (c) SDLC.md compliance, and (d) noted learnings. It
+requires a structured JSON review result (`{ "passed": boolean, "reasons":
+[string], "learnings": [string] }`), validated by `validateReviewResult` /
+`parseReviewResult` in `main.ts`.
+
+Interpolation points:
+
+| Expression | Variable |
+|------------|----------|
+| `${claudeInstructions}` | contents of `CLAUDE.md` |
+| `${originalPrompt}` | the original command-line prompt request |
+| `${plan}` | the full formatted plan |
+| `${executedSteps}` | the list of executed steps |
+| `${reviewPlan}` | the review plan created at the start of the review phase |
+| `${learnings}` | accumulated learnings from earlier review attempts |
+| `${reviewAttempt}` | the current one-based review attempt |
+| `${maxReviewAttempts}` | the maximum number of review attempts |
+
 ### `json-retry-hint.txt`
 
 The JSON-purity hint injected by `llm/deepseek-v4-adapter.ts` as a trailing
@@ -176,8 +207,12 @@ Plain text; no interpolation.
   from disk, so no source recompile is needed for text-only changes.
 - Keep interpolation placeholders (`${...}`) intact in the template files
   (`build-prompt-skeleton.txt`, `step-execution-prompt.txt`,
-  `replan-prompt.txt`). They are resolved at call time by `renderPrompt`.
-- Preserve the JSON fence markers (` ```json ` ... ` ``` `) and the field
+  `replan-prompt.txt`, `review-prompt.txt`). They are resolved at call time by
+  `renderPrompt`.
+- Preserve the JSON fence markers ( ```json ` ... ` ``` ) and the field
   names in `execution-feedback-format.txt`; they must stay consistent with
   `validateExecutionFeedback` in `main.ts`.
+- Preserve the review result field names (`passed`, `reasons`, `learnings`) in
+  `review-prompt.txt`; they must stay consistent with `validateReviewResult` in
+  `main.ts`.
 - Do not introduce secrets or credentials into any prompt file.

@@ -1,0 +1,44 @@
+${claudeInstructions}
+
+REVIEW PHASE
+
+A plan has been created and executed. Review the completed work now. A separate plan step was carried out at the start of this review phase to plan how to conduct the review; that review plan is provided below for context.
+
+Original prompt request:
+${originalPrompt}
+
+Execution plan:
+${plan}
+
+Executed steps:
+${executedSteps}
+
+Review plan (created at the start of the review phase):
+${reviewPlan}
+
+Accumulated learnings from earlier review attempts (empty if none):
+${learnings}
+
+Review attempt: ${reviewAttempt} of ${maxReviewAttempts}
+
+REVIEW CRITERIA — assess ALL four:
+
+(a) Prompt request fulfillment — Has the original prompt request been fully fulfilled by the executed work?
+(b) End-result quality — Is the end result of good quality?
+(c) SDLC.md compliance — Has the process described in SDLC.md been followed/met?
+(d) Noted learnings — Note any learnings (e.g. from execution, the plan, or earlier review attempts).
+
+RESPOND IN JSON FORMAT ONLY. Provide exactly one JSON object with this exact structure:
+
+{
+  "passed": true,
+  "reasons": [],
+  "learnings": []
+}
+
+Field meanings:
+- passed: boolean; true only if ALL four criteria above pass.
+- reasons: array of strings describing why the review did not pass (meaningful when passed is false).
+- learnings: array of strings recording any learnings worth carrying into the next execution attempt.
+
+Do not output any prose or markdown outside the JSON object.
