@@ -15,6 +15,20 @@
  * Node in unit tests. Missing or malformed fields are handled gracefully and
  * fall back to a summary so the pretty-print never throws. The downstream
  * text-based planSteps()/formatPlan() flow is untouched.
+ *
+ * Console indentation follows a fixed hierarchy, mirroring the agent loop's
+ * output layout (see the agent execution plan for the indent scheme):
+ *
+ *   level             spaces    example line
+ *   ----------------  ------    --------------------------------------
+ *   phase              0        Creating an execution plan...
+ *   plan               2        PLAN / TLDR: ... / STEPS: / EXPECTED OUTCOME
+ *   plan step          4        STEP 1
+ *   content in step    6        TLDR: ... / JUSTIFICATION: ... / DETAILS: ...
+ *
+ * The phase-level lines are produced by `status.*` helpers in main.ts (which
+ * are not ANSI-free), so this module only enforces the plan (2), plan step (4),
+ * and content-in-step (6) levels via the `indent` helper below.
  */
 
 type PlanStep = Record<string, unknown> & {
@@ -33,6 +47,23 @@ type PlanObject = Record<string, unknown> & {
 type ExtractResult =
     | { valid: true; plan: PlanObject }
     | { valid: false; reason: string };
+
+/** Fixed indentation width per hierarchy level (spaces). */
+const INDENT = {
+    plan: 2,
+    planStep: 4,
+    contentInStep: 6,
+} as const;
+
+/**
+ * Return an indentation prefix (a run of spaces) for the given hierarchy level.
+ * Level "plan" -> 2 spaces, "planStep" -> 4 spaces, "contentInStep" -> 6 spaces.
+ * This is the single source of truth for the console indent scheme so tests can
+ * assert the exact prefix for each level.
+ */
+export function indent(level: keyof typeof INDENT): string {
+    return " ".repeat(INDENT[level]);
+}
 
 /**
  * Extract a JSON object from a planning response text. Accepts plain JSON or a
@@ -72,42 +103,43 @@ function text(value: unknown, fallback = "(not provided)"): string {
 }
 
 /**
- * Pretty-print a parsed plan object to stdout as readable, separated lines.
+ * Pretty-print a parsed plan object to stdout as readable, separated lines,
+ * indented according to the hierarchy (plan=2, plan step=4, content=6 spaces).
  * The write callback defaults to console.log and is parameterized only so
  * tests can capture the output.
  */
 export function printPlan(plan: unknown, write: (line: string) => void = (line) => console.log(line)): void {
     if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
-        write("PLAN");
-        write("  (plan could not be displayed: not a JSON object)");
+        write(`${indent("plan")}PLAN`);
+        write(`${indent("contentInStep")}(plan could not be displayed: not a JSON object)`);
         return;
     }
 
     const planObj = plan as PlanObject;
     const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
 
-    write("PLAN");
-    write(`  TLDR: ${text(planObj.tldr)}`);
-    write("  STEPS:");
+    write(`${indent("plan")}PLAN`);
+    write(`${indent("plan")}TLDR: ${text(planObj.tldr)}`);
+    write(`${indent("plan")}STEPS:`);
 
     if (steps.length === 0) {
-        write("    (no steps provided in the plan)");
+        write(`${indent("contentInStep")}(no steps provided in the plan)`);
     } else {
         for (const step of steps) {
             if (!step || typeof step !== "object" || Array.isArray(step)) {
-                write("    STEP \u2014 (unparseable step entry)");
+                write(`${indent("planStep")}STEP \u2014 (unparseable step entry)`);
                 continue;
             }
             const stepObj = step as PlanStep;
             const number = stepObj.step_number !== undefined && stepObj.step_number !== null ? String(stepObj.step_number) : "?";
-            write(`    STEP ${number}`);
-            write(`      TLDR: ${text(stepObj.tldr)}`);
-            write(`      JUSTIFICATION: ${text(stepObj.justification)}`);
-            write(`      DETAILS: ${text(stepObj.details)}`);
+            write(`${indent("planStep")}STEP ${number}`);
+            write(`${indent("contentInStep")}TLDR: ${text(stepObj.tldr)}`);
+            write(`${indent("contentInStep")}JUSTIFICATION: ${text(stepObj.justification)}`);
+            write(`${indent("contentInStep")}DETAILS: ${text(stepObj.details)}`);
         }
     }
 
     if (planObj.expected_outcome !== undefined && planObj.expected_outcome !== null) {
-        write(`  EXPECTED OUTCOME: ${text(planObj.expected_outcome)}`);
+        write(`${indent("plan")}EXPECTED OUTCOME: ${text(planObj.expected_outcome)}`);
     }
 }

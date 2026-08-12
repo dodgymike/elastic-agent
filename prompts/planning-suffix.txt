@@ -1,1 +1,18 @@
 PROVIDE A CLEAR, STEP-BY-STEP, CONCISE PLAN FOR LATER EXECUTION
+
+RESPOND IN JSON FORMAT ONLY.
+
+EXAMPLE RESPONSE:
+{
+  "tldr": { },
+  "steps": [{
+    "step_number": 1,
+    "tldr": "",
+    "justification": "",
+    "details": ""
+  }],
+  "expected_outcome": ""
+}
+
+THE GOAL IS BELOW.
+
