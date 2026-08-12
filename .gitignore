@@ -9,3 +9,10 @@ node_modules/
 
 .env
 dist/
+
+# Local state / secrets; keep out of the repository.
+.agentbus.invite.json
+.history_tmp_mike
+.history_tmp_mike_2
+data/
+spec-server-setup.md
