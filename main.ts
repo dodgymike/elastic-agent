@@ -2,7 +2,7 @@ import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/applicati
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
-import { extractPlanJson, printPlan } from "./plan-printer.js";
+import { extractPlanJson, planStepsFromObject, printPlan } from "./plan-printer.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -637,16 +637,24 @@ async function main() {
     new CompatibleResponseWrapper(planningResponse).print();
     recordUsage(configData, planningResponse);
     const plan = responseText(planningResponse);
-    // Best-effort pretty-print of the structured plan JSON (when the model
-    // supplied one). This is display-only: the downstream text-based
-    // planSteps()/formatPlan() flow is left untouched.
+    // Extract the plan JSON from the planning prompt response and use that
+    // object as the plan. The parsed JSON's step array becomes the active
+    // execution plan, replacing the previous text-based parsing. The
+    // planSteps() flow remains only as a fallback for responses that are not
+    // valid plan JSON.
     const parsedPlan = extractPlanJson(plan);
+    let activeSteps;
     if (parsedPlan.valid) {
         printPlan(parsedPlan.plan);
+        activeSteps = planStepsFromObject(parsedPlan.plan);
+        if (activeSteps.length === 0) {
+            status.warning("Planning response JSON had steps without usable text; falling back to text parsing.");
+            activeSteps = planSteps(plan);
+        }
     } else {
-        status.warning(`Planning response was not parseable as plan JSON (${parsedPlan.reason}); showing the raw response only.`);
+        status.warning(`Planning response was not parseable as plan JSON (${parsedPlan.reason}); falling back to text parsing.`);
+        activeSteps = planSteps(plan);
     }
-    const activeSteps = planSteps(plan);
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
     configData.lastResponseId = null;

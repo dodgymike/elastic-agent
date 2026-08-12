@@ -9,7 +9,8 @@
     "test:step-renderer": "rm -rf test/.step-renderer-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.step-renderer-build test/step-renderer.test.ts step-renderer.ts && FORCE_COLOR=1 node test/.step-renderer-build/test/step-renderer.test.js; status=$?; rm -rf test/.step-renderer-build; exit $status",
     "test:review-result": "node test/review-result.test.js",
     "test:review-loop": "node test/review-loop.test.js",
-    "test:plan-print": "rm -rf test/.plan-print-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.plan-print-build plan-printer.ts && node test/plan-print.test.js; status=$?; rm -rf test/.plan-print-build; exit $status"
+    "test:plan-print": "rm -rf test/.plan-print-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.plan-print-build plan-printer.ts && node test/plan-print.test.js; status=$?; rm -rf test/.plan-print-build; exit $status",
+    "test:plan-parser": "rm -rf test/.plan-parser-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.plan-parser-build plan-printer.ts && node test/plan-parser.test.js; status=$?; rm -rf test/.plan-parser-build; exit $status"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1107.0",

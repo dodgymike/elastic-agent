@@ -11,10 +11,15 @@
  *     "expected_outcome": "..."
  *   }
  *
+ * This module also owns the robust JSON extraction/parsing helpers that turn
+ * the LLM's planning prompt response into a typed plan object (the source of
+ * the plan used throughout the agent). The LLM may wrap the JSON in a fenced
+ * ```json``` code block or include surrounding prose, so the extraction
+ * helpers isolate the JSON substring before parsing.
+ *
  * These helpers intentionally avoid ANSI so they can be exercised with plain
  * Node in unit tests. Missing or malformed fields are handled gracefully and
- * fall back to a summary so the pretty-print never throws. The downstream
- * text-based planSteps()/formatPlan() flow is untouched.
+ * fall back to a summary so the pretty-print never throws.
  *
  * Console indentation follows a fixed hierarchy, mirroring the agent loop's
  * output layout (see the agent execution plan for the indent scheme):
@@ -31,21 +36,29 @@
  * and content-in-step (6) levels via the `indent` helper below.
  */
 
-type PlanStep = Record<string, unknown> & {
+export interface PlanStep {
     step_number?: number | string;
     tldr?: unknown;
     justification?: unknown;
     details?: unknown;
-};
+}
 
-type PlanObject = Record<string, unknown> & {
+export interface PlanObject {
     tldr?: unknown;
     steps?: PlanStep[];
     expected_outcome?: unknown;
-};
+}
+
+/**
+ * A validated plan: an object with a `steps` array whose entries are
+ * PlanStep objects.
+ */
+export interface ParsedPlan extends PlanObject {
+    steps: PlanStep[];
+}
 
 type ExtractResult =
-    | { valid: true; plan: PlanObject }
+    | { valid: true; plan: ParsedPlan }
     | { valid: false; reason: string };
 
 /** Fixed indentation width per hierarchy level (spaces). */
@@ -66,32 +79,101 @@ export function indent(level: keyof typeof INDENT): string {
 }
 
 /**
- * Extract a JSON object from a planning response text. Accepts plain JSON or a
- * JSON block fenced with ```json ... ```, and tolerates surrounding prose.
+ * Extract the JSON object substring from a planning response text. Accepts
+ * plain JSON or a JSON block fenced with ```json ... ```, and tolerates
+ * surrounding prose. Throws a descriptive error when no JSON object is found.
+ *
+ * Steps: (a) trim whitespace; (b) if the response contains a fenced ```json
+ * block, use its content; (c) otherwise isolate the substring from the first
+ * '{' to the last '}' and return it.
  */
-export function extractPlanJson(text: string): ExtractResult {
-    const trimmed = String(text).trim();
-    if (!trimmed) return { valid: false, reason: "Planning response was empty." };
+export function extractJsonFromResponse(response: string): string {
+    const trimmed = String(response ?? "").trim();
+    if (!trimmed) throw new Error("Planning response was empty.");
 
     let jsonText = trimmed;
     const fenced = trimmed.match(/```json\s*([\s\S]*?)\s*```/);
     if (fenced) jsonText = fenced[1].trim();
 
     const start = jsonText.indexOf("{");
-    if (start === -1) return { valid: false, reason: "Planning response did not contain a JSON object." };
+    if (start === -1) throw new Error("Planning response did not contain a JSON object.");
 
     const end = jsonText.lastIndexOf("}");
-    if (end < start) return { valid: false, reason: "Planning response did not contain a closing JSON brace." };
+    if (end < start) throw new Error("Planning response did not contain a closing JSON brace.");
 
-    jsonText = jsonText.slice(start, end + 1);
+    return jsonText.slice(start, end + 1);
+}
+
+/**
+ * Parse an extracted JSON string into a validated plan object and return it.
+ * Throws a descriptive error when parsing fails or the result does not have
+ * the required shape: an object with a `steps` array whose entries are
+ * objects, each carrying a `step_number` (number) and a `tldr` (string).
+ */
+export function parsePlanJson(extracted: string): ParsedPlan {
+    let parsed: unknown;
     try {
-        const plan = JSON.parse(jsonText);
-        if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
-            return { valid: false, reason: "Planning response JSON is not an object." };
-        }
-        return { valid: true, plan: plan as PlanObject };
+        parsed = JSON.parse(extracted);
     } catch (error) {
-        return { valid: false, reason: `Planning response JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
+        throw new Error(`Planning response JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Planning response JSON is not an object.");
+    }
+
+    const plan = parsed as Record<string, unknown>;
+    if (!Array.isArray(plan.steps) || plan.steps.length === 0) {
+        throw new Error("Planning response JSON must contain a non-empty 'steps' array.");
+    }
+
+    for (const step of plan.steps) {
+        if (!step || typeof step !== "object" || Array.isArray(step)) {
+            throw new Error("Each plan step must be an object.");
+        }
+        const stepObj = step as PlanStep;
+        if (typeof stepObj.step_number !== "number") {
+            throw new Error("Each plan step must have a numeric step_number.");
+        }
+        if (typeof stepObj.tldr !== "string" || !stepObj.tldr.trim()) {
+            throw new Error("Each plan step must have a non-empty string tldr.");
+        }
+    }
+
+    return plan as unknown as ParsedPlan;
+}
+
+/**
+ * Convert a validated plan object into the array of step strings used by the
+ * agent's execution/review loops. Each step string is its `tldr`, with the
+ * `details` appended when present. This is the bridge between the parsed JSON
+ * plan object and the existing text-based step flow.
+ */
+export function planStepsFromObject(plan: PlanObject): string[] {
+    const steps = Array.isArray(plan.steps) ? plan.steps : [];
+    const strings = steps
+        .map((step) => {
+            if (!step || typeof step !== "object" || Array.isArray(step)) return "";
+            const tldr = typeof step.tldr === "string" ? step.tldr.trim() : "";
+            const details = typeof step.details === "string" ? step.details.trim() : "";
+            return [tldr, details].filter(Boolean).join(" \u2014 ");
+        })
+        .filter((s) => s.length > 0);
+    return strings;
+}
+
+/**
+ * Extract a JSON plan object from a planning response text and return it as a
+ * non-throwing result ({ valid: true, plan } or { valid: false, reason }).
+ * This is the compatibility wrapper used for best-effort parsing and display;
+ * it delegates to extractJsonFromResponse + parsePlanJson.
+ */
+export function extractPlanJson(text: string): ExtractResult {
+    try {
+        const extracted = extractJsonFromResponse(text);
+        return { valid: true, plan: parsePlanJson(extracted) };
+    } catch (error) {
+        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
     }
 }
 
