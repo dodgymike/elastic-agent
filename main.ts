@@ -2,7 +2,7 @@ import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/applicati
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
-import { extractPlanJson, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary } from "./worktree.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -69,18 +69,38 @@ const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.
 const replanPromptTemplate = readFileSync("prompts/replan-prompt.txt", "utf-8");
 const reviewPromptTemplate = readFileSync("prompts/review-prompt.txt", "utf-8");
 
+/**
+ * Print one status line through `write`, applying `prefix` before the chalk
+ * label on the first line and before every continuation line. This keeps
+ * multi-line messages (for example RESPONSE summaries containing several text
+ * responses) aligned under their label without changing the message text.
+ */
+function printStatusLine(write: (line: string) => void, label: string, message: string, prefix = ""): void {
+    const lines = String(message).split("\n");
+    write(`${prefix}${label} ${lines[0]}`);
+    for (let index = 1; index < lines.length; index += 1) write(`${prefix}${lines[index]}`);
+}
+
 const status = {
-    planning: (message) => console.log(`${chalk.cyan.bold("[PLAN]")} ${message}`),
-    step: (message) => console.log(`${chalk.yellow.bold("[STEP]")} ${message}`),
-    tool: (message) => console.log(`${chalk.blue.bold("[TOOL]")} ${message}`),
-    response: (message) => console.log(`${chalk.gray("[RESPONSE]")} ${message}`),
-    success: (message) => console.log(`${chalk.green.bold("[SUCCESS]")} ${message}`),
-    feedback: (message) => console.log(`${chalk.magenta.bold("[FEEDBACK]")} ${message}`),
-    change: (message) => console.log(`${chalk.cyan.bold("[PLAN CHANGE]")} ${message}`),
-    replan: (message) => console.log(`${chalk.magenta.bold("[REPLAN]")} ${message}`),
-    warning: (message) => console.warn(`${chalk.yellow.bold("[WARNING]")} ${message}`),
-    error: (message) => console.error(`${chalk.red.bold("[ERROR]")} ${message}`),
+    planning: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLAN]"), message, prefix),
+    step: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.yellow.bold("[STEP]"), message, prefix),
+    tool: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.blue.bold("[TOOL]"), message, prefix),
+    response: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.gray("[RESPONSE]"), message, prefix),
+    success: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.green.bold("[SUCCESS]"), message, prefix),
+    feedback: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[FEEDBACK]"), message, prefix),
+    change: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLAN CHANGE]"), message, prefix),
+    replan: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[REPLAN]"), message, prefix),
+    warning: (message: string, prefix = "") => printStatusLine((line) => console.warn(line), chalk.yellow.bold("[WARNING]"), message, prefix),
+    error: (message: string, prefix = "") => printStatusLine((line) => console.error(line), chalk.red.bold("[ERROR]"), message, prefix),
 };
+
+/**
+ * Indentation prefix for child tool-call feedback lines (SUCCESS/ERROR/RESPONSE)
+ * emitted below a [TOOL] pending line. It is one hierarchy level below the
+ * active plan-step indent: planStep=4 spaces plus one additional indent level
+ * equals the content-in-step indent of 6 spaces, sourced from plan-printer.ts.
+ */
+const toolChildIndent = indent("contentInStep");
 
 const tools = [
     {
@@ -210,10 +230,10 @@ function renderToolCallPending(toolCall) {
     status.tool(`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`);
 }
 function renderToolCallSucceeded(toolCall, result) {
-    status.success(`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`);
+    status.success(`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`, toolChildIndent);
 }
 function renderToolCallFailed(toolCall, error) {
-    status.error(`Failed: ${toolCall.name}: ${error}`);
+    status.error(`Failed: ${toolCall.name}: ${error}`, toolChildIndent);
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
 /**
@@ -253,7 +273,7 @@ function usageSummary(usage) { const total = tokenCount(usage?.total_tokens); co
 function totalUsage(tokenUsage) {
     return tokenUsage.reduce((sum, usage) => ({ total: sum.total + tokenCount(usage.total_tokens), cached: sum.cached + tokenCount(usage.cached_tokens), totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache) }), { total: 0, cached: 0, totalMinusCache: 0 });
 }
-class CompatibleResponseWrapper { constructor(response) { this.response = response; } print() { status.response(summarizeResponse(this.response)); } }
+class CompatibleResponseWrapper { constructor(response) { this.response = response; } print(prefix = "") { status.response(summarizeResponse(this.response), prefix); } }
 function writeFileAtomically(filename, content) {
     const directory = dirname(filename);
     const temporaryFilename = join(directory, `.${basename(filename)}.${process.pid}.${randomUUID()}.tmp`);
@@ -574,7 +594,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
         }
         const response = await client.create(request);
-        new CompatibleResponseWrapper(response).print();
+        new CompatibleResponseWrapper(response).print(previousResponseId ? toolChildIndent : "");
         recordUsage(configData, response);
         previousResponseId = response.id;
         toolOutputs = [];
