@@ -4,7 +4,8 @@
     "test:llm-adapters": "rm -rf test/.llm-adapter-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.llm-adapter-build llm/adapter-contract.ts llm/adapter-registry.ts llm/application.ts llm/openai-adapter.ts llm/bedrock-claude-adapter.ts llm/deepseek-v4-adapter.ts test/llm-adapters.test.ts && node test/.llm-adapter-build/test/llm-adapters.test.js; status=$?; rm -rf test/.llm-adapter-build; exit $status",
     "build": "rm -rf dist && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir dist main.ts llm/adapter-contract.ts llm/adapter-registry.ts llm/deepseek-v4-adapter.ts llm/application.ts",
     "start": "npm run build && node --env-file-if-exists=.env dist/main.js",
-    "test:tool-rendering": "node test/main2-tool-rendering.test.js"
+    "test:tool-rendering": "node test/main2-tool-rendering.test.js",
+    "test:step-renderer": "rm -rf test/.step-renderer-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.step-renderer-build test/step-renderer.test.ts step-renderer.ts && FORCE_COLOR=1 node test/.step-renderer-build/test/step-renderer.test.js; status=$?; rm -rf test/.step-renderer-build; exit $status"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1107.0",

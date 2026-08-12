@@ -1,6 +1,7 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
+import { buildPrettyStepLines } from "./step-renderer.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -431,7 +432,10 @@ function functionCallOutput(toolCall, resultOrError) {
 }
 
 async function executePlanStep(step, index, steps, plan, configData) {
-    status.step(`Current step ${index + 1}/${steps.length}: ${step}`);
+    const color = typeof process.stdout.isTTY === "boolean" && process.stdout.isTTY;
+    for (const line of buildPrettyStepLines(index, steps.length, step, { color, remainingSteps: steps.slice(index + 1) })) {
+        status.step(line);
+    }
     let previousResponseId;
     let toolOutputs = [];
     while (true) {
