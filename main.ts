@@ -476,17 +476,28 @@ async function executePlanStep(step, index, steps, plan, configData) {
         saveData(configData);
         if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
         if (toolOutputs.length === 0) {
-            const feedbackEntry = captureExecutionFeedback(configData, response, index);
+            let feedbackEntry = captureExecutionFeedback(configData, response, index);
             reportExecutionFeedback(feedbackEntry);
             saveData(configData);
-            // Execution-plan step 2: when the execution-feedback response is
-            // not valid JSON, append the parsing error to the step prompt so
-            // the retry request (step 3) tells the model exactly what went wrong.
+            // Execution-plan steps 2-3: when the execution-feedback response is
+            // not valid JSON, append the parsing error to the ambient step prompt,
+            // then send that amended prompt to the LLM as a retry request and
+            // re-capture the execution feedback from the retry response.
             if (!feedbackEntry.valid) {
                 const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat });
                 configData.retryPrompt =
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
+                status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`);
+                const retryResponse = await client.create({ input: configData.retryPrompt });
+                new CompatibleResponseWrapper(retryResponse).print();
+                recordUsage(configData, retryResponse);
+                saveData(configData);
+                if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+                const retryEntry = captureExecutionFeedback(configData, retryResponse, index);
+                reportExecutionFeedback(retryEntry);
+                feedbackEntry = retryEntry;
+                saveData(configData);
             }
             status.success(`Step ${index + 1}/${steps.length} completed.`);
             return feedbackEntry;
