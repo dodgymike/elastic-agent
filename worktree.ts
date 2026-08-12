@@ -78,6 +78,33 @@ export function stageAllInWorktree(worktreePath: string): void {
   runGit(worktreePath, ["add", "--all"]);
 }
 
+/**
+ * Build a human-readable summary of the staged changes in the worktree that are
+ * not yet committed, i.e. the execution work the review step must assess.
+ *
+ * The summary lists the changed files (via `git diff --cached --stat`) and then
+ * the actual patch (via `git diff --cached`) so a reviewer can see concretely
+ * what changed rather than only prose about steps that were executed. The patch
+ * is truncated to a generous cap to keep very large diffs from blowing up the
+ * review prompt; the file/stat block always reflects the full change set.
+ *
+ * Returns a ready-to-embed string. When there is nothing staged against HEAD,
+ * returns a short "(no staged changes)" marker so callers never inject a blank
+ * or misleading block.
+ */
+export function stagedChangesSummary(worktreePath: string, maxPatchChars = 60000): string {
+  const names = runGit(worktreePath, ["diff", "--cached", "--name-only"]);
+  const stat = runGit(worktreePath, ["diff", "--cached", "--stat"]);
+  const patch = runGit(worktreePath, ["diff", "--cached"]);
+  const nameLines = names.length > 0 ? names.split("\n").map((n) => `  - ${n}`).join("\n") : "(none)";
+  let statBlock = stat.length > 0 ? stat : "(no staged changes)";
+  if (patch.length === 0) {
+    return `CHANGED FILES (staged vs HEAD):\n${nameLines}\n\nDIFF:\n(no staged changes against HEAD)`;
+  }
+  const truncatedPatch = patch.length > maxPatchChars ? `${patch.slice(0, maxPatchChars)}\n…(diff truncated: ${patch.length} chars total)` : patch;
+  return `CHANGED FILES (staged vs HEAD):\n${nameLines}\n\nDIFF STAT:\n${statBlock}\n\nDIFF PATCH:\n${truncatedPatch}`;
+}
+
 /** Commit the staged changes inside the worktree with the given message. */
 export function commitInWorktree(worktreePath: string, message: string): void {
   if (!message || typeof message !== "string") {

@@ -3,7 +3,7 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { extractPlanJson, planStepsFromObject, printPlan } from "./plan-printer.js";
-import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain } from "./worktree.js";
+import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary } from "./worktree.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -684,9 +684,22 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
     status.planning(`Reviewing the completed work (attempt ${reviewAttempt}/${maxReviewAttempts})...`);
     const executedSteps = formatExecutedSteps(configData.completedSteps);
     const learnings = formatLearnings(configData.reviewLearnings ?? []);
+    // Surface the actual staged execution work (changed files + diff against
+    // HEAD) to the reviewer so it reviews concrete changes rather than only the
+    // prose describing executed steps, which previously left it reporting "no
+    // changes detected". Best-effort: if the diff cannot be read, fall back to
+    // an explicit notice rather than failing the review phase.
+    let changes = "(no staged changes summary available)";
+    if (executionWorktreePath) {
+        try {
+            changes = stagedChangesSummary(executionWorktreePath);
+        } catch (error) {
+            status.warning(`Could not read staged changes for review: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
     const reviewRequest = renderPrompt(reviewPromptTemplate, {
         claudeInstructions, originalPrompt: commandLinePrompt, plan: formatPlan(activeSteps),
-        executedSteps, reviewPlan, learnings, reviewAttempt, maxReviewAttempts,
+        executedSteps, changes, reviewPlan, learnings, reviewAttempt, maxReviewAttempts,
     });
     return runReview(client, configData, reviewRequest, null);
 }

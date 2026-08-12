@@ -9,7 +9,7 @@
 // Compiled and executed standalone by the `test:worktree` npm script.
 import {
     createWorktree, ensureWorktree, stageAllInWorktree, commitInWorktree,
-    mergeWorktreeIntoMain, cleanupWorktree, listWorktrees,
+    mergeWorktreeIntoMain, cleanupWorktree, listWorktrees, stagedChangesSummary,
 } from "../worktree.js";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
@@ -94,6 +94,26 @@ try {
     assert.ok(stagedAgain.includes("feature.txt") && stagedAgain.includes("fix.txt"),
         "staged work must accumulate across review attempts in the same worktree");
     assert.ok(gitOps.commits.length === 0, "failing review must not commit");
+
+    // 4a. stagedChangesSummary surfaces the staged work (the review's change
+    //     context): it must list both staged files and include a diff patch so
+    //     the reviewer has concrete change data to assess (fixes "no changes
+    //     detected" reviews that previously saw only prose).
+    const summary = stagedChangesSummary(worktreePath);
+    assert.ok(summary.includes("feature.txt") && summary.includes("fix.txt"),
+        "stagedChangesSummary must list the staged changed files");
+    assert.ok(summary.includes("DIFF PATCH") && summary.includes("+execution produced this"),
+        "stagedChangesSummary must include the staged diff patch content");
+
+    // 4b. With nothing staged against HEAD, the summary reports no changes
+    //     rather than throwing or injecting a blank block. Create a fresh
+    //     worktree with no changes for this check.
+    const emptyBranch = "empty-summary-branch";
+    const emptyPath = createWorktree(emptyBranch, repoRoot);
+    cleanupPaths.push(emptyPath);
+    const emptySummary = stagedChangesSummary(emptyPath);
+    assert.ok(/no staged changes/.test(emptySummary), "empty staged summary must report no staged changes");
+    cleanupWorktree(emptyBranch, repoRoot);
 
     // 5. Happy review: commit in the worktree and merge into main.
     reviewHappyCommits(worktreePath, branch, repoRoot, "all criteria passed");

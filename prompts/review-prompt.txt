@@ -13,6 +13,9 @@ ${plan}
 Executed steps:
 ${executedSteps}
 
+ACTUAL STAGED CHANGES (the concrete work produced by the executed steps, staged in the execution worktree against HEAD — review THIS, not just the prose above):
+${changes}
+
 Review plan (created at the start of the review phase):
 ${reviewPlan}
 
