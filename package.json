@@ -6,13 +6,15 @@
     "build": "rm -rf dist && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir dist main.ts llm/adapter-contract.ts llm/adapter-registry.ts llm/deepseek-v4-adapter.ts llm/application.ts",
     "start": "npm run build && node --env-file-if-exists=.env dist/main.js",
     "test:tool-rendering": "node test/main2-tool-rendering.test.js",
+    "test:edit-tool": "rm -rf test/.edit-tool-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.edit-tool-build tools/Edit.ts tools/Read.ts test/edit-tool.test.ts && node test/.edit-tool-build/test/edit-tool.test.js; status=$?; rm -rf test/.edit-tool-build; exit $status",
     "test:step-renderer": "rm -rf test/.step-renderer-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.step-renderer-build test/step-renderer.test.ts step-renderer.ts && FORCE_COLOR=1 node test/.step-renderer-build/test/step-renderer.test.js; status=$?; rm -rf test/.step-renderer-build; exit $status",
     "test:review-result": "node test/review-result.test.js",
     "test:review-loop": "node test/review-loop.test.js",
     "test:review-commit": "node test/review-commit.test.js",
     "test:worktree": "rm -rf test/.worktree-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.worktree-build worktree.ts test/worktree.test.ts && node test/.worktree-build/test/worktree.test.js; status=$?; rm -rf test/.worktree-build; exit $status",
     "test:plan-print": "rm -rf test/.plan-print-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.plan-print-build plan-printer.ts && node test/plan-print.test.js; status=$?; rm -rf test/.plan-print-build; exit $status",
-    "test:plan-parser": "rm -rf test/.plan-parser-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.plan-parser-build plan-printer.ts && node test/plan-parser.test.js; status=$?; rm -rf test/.plan-parser-build; exit $status"
+    "test:plan-parser": "rm -rf test/.plan-parser-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.plan-parser-build plan-printer.ts && node test/plan-parser.test.js; status=$?; rm -rf test/.plan-parser-build; exit $status",
+    "test:spec-keeper-epic-flow": "rm -rf test/.spec-keeper-flow-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.spec-keeper-flow-build specKeeperFlow.ts tools/SpecKeeper.ts test/spec-keeper-epic-flow.test.ts && node test/.spec-keeper-flow-build/test/spec-keeper-epic-flow.test.js; status=$?; rm -rf test/.spec-keeper-flow-build; exit $status"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1107.0",
