@@ -43,6 +43,7 @@ Credentials must be supplied through the runtime environment or secret manager, 
 `);
 program.parse(process.argv);
 const options = program.opts();
+const commitInstruction = options.review ? "do not commit" : "commit all of your work";
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
@@ -632,7 +633,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
         } else {
-            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
+            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext });
         }
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
@@ -665,7 +666,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             reportExecutionFeedback(feedbackEntry);
             saveData(configData);
             if (!feedbackEntry.valid) {
-                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
+                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext });
                 configData.retryPrompt =
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
