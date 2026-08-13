@@ -32,8 +32,10 @@
  *   content in step    6        TLDR: ... / JUSTIFICATION: ... / DETAILS: ...
  *
  * The phase-level lines are produced by `status.*` helpers in main.ts (which
- * are not ANSI-free), so this module only enforces the plan (2), plan step (4),
- * and content-in-step (6) levels via the `indent` helper below.
+ * are not ANSI-free), while `printPlan` enforces the plan (2), plan step (4),
+ * and content-in-step (6) levels. The `indent` helper below is the single
+ * source of truth for all four prefixes so main.ts and printPlan share one
+ * indentation scheme.
  */
 
 export interface PlanStep {
@@ -63,6 +65,7 @@ type ExtractResult =
 
 /** Fixed indentation width per hierarchy level (spaces). */
 const INDENT = {
+    phase: 0,
     plan: 2,
     planStep: 4,
     contentInStep: 6,
@@ -70,9 +73,9 @@ const INDENT = {
 
 /**
  * Return an indentation prefix (a run of spaces) for the given hierarchy level.
- * Level "plan" -> 2 spaces, "planStep" -> 4 spaces, "contentInStep" -> 6 spaces.
- * This is the single source of truth for the console indent scheme so tests can
- * assert the exact prefix for each level.
+ * Level "phase" -> 0 spaces, "plan" -> 2 spaces, "planStep" -> 4 spaces,
+ * "contentInStep" -> 6 spaces. This is the single source of truth for the
+ * console indent scheme so tests can assert the exact prefix for each level.
  */
 export function indent(level: keyof typeof INDENT): string {
     return " ".repeat(INDENT[level]);

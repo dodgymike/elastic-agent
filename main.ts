@@ -95,12 +95,49 @@ const status = {
 };
 
 /**
+ * Console hierarchy levels shared by the agent loop and plan-printer.ts.
+ * Numeric depth: phase=0, plan=1, plan step=2, line content=3. The actual
+ * indentation widths (0/2/4/6 spaces) are owned by plan-printer.ts indent(),
+ * which remains the single source of truth for the console indent scheme.
+ */
+type ConsoleHierarchyLevel = "phase" | "plan" | "planStep" | "contentInStep";
+
+const CONSOLE_HIERARCHY_LEVELS: Readonly<Record<ConsoleHierarchyLevel, number>> = {
+    phase: 0,
+    plan: 1,
+    planStep: 2,
+    contentInStep: 3,
+} as const;
+
+/**
+ * Return the indentation prefix for a console hierarchy level. The prefix is
+ * resolved through plan-printer.ts indent() so main.ts and printPlan share the
+ * exact same space widths; chalk styling is applied by the status helpers and
+ * is not altered here.
+ */
+function hierarchyIndent(level: ConsoleHierarchyLevel): string {
+    return indent(level);
+}
+
+/**
+ * Print a multi-line message at a console hierarchy level, indenting every
+ * line with the level prefix. Callers apply any chalk styling to the message
+ * before calling this helper.
+ */
+function logWithHierarchy(message: string, level: ConsoleHierarchyLevel): void {
+    const prefix = hierarchyIndent(level);
+    const lines = String(message).split("\n");
+    for (const line of lines) console.log(`${prefix}${line}`);
+}
+
+/**
  * Indentation prefix for child tool-call feedback lines (SUCCESS/ERROR/RESPONSE)
  * emitted below a [TOOL] pending line. It is one hierarchy level below the
  * active plan-step indent: planStep=4 spaces plus one additional indent level
- * equals the content-in-step indent of 6 spaces, sourced from plan-printer.ts.
+ * equals the content-in-step indent of 6 spaces, sourced from plan-printer.ts
+ * through hierarchyIndent().
  */
-const toolChildIndent = indent("contentInStep");
+const toolChildIndent = hierarchyIndent("contentInStep");
 
 const tools = [
     {
