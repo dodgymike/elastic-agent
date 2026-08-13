@@ -28,6 +28,7 @@ program
     .description("Plan and execute a prompt with the selected LLM provider.")
     .argument("<prompt>", "task or request to plan and execute")
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
+    .option("--review", "Run the review stage after execution (default: false)", false)
     .addHelpText("after", `
 Provider selection:
   --provider <provider-id> takes precedence over LLM_PROVIDER.
@@ -41,6 +42,7 @@ Selected-provider configuration:
 Credentials must be supplied through the runtime environment or secret manager, never command-line arguments or source control.
 `);
 program.parse(process.argv);
+const options = program.opts();
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
@@ -771,7 +773,7 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
     return runReview(client, configData, reviewRequest, null);
 }
 
-async function main() {
+async function main(options: { review?: boolean } = {}) {
     client = new MultiTurnLlmRuntime(await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }), modelConfiguration.model);
     let configData = readData();
     if (!configData) configData = { responseIds: [] };
@@ -930,7 +932,7 @@ function cleanupExecutionWorktree() {
     }
 }
 
-main()
+main(options)
     .catch((error) => {
         cleanupExecutionWorktree();
         status.error(error instanceof Error ? error.stack ?? error.message : String(error));
