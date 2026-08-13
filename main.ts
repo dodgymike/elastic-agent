@@ -264,7 +264,7 @@ function toolCallArgumentSummary(argumentsText) {
 }
 function renderToolCallPending(toolCall) {
     const argumentsSummary = toolCallArgumentSummary(toolCall.arguments);
-    status.tool(`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`);
+    status.tool(`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`, hierarchyIndent("contentInStep"));
 }
 function renderToolCallSucceeded(toolCall, result) {
     status.success(`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`, toolChildIndent);
@@ -471,7 +471,7 @@ function captureExecutionFeedback(configData, response, stepIndex) {
     else {
         entry.validationError = parsed.reason;
         entry.rawResponse = rawResponse;
-        status.error(`Step ${stepIndex + 1} response was not valid JSON: ${parsed.reason}`);
+        status.error(`Step ${stepIndex + 1} response was not valid JSON: ${parsed.reason}`, hierarchyIndent("contentInStep"));
     }
     configData.executionFeedback.push(entry);
     return entry;
@@ -496,42 +496,42 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
     const feedback = feedbackEntry?.feedback;
     if (!feedbackEntry?.valid || !feedback?.replanRequired) return { attempted: false, applied: false };
     if (remainingSteps.length === 0) {
-        status.warning("Replan request skipped because there are no remaining steps to replace.");
+        status.warning("Replan request skipped because there are no remaining steps to replace.", hierarchyIndent("contentInStep"));
         return { attempted: false, applied: false, reason: "No remaining plan steps." };
     }
     if (configData.replanAttemptCount >= maxReplanAttempts) {
-        status.warning(`Replan request skipped: the limit of ${maxReplanAttempts} attempts has been reached. Keeping the existing remaining plan.`);
+        status.warning(`Replan request skipped: the limit of ${maxReplanAttempts} attempts has been reached. Keeping the existing remaining plan.`, hierarchyIndent("contentInStep"));
         return { attempted: false, applied: false, reason: "Replan attempt limit reached." };
     }
 
     configData.replanAttemptCount += 1;
     const attempt = configData.replanAttemptCount;
-    status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`);
+    status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`, hierarchyIndent("contentInStep"));
     const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
     const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps });
     try {
         const response = await client.create({ input: request });
-        new CompatibleResponseWrapper(response).print();
+        new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
         recordUsage(configData, response);
         const validation = actionablePlanSteps(responseText(response));
         const historyEntry = { attempt, response_id: response.id, reason: feedback.replanReason, applied: false };
         if (!validation.valid) {
             historyEntry.failure = validation.reason;
             configData.replanHistory.push(historyEntry);
-            status.warning(`Rejected revised plan; keeping the existing remaining plan: ${validation.reason}`);
+            status.warning(`Rejected revised plan; keeping the existing remaining plan: ${validation.reason}`, hierarchyIndent("contentInStep"));
             return { attempted: true, applied: false, reason: validation.reason };
         }
         activeSteps.splice(remainingStart, remainingSteps.length, ...validation.steps);
         historyEntry.applied = true;
         historyEntry.replacementStepCount = validation.steps.length;
         configData.replanHistory.push(historyEntry);
-        status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${validation.steps.length}.`);
+        status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${validation.steps.length}.`, hierarchyIndent("contentInStep"));
         return { attempted: true, applied: true, steps: validation.steps };
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         configData.replanHistory.push({ attempt, reason: feedback.replanReason, applied: false, failure: reason });
-        status.warning(`Replan request failed; keeping the existing remaining plan: ${reason}`);
+        status.warning(`Replan request failed; keeping the existing remaining plan: ${reason}`, hierarchyIndent("contentInStep"));
         return { attempted: true, applied: false, reason };
     }
 }
@@ -544,30 +544,30 @@ function appendSuggestedUpdate(step, update) {
 function reportExecutionFeedback(feedbackEntry) {
     const stepLabel = `Step ${feedbackEntry?.step ?? "unknown"}`;
     if (!feedbackEntry?.valid) {
-        status.warning(`${stepLabel} feedback was retained as an execution note but not applied: ${feedbackEntry?.validationError ?? "unknown validation error"}`);
+        status.warning(`${stepLabel} feedback was retained as an execution note but not applied: ${feedbackEntry?.validationError ?? "unknown validation error"}`, hierarchyIndent("contentInStep"));
         return;
     }
 
     const feedback = feedbackEntry.feedback;
-    status.feedback(`${stepLabel} status: ${feedback.stepStatus}. ${truncate(feedback.summary)}`);
+    status.feedback(`${stepLabel} status: ${feedback.stepStatus}. ${truncate(feedback.summary)}`, hierarchyIndent("contentInStep"));
     if (feedback.findings.length > 0) {
-        status.feedback(`${stepLabel} findings: ${feedback.findings.map((finding) => truncate(finding, 160)).join("; ")}`);
+        status.feedback(`${stepLabel} findings: ${feedback.findings.map((finding) => truncate(finding, 160)).join("; ")}`, hierarchyIndent("contentInStep"));
     }
     if (feedback.replanRequired) {
-        status.replan(`${stepLabel} recommends replanning: ${truncate(feedback.replanReason)}`);
+        status.replan(`${stepLabel} recommends replanning: ${truncate(feedback.replanReason)}`, hierarchyIndent("contentInStep"));
     } else {
-        status.replan(`${stepLabel} does not recommend replanning.`);
+        status.replan(`${stepLabel} does not recommend replanning.`, hierarchyIndent("contentInStep"));
     }
 }
 function reportAppliedPlanChanges(appliedChanges) {
     if (appliedChanges.localUpdate) {
-        status.change(`Accepted local update for step ${appliedChanges.localUpdate.step}: ${truncate(appliedChanges.localUpdate.update)}`);
+        status.change(`Accepted local update for step ${appliedChanges.localUpdate.step}: ${truncate(appliedChanges.localUpdate.update)}`, hierarchyIndent("contentInStep"));
     }
     for (const update of appliedChanges.planUpdates) {
-        status.change(`Accepted update for remaining step ${update.step}: ${truncate(update.update)}`);
+        status.change(`Accepted update for remaining step ${update.step}: ${truncate(update.update)}`, hierarchyIndent("contentInStep"));
     }
     for (const rejected of appliedChanges.rejectedPlanUpdates) {
-        status.warning(`Skipped suggested update for step ${rejected.step}: ${rejected.reason}`);
+        status.warning(`Skipped suggested update for step ${rejected.step}: ${rejected.reason}`, hierarchyIndent("contentInStep"));
     }
 }
 function applyExecutionFeedback(feedbackEntry, activeSteps, completedStepCount) {
@@ -618,7 +618,7 @@ function functionCallOutput(toolCall, resultOrError) {
 async function executePlanStep(step, index, steps, plan, configData, executionContext) {
     const color = typeof process.stdout.isTTY === "boolean" && process.stdout.isTTY;
     for (const line of buildPrettyStepLines(index, steps.length, step, { color, remainingSteps: steps.slice(index + 1) })) {
-        status.step(line);
+        status.step(line, hierarchyIndent("planStep"));
     }
     let previousResponseId;
     let toolOutputs = [];
@@ -631,7 +631,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, plan, index, steps, step, executionFeedbackFormat, executionContext });
         }
         const response = await client.create(request);
-        new CompatibleResponseWrapper(response).print(previousResponseId ? toolChildIndent : "");
+        new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
         recordUsage(configData, response);
         previousResponseId = response.id;
         toolOutputs = [];
@@ -665,9 +665,9 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                 configData.retryPrompt =
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
-                status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`);
+                status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`, hierarchyIndent("contentInStep"));
                 const retryResponse = await client.create({ input: configData.retryPrompt });
-                new CompatibleResponseWrapper(retryResponse).print();
+                new CompatibleResponseWrapper(retryResponse).print(hierarchyIndent("contentInStep"));
                 recordUsage(configData, retryResponse);
                 saveData(configData);
                 if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
@@ -676,7 +676,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                 feedbackEntry = retryEntry;
                 saveData(configData);
             }
-            status.success(`Step ${index + 1}/${steps.length} completed.`);
+            status.success(`Step ${index + 1}/${steps.length} completed.`, hierarchyIndent("contentInStep"));
             return feedbackEntry;
         }
     }
