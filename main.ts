@@ -853,59 +853,65 @@ async function main() {
     const accumulatedLearnings = [];
     let reviewAttempt = 0;
     let executionContext = "(none)";
-    while (true) {
-        await runExecutionPhase(activeSteps, plan, configData, executionContext);
-        reviewAttempt += 1;
-        const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt);
-        if (review.passed) {
-            status.success(`Review passed on attempt ${reviewAttempt}.`);
-            // The review step is happy: commit the staged execution work.
-            if (executionWorktreePath) {
-                try {
-                    // Stage once more (idempotent) to pick up anything staged during
-                    // the just-completed execution phase, then commit in the worktree
-                    // and merge the worktree branch into the current (main) branch.
-                    stageAllInWorktree(executionWorktreePath);
-                    const summary = summarizeReview(review);
-                    commitInWorktree(executionWorktreePath, `review happy: ${summary}`);
-                    mergeWorktreeIntoMain(executionWorktreeBranch, mainCwd);
-                    status.success(`Committed satisfied review work into main (review happy: ${summary}).`);
-                } catch (error) {
-                    const reason = error instanceof Error ? error.message : String(error);
-                    status.error(`Review passed but committing the staged work failed: ${reason}`);
-                    cleanupExecutionWorktree();
-                    throw new Error(`Review passed but the review commit failed: ${reason}`);
+
+    if(false) {
+        while (true) {
+            await runExecutionPhase(activeSteps, plan, configData, executionContext);
+            reviewAttempt += 1;
+            const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt);
+            if (review.passed) {
+                status.success(`Review passed on attempt ${reviewAttempt}.`);
+                // The review step is happy: commit the staged execution work.
+                if (executionWorktreePath) {
+                    try {
+                        // Stage once more (idempotent) to pick up anything staged during
+                        // the just-completed execution phase, then commit in the worktree
+                        // and merge the worktree branch into the current (main) branch.
+                        stageAllInWorktree(executionWorktreePath);
+                        const summary = summarizeReview(review);
+                        commitInWorktree(executionWorktreePath, `review happy: ${summary}`);
+                        mergeWorktreeIntoMain(executionWorktreeBranch, mainCwd);
+                        status.success(`Committed satisfied review work into main (review happy: ${summary}).`);
+                    } catch (error) {
+                        const reason = error instanceof Error ? error.message : String(error);
+                        status.error(`Review passed but committing the staged work failed: ${reason}`);
+                        cleanupExecutionWorktree();
+                        throw new Error(`Review passed but the review commit failed: ${reason}`);
+                    }
+                } else {
+                    status.warning("Review passed but there is no execution worktree in which to commit the work.");
                 }
-            } else {
-                status.warning("Review passed but there is no execution worktree in which to commit the work.");
+                // Mark the task as done (the completed-plan message below signals
+                // completion and the runner records the task in Spec Keeper).
+                break;
             }
-            // Mark the task as done (the completed-plan message below signals
-            // completion and the runner records the task in Spec Keeper).
+
+            // for (const learning of review.learnings ?? []) if (learning) accumulatedLearnings.push(learning);
+            // configData.reviewLearnings = accumulatedLearnings;
+            // status.warning(`Review did not pass on attempt ${reviewAttempt}/${maxReviewAttempts}: ${
+            //     (review.reasons ?? []).map((reason) => truncate(reason, 160)).join("; ") || "no reasons provided"}`);
+            // saveData(configData);
+
+            // if (reviewAttempt >= maxReviewAttempts) {
+            //     // 4th review loop: do NOT commit. Throw an explicit error explaining
+            //     // why the loop is not finishing.
+            //     throw new Error(
+            //         `Review failed after ${maxReviewAttempts} attempts: ${
+            //         (review.reasons ?? []).map((reason) => JSON.stringify(reason)).join("; ") || "none"}; must fix issues before committing.`);
+            // }
+
+            // status.replan(`Restarting execution phase with review feedback and learnings (attempt ${reviewAttempt}).`);
+            // executionContext =
+            //     "REVIEW FEEDBACK FROM THE PREVIOUS ATTEMPT — address these issues in the executed work:\n" +
+            //     (review.reasons ?? []).map((reason) => `- ${reason}`).join("\n") +
+            //     "\n\nLEARNINGS FROM EARLIER REVIEWS:" +
+            //     accumulatedLearnings.map((learning) => `\n- ${learning}`).join("");
+
             break;
         }
-
-        for (const learning of review.learnings ?? []) if (learning) accumulatedLearnings.push(learning);
-        configData.reviewLearnings = accumulatedLearnings;
-        status.warning(`Review did not pass on attempt ${reviewAttempt}/${maxReviewAttempts}: ${
-            (review.reasons ?? []).map((reason) => truncate(reason, 160)).join("; ") || "no reasons provided"}`);
-        saveData(configData);
-
-        if (reviewAttempt >= maxReviewAttempts) {
-            // 4th review loop: do NOT commit. Throw an explicit error explaining
-            // why the loop is not finishing.
-            throw new Error(
-                `Review failed after ${maxReviewAttempts} attempts: ${
-                (review.reasons ?? []).map((reason) => JSON.stringify(reason)).join("; ") || "none"}; must fix issues before committing.`);
-        }
-
-        status.replan(`Restarting execution phase with review feedback and learnings (attempt ${reviewAttempt}).`);
-        executionContext =
-            "REVIEW FEEDBACK FROM THE PREVIOUS ATTEMPT — address these issues in the executed work:\n" +
-            (review.reasons ?? []).map((reason) => `- ${reason}`).join("\n") +
-            "\n\nLEARNINGS FROM EARLIER REVIEWS:" +
-            accumulatedLearnings.map((learning) => `\n- ${learning}`).join("");
     }
-
+    
+    await runExecutionPhase(activeSteps, plan, configData, executionContext);
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     status.success("Plan complete. Stopping.");
