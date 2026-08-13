@@ -212,8 +212,10 @@ const tools = [
             }, required: ["action"],
         },
         exec_handler: (options) => {
-            // Execution steps stage changes in the worktree and never commit;
-            // committing is performed only by the review step when it is happy.
+            // In review mode, execution steps stage changes in the worktree and
+            // never commit; committing is performed only by the review step when
+            // it is happy. Without review mode, inExecutionPhase stays false and
+            // the Git tool may commit normally.
             if (options.action === "commit" && inExecutionPhase) {
                 return Promise.resolve({ error: "The Git tool cannot commit during the execution phase. Changes are staged in the execution worktree; only the review step commits when it is satisfied." });
             }
@@ -684,7 +686,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
     }
 }
 
-async function runExecutionPhase(activeSteps, plan, configData, executionContext = "(none)") {
+async function runExecutionPhase(activeSteps, plan, configData, executionContext = "(none)", useReviewWorktree = false) {
     configData.completedSteps = [];
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
@@ -693,17 +695,23 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     configData.lastToolCallIds = [];
     saveData(configData);
     if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
-    // Execution staging: plan steps write into a dedicated worktree and stage
-    // their changes there (git add -A) without ever committing. The worktree is
-    // created once and reused across review attempts so staged work accumulates
-    // for the review step to inspect. On entry we chdir into the worktree so the
-    // file tools (Write, ExecuteCommand, etc.) resolve paths inside it, and we
-    // restore the main working directory when the phase ends.
-    inExecutionPhase = true;
-    const worktree = ensureWorktree(executionWorktreeBranch, mainCwd);
-    executionWorktreePath = worktree;
+    // Execution staging (review mode only): plan steps write into a dedicated
+    // worktree and stage their changes there (git add -A) without ever
+    // committing. The worktree is created once and reused across review
+    // attempts so staged work accumulates for the review step to inspect. On
+    // entry we chdir into the worktree so the file tools (Write,
+    // ExecuteCommand, etc.) resolve paths inside it, and we restore the main
+    // working directory when the phase ends. Without review mode the phase
+    // runs directly in the main working directory and the Git tool is allowed
+    // to commit normally.
+    inExecutionPhase = false;
+    const worktree = useReviewWorktree ? ensureWorktree(executionWorktreeBranch, mainCwd) : null;
     const originalCwd = process.cwd();
-    process.chdir(worktree);
+    if (worktree) {
+        inExecutionPhase = true;
+        executionWorktreePath = worktree;
+        process.chdir(worktree);
+    }
     try {
         for (let index = 0; index < activeSteps.length; index += 1) {
             const executedStep = activeSteps[index];
@@ -714,15 +722,19 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             await attemptReplan(feedbackEntry, activeSteps, index, configData);
             configData.activePlanSteps = [...activeSteps];
             configData.lastAppliedPlanChanges = appliedChanges;
-            // Stage all changes this step produced into the worktree. We never
-            // commit here; the review step commits only when it is satisfied.
-            stageAllInWorktree(worktree);
+            if (worktree) {
+                // Stage all changes this step produced into the worktree. We never
+                // commit here; the review step commits only when it is satisfied.
+                stageAllInWorktree(worktree);
+            }
             saveData(configData);
             if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
         }
     } finally {
-        process.chdir(originalCwd);
-        inExecutionPhase = false;
+        if (worktree) {
+            process.chdir(originalCwd);
+            inExecutionPhase = false;
+        }
     }
 }
 
@@ -856,9 +868,9 @@ async function main(options: { review?: boolean } = {}) {
     let reviewAttempt = 0;
     let executionContext = "(none)";
 
-    if(false) {
+    if (options.review) {
         while (true) {
-            await runExecutionPhase(activeSteps, plan, configData, executionContext);
+            await runExecutionPhase(activeSteps, plan, configData, executionContext, true);
             reviewAttempt += 1;
             const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt);
             if (review.passed) {
@@ -911,9 +923,10 @@ async function main(options: { review?: boolean } = {}) {
 
             break;
         }
+    } else {
+        await runExecutionPhase(activeSteps, plan, configData, executionContext, false);
     }
-    
-    await runExecutionPhase(activeSteps, plan, configData, executionContext);
+
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     status.success("Plan complete. Stopping.");
