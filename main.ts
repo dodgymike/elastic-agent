@@ -222,7 +222,10 @@ const tools = [
             // it is happy. Without review mode, inExecutionPhase stays false and
             // the Git tool may commit normally.
             if (options.action === "commit" && inExecutionPhase) {
-                return Promise.resolve({ error: "The Git tool cannot commit during the execution phase. Changes are staged in the execution worktree; only the review step commits when it is satisfied." });
+                const message = executionWorktreePath
+                    ? "The Git tool cannot commit during the execution phase. Changes are staged in the execution worktree; only the review step commits when it is satisfied."
+                    : "The Git tool cannot commit during the execution phase; the --review flag requires the work to remain uncommitted.";
+                return Promise.resolve({ error: message });
             }
             return Git(options);
         },
@@ -790,6 +793,74 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
     return runReview(client, configData, reviewRequest, null);
 }
 
+/**
+ * Execute the original command-line prompt directly when the planning-necessity
+ * classifier decides no formal plan is needed. This is a single execution step:
+ * one initial LLM completion with the tool set, followed by tool-call
+ * continuations until the model returns a final answer. There is no planning
+ * prompt, no plan JSON, no plan review step, and no plan-derived worktree
+ * lifecycle. `reviewMode` preserves the existing --review commit behavior by
+ * blocking Git commits during the step, without creating a worktree.
+ */
+async function runSingleStep(prompt: string, configData: any, reviewMode: boolean): Promise<void> {
+    configData.completedSteps = [{ step: 1, text: commandLinePrompt }];
+    configData.activePlanSteps = [commandLinePrompt];
+    configData.lastResponseId = null;
+    configData.lastToolCallIds = [];
+    saveData(configData);
+    if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+
+    const previousInExecutionPhase = inExecutionPhase;
+    if (reviewMode) inExecutionPhase = true;
+
+    try {
+        status.step("Executing request directly without a plan.", hierarchyIndent("planStep"));
+        let previousResponseId;
+        let toolOutputs = [];
+        while (true) {
+            const request = { tools } as any;
+            if (previousResponseId) {
+                request.previous_response_id = previousResponseId;
+                request.input = toolOutputs;
+            } else {
+                request.input = prompt;
+            }
+            const response = await client.create(request);
+            new CompatibleResponseWrapper(response).print(toolChildIndent);
+            recordUsage(configData, response);
+            previousResponseId = response.id;
+            toolOutputs = [];
+            for (const output of response.output ?? []) {
+                if (output.type !== "function_call") continue;
+                renderToolCallPending(output);
+                const tool = tools.find((candidate) => candidate.name === output.name);
+                let toolArguments;
+                try {
+                    toolArguments = JSON.parse(output.arguments);
+                    if (!tool?.exec_handler) throw new Error(`No exec_handler found for tool: ${output.name}`);
+                    const toolResponse = await tool.exec_handler(toolArguments);
+                    toolOutputs.push(functionCallOutput(output, toolResponse));
+                    appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments, toolResponse));
+                    renderToolCallSucceeded(output, toolResponse);
+                } catch (error) {
+                    const toolResponse = { error: error instanceof Error ? error.message : String(error) };
+                    toolOutputs.push(functionCallOutput(output, toolResponse));
+                    appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments ?? {}, toolResponse));
+                    renderToolCallFailed(output, toolResponse.error);
+                }
+            }
+            saveData(configData);
+            if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+            if (toolOutputs.length === 0) {
+                status.success("Direct execution step completed.", hierarchyIndent("contentInStep"));
+                return;
+            }
+        }
+    } finally {
+        inExecutionPhase = previousInExecutionPhase;
+    }
+}
+
 async function main(options: { review?: boolean } = {}) {
     client = new MultiTurnLlmRuntime(await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }), modelConfiguration.model);
     let configData = readData();
@@ -814,9 +885,16 @@ async function main(options: { review?: boolean } = {}) {
     const selectedMode = planningNecessity.requiresPlanning ? "plan-then-execute" : "single-step";
     status.classification(`requiresPlanning=${planningNecessity.requiresPlanning} (${planningNecessity.reason}); mode: ${selectedMode}`, hierarchyIndent("plan"));
     if (!planningNecessity.requiresPlanning) {
-        // The no-plan single-step path is added by the next plan step. Until it
-        // exists, classification-true runs keep the original plan flow intact.
-        status.warning("Planning not required; the single-step execution path is not implemented yet. Stopping.", hierarchyIndent("plan"));
+        // No-plan single-step path: run the original command-line prompt
+        // directly. No planning prompt, plan JSON, plan review step, or
+        // plan-derived worktree lifecycle. The existing --review flag still
+        // controls commit behavior via commitInstruction and the Git commit
+        // guard handled by runSingleStep.
+        const directPrompt = `${prompt}\n\nCommit instruction for this step: ${commitInstruction}`;
+        await runSingleStep(directPrompt, configData, options.review === true);
+        const totals = totalUsage(configData.tokenUsage);
+        status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+        status.success("Direct execution complete. Stopping.");
         return;
     }
 
