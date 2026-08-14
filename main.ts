@@ -1,6 +1,7 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
+import { determinePlanningNecessity } from "./llm/planning-necessity.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary } from "./worktree.js";
@@ -95,6 +96,7 @@ const status = {
     replan: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[REPLAN]"), message, prefix),
     warning: (message: string, prefix = "") => printStatusLine((line) => console.warn(line), chalk.yellow.bold("[WARNING]"), message, prefix),
     error: (message: string, prefix = "") => printStatusLine((line) => console.error(line), chalk.red.bold("[ERROR]"), message, prefix),
+    classification: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLANNING NECESSITY]"), message, prefix),
 };
 
 /**
@@ -801,6 +803,22 @@ async function main(options: { review?: boolean } = {}) {
     if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
     appendHistory(configData.commandLinePrompts, commandLinePrompt);
     const prompt = buildPrompt(configData.commandLinePrompts, configData.toolCallTldrs);
+
+    // Planning-necessity classification: before entering the plan-then-execute
+    // flow, ask the LLM whether the original command-line prompt genuinely
+    // needs a formal plan. The classification runs after the prompt is resolved
+    // and before runExecutionPhase/executePlanStep is ever invoked. Invalid or
+    // missing classifier output falls back to requiresPlanning=true so the
+    // safer plan flow runs.
+    const planningNecessity = await determinePlanningNecessity(commandLinePrompt, client);
+    const selectedMode = planningNecessity.requiresPlanning ? "plan-then-execute" : "single-step";
+    status.classification(`requiresPlanning=${planningNecessity.requiresPlanning} (${planningNecessity.reason}); mode: ${selectedMode}`, hierarchyIndent("plan"));
+    if (!planningNecessity.requiresPlanning) {
+        // The no-plan single-step path is added by the next plan step. Until it
+        // exists, classification-true runs keep the original plan flow intact.
+        status.warning("Planning not required; the single-step execution path is not implemented yet. Stopping.", hierarchyIndent("plan"));
+        return;
+    }
 
     // Epic-first Spec Keeper coordination: always pull epics, select or create
     // the epic that matches this work, fetch its tasks, and make that context
