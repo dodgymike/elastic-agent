@@ -99,17 +99,19 @@ const status = {
 
 /**
  * Console hierarchy levels shared by the agent loop and plan-printer.ts.
- * Numeric depth: phase=0, plan=1, plan step=2, line content=3. The actual
- * indentation widths (0/2/4/6 spaces) are owned by plan-printer.ts indent(),
- * which remains the single source of truth for the console indent scheme.
+ * Numeric depth: phase=0, plan=1, plan step=2, line content=3, tool result=4.
+ * The actual indentation widths (0/2/4/6/8 spaces) are owned by
+ * plan-printer.ts indent(), which remains the single source of truth for the
+ * console indent scheme.
  */
-type ConsoleHierarchyLevel = "phase" | "plan" | "planStep" | "contentInStep";
+type ConsoleHierarchyLevel = "phase" | "plan" | "planStep" | "contentInStep" | "toolResult";
 
 const CONSOLE_HIERARCHY_LEVELS: Readonly<Record<ConsoleHierarchyLevel, number>> = {
     phase: 0,
     plan: 1,
     planStep: 2,
     contentInStep: 3,
+    toolResult: 4,
 } as const;
 
 /**
@@ -135,12 +137,12 @@ function logWithHierarchy(message: string, level: ConsoleHierarchyLevel): void {
 
 /**
  * Indentation prefix for child tool-call feedback lines (SUCCESS/ERROR/RESPONSE)
- * emitted below a [TOOL] pending line. It is one hierarchy level below the
- * active plan-step indent: planStep=4 spaces plus one additional indent level
- * equals the content-in-step indent of 6 spaces, sourced from plan-printer.ts
- * through hierarchyIndent().
+ * emitted below a [TOOL] pending line. The [TOOL] pending line uses the
+ * content-in-step indent of 6 spaces, and these result lines sit one hierarchy
+ * level below it at the tool-result indent of 8 spaces, sourced from
+ * plan-printer.ts through hierarchyIndent().
  */
-const toolChildIndent = hierarchyIndent("contentInStep");
+const toolChildIndent = hierarchyIndent("toolResult");
 
 const tools = [
     {
@@ -636,7 +638,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext });
         }
         const response = await client.create(request);
-        new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
+        new CompatibleResponseWrapper(response).print(toolChildIndent);
         recordUsage(configData, response);
         previousResponseId = response.id;
         toolOutputs = [];
@@ -672,7 +674,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
                 status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`, hierarchyIndent("contentInStep"));
                 const retryResponse = await client.create({ input: configData.retryPrompt });
-                new CompatibleResponseWrapper(retryResponse).print(hierarchyIndent("contentInStep"));
+                new CompatibleResponseWrapper(retryResponse).print(toolChildIndent);
                 recordUsage(configData, retryResponse);
                 saveData(configData);
                 if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
@@ -815,7 +817,10 @@ async function main(options: { review?: boolean } = {}) {
     const epicContext = buildEpicPlanContext(epicSync);
 
     status.planning("Creating an execution plan...");
-    const planningResponse = await client.create({ input: `${prompt}\n\n${planningSuffix}${epicContext}` });
+
+    const planningPrompt = `${prompt}\n\n${planningSuffix}${epicContext}`;
+
+    const planningResponse = await client.create({ input: planningPrompt });
     new CompatibleResponseWrapper(planningResponse).print();
     recordUsage(configData, planningResponse);
     const plan = responseText(planningResponse);

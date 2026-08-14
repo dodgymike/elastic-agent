@@ -30,11 +30,12 @@
  *   plan               2        PLAN / TLDR: ... / STEPS: / EXPECTED OUTCOME
  *   plan step          4        STEP 1
  *   content in step    6        TLDR: ... / JUSTIFICATION: ... / DETAILS: ...
+ *   tool result        8        SUCCESS/ERROR/RESPONSE below a [TOOL] pending line
  *
  * The phase-level lines are produced by `status.*` helpers in main.ts (which
  * are not ANSI-free), while `printPlan` enforces the plan (2), plan step (4),
  * and content-in-step (6) levels. The `indent` helper below is the single
- * source of truth for all four prefixes so main.ts and printPlan share one
+ * source of truth for all five prefixes so main.ts and printPlan share one
  * indentation scheme.
  */
 
@@ -69,13 +70,15 @@ const INDENT = {
     plan: 2,
     planStep: 4,
     contentInStep: 6,
+    toolResult: 8,
 } as const;
 
 /**
  * Return an indentation prefix (a run of spaces) for the given hierarchy level.
  * Level "phase" -> 0 spaces, "plan" -> 2 spaces, "planStep" -> 4 spaces,
- * "contentInStep" -> 6 spaces. This is the single source of truth for the
- * console indent scheme so tests can assert the exact prefix for each level.
+ * "contentInStep" -> 6 spaces, "toolResult" -> 8 spaces. This is the single
+ * source of truth for the console indent scheme so tests can assert the exact
+ * prefix for each level.
  */
 export function indent(level: keyof typeof INDENT): string {
     return " ".repeat(INDENT[level]);
