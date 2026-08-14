@@ -5,6 +5,7 @@ import {
   type JsonObject,
   type JsonValue,
   type LlmAdapter,
+  LlmAdapterError,
   type ToolDefinition,
   type ToolResultMessage,
 } from "./adapter-contract.js";
@@ -108,7 +109,18 @@ export class MultiTurnLlmRuntime {
     }) : [];
     const messages = prior ? [...prior.messages, ...continuation] : [textMessage("user", request.input as string)];
     const requestType = prior ? REQUEST_TYPE_TOOL_CONTINUATION : REQUEST_TYPE_INITIAL;
-    const generated = await this.adapter.generate({ model: this.model, messages, tools: request.tools });
+    let generated: GenerateResponse;
+    try {
+      generated = await this.adapter.generate({ model: this.model, messages, tools: request.tools });
+    } catch (error) {
+      if (error instanceof LlmAdapterError) {
+        console.error(
+          `[LLM ADAPTER ERROR] Prompt that caused the ${error.provider} adapter error (${error.code}):\n` +
+          `${formatPrompt(messages)}`,
+        );
+      }
+      throw error;
+    }
     const id = `compat-${++this.nextResponseId}`;
     this.responseStates.set(id, { messages: Object.freeze([...messages, generated.message]), toolCalls: new Map((generated.message.toolCalls ?? []).map((call) => [call.id, call.name])) });
     const record: LlmLogRecord = {

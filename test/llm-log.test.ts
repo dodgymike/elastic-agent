@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { LlmAdapter } from "../llm/adapter-contract.js";
+import { LlmAdapterError, type LlmAdapter } from "../llm/adapter-contract.js";
 import { MultiTurnLlmRuntime } from "../llm/multi-turn-runtime.js";
 
 /** Adapter that echoes a distinctive response and reports usage. */
@@ -112,6 +112,29 @@ async function testInitialLog(): Promise<void> {
   }
 }
 
+async function testLlmAdapterErrorPrintsPrompt(): Promise<void> {
+  const originalConsoleError = console.error;
+  let captured = "";
+  console.error = ((...args: unknown[]) => {
+    captured += `${args.map(String).join(" ")}\n`;
+  }) as typeof console.error;
+  const failingAdapter: LlmAdapter = {
+    provider: "deepseek-v4",
+    capabilities: { toolCalling: true, systemMessages: true, developerMessages: true },
+    async generate() {
+      throw new LlmAdapterError("deepseek-v4", "provider", "DeepSeek returned an invalid JSON response.");
+    },
+  };
+  const runtime = new MultiTurnLlmRuntime(failingAdapter, "deepseek-model");
+  try {
+    await assert.rejects(runtime.create({ input: "prompt that caused the failure" }), /invalid JSON response/);
+    assert.ok(captured.includes("[LLM ADAPTER ERROR]"), "adapter errors should print a marker");
+    assert.ok(captured.includes("prompt that caused the failure"), "adapter errors should print the prompt that caused the error");
+  } finally {
+    console.error = originalConsoleError;
+  }
+}
+
 async function testLlmLogToolCallResponse(): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "elastic-agent-llm-log-tool-"));
   const logPath = join(directory, "llm.log");
@@ -135,6 +158,7 @@ async function testLlmLogToolCallResponse(): Promise<void> {
 (async () => {
   await testLlmLog();
   await testInitialLog();
+  await testLlmAdapterErrorPrintsPrompt();
   await testLlmLogToolCallResponse();
   console.log("LLM log fixtures passed");
 })().catch((error) => {
