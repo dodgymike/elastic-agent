@@ -5,6 +5,12 @@
 Send an HTTP request with an explicit method, headers, and body, including
 authenticated or mutating requests when required.
 
+## When to use
+
+Use `HttpRequest` for HTTP requests that need an explicit method, headers, or a
+request body, including authenticated or mutating requests. Prefer `Http` for a
+bare GET.
+
 ## Required parameters
 
 - `url` (string): absolute HTTP(S) URL.
@@ -22,7 +28,13 @@ authenticated or mutating requests when required.
 - `headers` (object): response headers.
 - `body` (string): response text body.
 
-## Constraints
+## Error handling
+
+- Validation errors (URL, method, headers, body type): `TypeError`.
+- HTTP error statuses are **not** thrown; always inspect `status`.
+- Network/fetch failures propagate.
+
+## Critical operating constraints
 
 - URL validation is the same as the `Http` tool: absolute, `http`/`https`, with
   a host, no surrounding whitespace, and no embedded credentials.
@@ -31,12 +43,6 @@ authenticated or mutating requests when required.
   characters.
 - `body` must be a string when provided.
 - Put credentials in `headers` (e.g. `Authorization`), never in the URL.
-
-## Error handling
-
-- Validation errors (URL, method, headers, body type): `TypeError`.
-- HTTP error statuses are **not** thrown; always inspect `status`.
-- Network/fetch failures propagate.
 
 ## Examples
 

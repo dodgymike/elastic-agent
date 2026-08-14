@@ -6,6 +6,12 @@ Redeem a one-time Spec Keeper agent-enrollment token and return its one-time
 enrollment recipe (credentials). The recipe contains secrets that are shown
 only once by Spec Keeper.
 
+## When to use
+
+Use `SpecKeeperEnroll` only to redeem a one-time enrollment token and obtain
+the agent credential recipe. Store the returned recipe only in the approved
+secret store (for example `/tmp/spec-keeper.json` with mode `0600`).
+
 ## Required parameters
 
 - `token` (string): token from the `#token=` fragment of a Spec Keeper
@@ -20,20 +26,20 @@ An enrollment recipe containing:
 - `region?`, `client_id?`
 - `recipe` (object with the full credential set)
 
-## Constraints
-
-- The token is non-empty and is single-use.
-- The returned recipe contains secrets: store it only in the approved secret
-  store (for example `/tmp/spec-keeper.json` with mode `0600`).
-- Never write the enrollment recipe to the repository, commit messages, task
-  notes, or handoffs.
-
 ## Error handling
 
 - Empty token: `Error` (`A non-empty Spec Keeper enrollment token is required.`).
 - Non-OK redeem response: throws
   `Spec Keeper enrollment failed (<status>): <body>`.
 - Network/fetch failures propagate.
+
+## Critical operating constraints
+
+- The token is non-empty and is single-use.
+- The returned recipe contains secrets: store it only in the approved secret
+  store with restrictive permissions.
+- Never write the enrollment recipe to the repository, commit messages, task
+  notes, or handoffs.
 
 ## Examples
 

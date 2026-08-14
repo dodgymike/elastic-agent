@@ -6,6 +6,12 @@ Send coordination messages or retrieve Agent Bus status and handoff feeds with
 Bearer authentication. Use it to announce work before acting and to report
 verification results afterwards.
 
+## When to use
+
+Use `AgentBus` to announce work, report blockers or verification results, and
+retrieve handoff/status feeds. Do not use it for durable Spec Keeper task
+state; use `SpecKeeper` for that.
+
 ## Required parameters
 
 - `path` (string): deployment API path (for example `/api/v1/messages`). Must
@@ -26,15 +32,6 @@ verification results afterwards.
 - `headers` (object): response headers.
 - `body` (unknown): parsed JSON when possible, otherwise response text.
 
-## Constraints
-
-- Requires a base URL and access token, supplied via call options or
-  environment variables; never persist or commit secrets.
-- `body` is serialized with `JSON.stringify`; `Content-Type: application/json`
-  is added automatically when a body is present.
-- Use the message schema published by your Agent Bus deployment (for example
-  `recipient`, `topic`, `status`, and `handoff` fields).
-
 ## Error handling
 
 - Missing base URL or access token: `Error`.
@@ -42,6 +39,15 @@ verification results afterwards.
 - Non-OK response: throws
   `Agent Bus request failed (<status> <statusText>): <body text>`.
 - Non-JSON response bodies are preserved as text for diagnostics.
+
+## Critical operating constraints
+
+- Requires a base URL and access token, supplied via call options or
+  environment variables; never persist or commit secrets.
+- `body` is serialized with `JSON.stringify`; `Content-Type: application/json`
+  is added automatically when a body is present.
+- Use the message schema published by your Agent Bus deployment (for example
+  `recipient`, `topic`, `status`, and `handoff` fields).
 
 ## Examples
 

@@ -5,6 +5,12 @@
 List the entries of a directory non-recursively, returning each entry's name,
 parent path, and joined path.
 
+## When to use
+
+Use `ListDirectory` to list the immediate children of a directory. Use
+`ExecuteCommand` (for example `find` or `ls -la`) when you need recursive
+listing or must distinguish files from directories.
+
 ## Required parameters
 
 - `directory` (string): filesystem path of the directory to list.
@@ -17,17 +23,17 @@ An array of entries, each with:
 - `parentPath` (string): the directory that was listed.
 - `path` (string): `parentPath/name`.
 
-## Constraints
+## Error handling
+
+- Invalid `directory` value: `TypeError`.
+- `readdir` I/O errors (e.g. missing directory, permissions) propagate.
+
+## Critical operating constraints
 
 - `directory` must be a non-empty string without NUL characters.
 - Non-recursive: only direct children are returned.
 - The response does not include whether an entry is a file or directory; use
   `Read`, `ExecuteCommand`, or additional calls to distinguish or recurse.
-
-## Error handling
-
-- Invalid `directory` value: `TypeError`.
-- `readdir` I/O errors (e.g. missing directory, permissions) propagate.
 
 ## Examples
 

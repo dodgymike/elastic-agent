@@ -6,6 +6,12 @@ Edit a file in place using replacement operations. Every edit is guarded by the
 `read_hash` returned by the last `Read` (or `Write`/`Edit`) of the file, so an
 edit only applies when the file is unchanged since it was read.
 
+## When to use
+
+Use `Edit` for surgical, in-place changes to an existing file. Prefer it over
+`Write` when changing only part of a file; use `Write` for a new file or a full
+rewrite. Always obtain `read_hash` from a fresh `Read` first.
+
 ## Required parameters
 
 - `path` (string): filesystem path of the file to edit.
@@ -25,16 +31,6 @@ single pair is applied after the `edits` array):
   `Read`/`Write`/`Edit`.
 - `applied` (number): count of replacements applied.
 
-## Constraints
-
-- Each `old_string` must appear **exactly once** in the current file content;
-  0 or more than 1 occurrences is rejected to protect against ambiguity.
-- `old_string` must be non-empty.
-- `edits` must be a non-empty array of valid `{ old_string, new_string }`
-  objects.
-- `read_hash` must be the current file hash; edits are applied in order and the
-  result is written atomically.
-
 ## Error handling
 
 - Missing/malformed `read_hash`: `TypeError` (hash required, 64 hex chars).
@@ -44,6 +40,16 @@ single pair is applied after the `edits` array):
   `old_string must appear exactly once in the file but was found N times; ... Re-read the file with Read first.`
 - Empty edit list or malformed edit entries: `TypeError`.
 - Read/write I/O errors: thrown with the path and underlying message.
+
+## Critical operating constraints
+
+- Each `old_string` must appear **exactly once** in the current file content;
+  0 or more than 1 occurrences is rejected to protect against ambiguity.
+- `old_string` must be non-empty.
+- `edits` must be a non-empty array of valid `{ old_string, new_string }`
+  objects.
+- `read_hash` must be the current file hash; edits are applied in order and the
+  result is written atomically.
 
 ## Examples
 

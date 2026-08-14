@@ -5,6 +5,11 @@
 Perform a simple HTTP(S) `GET` fetch and return both the raw `Response` object
 and its text body.
 
+## When to use
+
+Use `Http` for a simple read-only GET when you only need the response text. For
+any other method, custom headers, or a request body, use `HttpRequest`.
+
 ## Required parameters
 
 - `url` (string): absolute HTTP(S) URL to fetch.
@@ -14,14 +19,6 @@ and its text body.
 - `response` (Response): the raw fetch response.
 - `body` (string): the response text body.
 
-## Constraints
-
-- The URL must be absolute, use `http:` or `https:`, and include a host.
-- The URL must not have leading or trailing whitespace.
-- The URL must not contain credentials (user/password).
-- GET only; for other methods, headers, or a request body use the `HttpRequest`
-  tool.
-
 ## Error handling
 
 - Invalid URL, non-http(s) protocol, missing host, whitespace, or embedded
@@ -29,6 +26,14 @@ and its text body.
 - Network/fetch failures propagate; inspect the error and retry as appropriate.
 - HTTP error statuses are not thrown; the caller is expected to inspect
   `response.status`.
+
+## Critical operating constraints
+
+- The URL must be absolute, use `http:` or `https:`, and include a host.
+- The URL must not have leading or trailing whitespace.
+- The URL must not contain credentials (user/password).
+- GET only; for other methods, headers, or a request body use the `HttpRequest`
+  tool.
 
 ## Examples
 
