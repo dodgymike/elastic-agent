@@ -8,6 +8,12 @@ answering simple questions. The client authenticates with Cognito (username and
 password from the approved credential store) and mints short-lived access
 tokens.
 
+## Mandatory requirement
+
+Use the `SpecKeeper` tool for ALL planning and execution tasks. This is not
+optional. Before starting any task, consult Spec Keeper for goals, epics,
+tasks, dependencies, decisions, and procedures.
+
 ## Required parameters
 
 - `path` (string): a project-scoped resource route (for example `/tasks`) or a
