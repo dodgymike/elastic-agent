@@ -24,11 +24,14 @@ procedures.
 
 - `method` (string): `GET` | `POST` | `PUT` | `PATCH` | `DELETE` (default `GET`).
 - `body` (any): JSON payload for `POST`, `PUT`, and `PATCH`.
-- `projectSlug` (string): project slug for resource routes.
+- `projectSlug` (string): project slug for resource routes. When omitted, it
+  resolves from `.spec-keeper`, `SPEC_KEEPER_PROJECT_SLUG`, the local
+  credential store, and the built-in fallback (see Configuration).
 - `accessToken` / `refreshToken` / `username` / `password` / `clientId` /
-  `region` / `apiBase` / `userAgent`: explicit overrides; otherwise resolved
-  from the matching `SPEC_KEEPER_*` environment variables or the local
-  credential store.
+  `region` / `apiBase` / `userAgent`: explicit overrides. When omitted,
+  values resolve per field from `.spec-keeper`, the matching
+  `SPEC_KEEPER_*` environment variables, the local credential store, and the
+  built-in fallbacks (see Configuration).
 
 ## Result
 
@@ -39,17 +42,75 @@ procedures.
 
 ## Configuration
 
-- **Project slug**: `elastic-agent`.
-- **Credential store**: `.spec.local.json` (default `SPEC_KEEPER_CONFIG_PATH`),
-  or set the `SPEC_KEEPER_CONFIG_PATH` env var to point at the approved secret
-  store.
-- **API base**: `https://api.spec.elasticninja.com` (default; override via
-  `SPEC_KEEPER_API_BASE` only when needed).
-- **Auth**: Cognito username/password stored in the credential config. The
-  `SpecKeeper` tool loads them automatically from the config file and mints
-  short-lived access tokens.
-- Credentials are NEVER stored in the repository. Do not copy credentials into
-  CLAUDE.md, SPEC_KEEPER.md, task notes, or handoffs.
+Non-secret operational defaults load from the repository-local `.spec-keeper`
+file (strict JSON, safe to commit). Credentials are NEVER loaded from
+`.spec-keeper`; they come only from explicit arguments, `SPEC_KEEPER_*`
+environment variables, or the approved secret store.
+
+Supported `.spec-keeper` fields:
+
+- `projectSlug` — project slug for resource routes (default `elastic-agent`).
+- `apiBase` — API origin (default `https://api.spec.elasticninja.com`).
+- `credentialStore` — path to the approved secret store (default
+  `.spec.local.json`).
+- `defaultEpic` — `{ key, title, description, status }` used by the epic-first
+  sync flow when it creates or matches an epic.
+- `defaultTask` — `{ key, epicKey, keyPrefix, title, description, status }`
+  used when the task flow creates or matches tasks.
+
+Example:
+
+```json
+{
+  "projectSlug": "elastic-agent",
+  "apiBase": "https://api.spec.elasticninja.com",
+  "credentialStore": ".spec.local.json",
+  "defaultEpic": {
+    "key": "elastic-agent-bootstrap",
+    "title": "Elastic Agent bootstrap",
+    "status": "in_progress"
+  },
+  "defaultTask": {
+    "epicKey": "elastic-agent-bootstrap",
+    "keyPrefix": "EA-",
+    "status": "in_progress"
+  }
+}
+```
+
+Set `SPEC_KEEPER_DEFAULTS_PATH` to read `.spec-keeper` from a different
+location (tooling/tests only). A missing `.spec-keeper` is fine: the loader
+falls back to lower layers and logs the config source.
+
+### Precedence (resolved per field, highest first)
+
+Operational settings (`projectSlug`, `apiBase`, `userAgent`):
+
+1. Explicit per-call arguments.
+2. `.spec-keeper` file.
+3. Environment (`SPEC_KEEPER_PROJECT_SLUG`, `SPEC_KEEPER_API_BASE`,
+   `SPEC_KEEPER_USER_AGENT`).
+4. Deprecated secret-store operational fallback (`Project`, `API base`).
+5. Built-in prompt fallback (`elastic-agent`,
+   `https://api.spec.elasticninja.com`, `elastic-agent-spec-keeper/1.1`).
+
+Credential-store path (`credentialStore`):
+
+1. `.spec-keeper` `credentialStore`.
+2. `SPEC_KEEPER_CONFIG_PATH`.
+3. Built-in `.spec.local.json`.
+
+Credentials (`accessToken`, `refreshToken`, `username`, `password`,
+`clientId`, `region`):
+
+1. Explicit per-call arguments.
+2. `SPEC_KEEPER_ACCESS_TOKEN`, `SPEC_KEEPER_REFRESH_TOKEN`,
+   `SPEC_KEEPER_USERNAME`, `SPEC_KEEPER_PASSWORD`, `SPEC_KEEPER_CLIENT_ID`,
+   `SPEC_KEEPER_REGION`.
+3. The resolved secret store.
+
+Credentials are NEVER stored in the repository. Do not copy credentials into
+CLAUDE.md, SPEC_KEEPER.md, `.spec-keeper`, task notes, or handoffs.
 
 ## When to consult Spec Keeper
 
@@ -83,8 +144,9 @@ procedures.
 
 Use project-scoped resource paths (e.g., `/tasks`, `/epics`, `/decisions`,
 `/notes`). The tool automatically resolves these to
-`/api/v1/projects/elastic-agent/<resource>` using the project slug and
-credentials from the config. Do NOT use obsolete root paths like `/goals` or
+`/api/v1/projects/elastic-agent/<resource>` using the project slug resolved
+from the config defaults and credentials from the secret store. Do NOT use
+obsolete root paths like `/goals` or
 `/task-queue` — use only supported project resources (`agents`, `epics`,
 `tasks`, `reservations`, `counters`, `locks`, `import`, `export`, `events`,
 `notes`, `changes`, `decisions`, `chain-runs`, `jira-config`, `jira`) or
@@ -95,6 +157,25 @@ documented absolute `/api/v1/...` routes.
 If Spec Keeper is unavailable, do not treat local files as authoritative.
 Record the access blocker through the coordination channel, preserve a clear
 handoff, and resume server synchronization as soon as access is restored.
+
+## Verification
+
+- `npm run test:spec-keeper-config` — config precedence, key normalization,
+  malformed/missing `.spec-keeper`, credential-store precedence, and
+  required-value errors.
+- `npm run test:spec-keeper-routes` — project-resource route mapping and
+  validation.
+- `npm run test:spec-keeper-epic-flow` and
+  `npm run test:spec-keeper-task-flow` — epic-first and task sync flows.
+
+Manual/dry-run output must include a startup line under the `[SPEC KEEPER]`
+label, for example:
+
+    [SPEC KEEPER] defaults loaded: projectSlug=elastic-agent (source: spec-keeper), apiBase=https://api.spec.elasticninja.com (source: spec-keeper), credentialStore=.spec.local.json (source: spec-keeper)
+
+followed by one concise `[SPEC KEEPER]` line per operation (epic sync, plan
+update, task create/fetch/status change, review completion). Request and
+response bodies are never logged.
 
 ## Error handling
 

@@ -21,5 +21,6 @@ See the per-tool usage files for full operating instructions, parameters, and er
 # Spec Keeper workflow
 
 Read `tools/spec-keeper-usage.md` before using the `SpecKeeper` tool. It contains
-the operating instructions, including the project slug, credential store, API
-base, state transitions, invocation pattern, and failure handling.
+the operating instructions, including the `.spec-keeper` defaults file,
+precedence, project slug, credential store, API base, state transitions,
+invocation pattern, verification commands, and failure handling.

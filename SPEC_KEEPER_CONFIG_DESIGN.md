@@ -4,7 +4,9 @@
 **Scope:** Define how the agent loads Spec Keeper defaults from a local
 `.spec-keeper` file, how those defaults interact with environment variables and
 the prompt fallback, and what the client must do when required values are
-missing. Implementation is deferred to later steps.
+missing. **Implemented** in `specKeeperConfig.ts`, consumed by
+`tools/SpecKeeper.ts` and `main.ts`, and verified with
+`npm run test:spec-keeper-config` and `npm run test:spec-keeper-routes`.
 
 ## 1. Problem
 

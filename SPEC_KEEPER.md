@@ -27,21 +27,42 @@ contract. It does not map obsolete root resources such as `/goals` or
 that are not project resources (for example, `GET /api/v1/projects` to discover
 visible projects).
 
+## Non-secret defaults file (`.spec-keeper`)
+
+Operational defaults load from the repository-local `.spec-keeper` file
+(strict JSON, safe to commit). It may carry `projectSlug`, `apiBase`,
+`credentialStore`, `defaultEpic`, and `defaultTask`; it must never contain
+tokens, passwords, or client IDs. A missing `.spec-keeper` is harmless, and
+the resolved config source is logged at startup under `[SPEC KEEPER]`.
+
+Precedence, resolved per field:
+
+1. Explicit per-call tool arguments.
+2. `.spec-keeper`.
+3. `SPEC_KEEPER_PROJECT_SLUG` / `SPEC_KEEPER_API_BASE` /
+   `SPEC_KEEPER_USER_AGENT` (and `SPEC_KEEPER_CONFIG_PATH` for the credential
+   store path).
+4. Deprecated operational fallback fields in the secret store (`Project`,
+   `API base`).
+5. Built-in prompt fallback (`elastic-agent`,
+   `https://api.spec.elasticninja.com`, `elastic-agent-spec-keeper/1.1`).
+
 ## Credential loading
 
 The `SpecKeeper` tool loads credentials automatically from the local secret
-store. The default path is `.spec.local.json`, but this can be overridden
-by setting the `SPEC_KEEPER_CONFIG_PATH` environment variable. The config file
-contains the Cognito username, password, API base, region, and client ID.
-Its human-friendly keys (for example `Username`, `Password`, `API base`,
-`Region`, `Client ID`, `Project`) are normalized by the tool to the camelCase
-fields it reads internally.
+store. The default path is `.spec.local.json`, but this can be overridden by
+`.spec-keeper` `credentialStore` or the `SPEC_KEEPER_CONFIG_PATH` environment
+variable (see precedence above). The config file contains the Cognito
+username, password, API base, region, and client ID. Its human-friendly keys
+(for example `Username`, `Password`, `API base`, `Region`, `Client ID`,
+`Project`) are normalized by the tool to the camelCase fields it reads
+internally.
 
-Credentials and the project slug must come from the approved environment or
-local secret store, never repository files. Do NOT copy credentials or raw
-server errors into task notes or handoffs. The tool's `loadSecretConfig()`
-function reads the config file and mints short-lived Cognito access tokens
-automatically.
+Credentials must come from the approved environment or local secret store,
+never from `.spec-keeper` or other repository files. Do NOT copy credentials
+or raw server errors into task notes or handoffs. The tool's
+`loadSecretConfig()` function reads the secret store and mints short-lived
+Cognito access tokens automatically.
 
 ### Verified working invocation pattern
 
@@ -52,8 +73,9 @@ The tool is invoked with project resource paths and optional explicit config:
 - `body`: JSON payload for write operations
 
 The tool resolves resource shorthand to `/api/v1/projects/elastic-agent/<resource>`.
-When no explicit config is passed, it reads `.spec.local.json` for
-credentials and project slug.
+When no explicit config is passed, it reads `.spec-keeper` for operational
+defaults (project slug, API base, credential-store path, default epic/task)
+and the resolved secret store for credentials.
 
 ### Reliable patterns from bootstrap usage
 
@@ -69,6 +91,18 @@ credentials and project slug.
 3. **When adding epics or tasks**, consult the server first to avoid duplicate or conflicting work. Place new work under the correct current goal or epic and record its dependencies, priority, owner, and acceptance criteria as supported by the server schema.
 4. **During work**, keep task status and relevant plan/decision records current in Spec Keeper. Record blockers and handoff information promptly.
 5. **After verification**, update the server record with the outcome, evidence, changed files, follow-up work, and final status. Do not mark work complete until verification has succeeded.
+
+## Verification
+
+Run `npm run test:spec-keeper-config` and `npm run test:spec-keeper-routes`
+after changing config or route handling, plus
+`npm run test:spec-keeper-epic-flow` and `npm run test:spec-keeper-task-flow`
+for the sync flows. Manual/dry-run output must include a startup line such as:
+
+    [SPEC KEEPER] defaults loaded: projectSlug=elastic-agent (source: spec-keeper), apiBase=https://api.spec.elasticninja.com (source: spec-keeper), credentialStore=.spec.local.json (source: spec-keeper)
+
+followed by one `[SPEC KEEPER]` line per sync operation. Request and response
+bodies and credentials are never logged.
 
 ## Coordination
 
