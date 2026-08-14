@@ -3,6 +3,7 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
+import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary } from "./worktree.js";
 import chalk from "chalk";
@@ -81,7 +82,7 @@ const reviewPromptTemplate = readFileSync("prompts/review-prompt.txt", "utf-8");
  */
 function printStatusLine(write: (line: string) => void, label: string, message: string, prefix = ""): void {
     const lines = String(message).split("\n");
-    write(`${prefix}${label} ${lines[0]}`);
+    write(lines[0].length > 0 ? `${prefix}${label} ${lines[0]}` : `${prefix}${label}`);
     for (let index = 1; index < lines.length; index += 1) write(`${prefix}${lines[index]}`);
 }
 
@@ -304,25 +305,23 @@ function buildPrompt(commandPrompts, toolCallTldrs) {
     return renderPrompt(buildPromptTemplate, { claudeInstructions, historyLimit, promptHistory, toolHistory, commandLinePrompt });
 }
 function summarizeToolCall(name, toolArguments, toolResponse) { return truncate(`${name}(${truncate(stringify(toolArguments), 160)}) → ${truncate(stringify(toolResponse), 240)}`, 480); }
-function summarizeResponse(response) {
-    const summaries = [];
-    for (const output of response.output ?? []) {
-        if (output.type === "function_call") {
-            let args = output.arguments ?? ""; try { args = JSON.stringify(JSON.parse(args)); } catch { /* use raw arguments */ }
-        } else if (output.type === "message") {
-            const text = (output.content ?? []).filter((item) => item.type === "output_text" || item.type === "text").map((item) => item.text).filter(Boolean).join(" ");
-            if (text) summaries.push(`Text response: ${truncate(text)}`);
-        }
-    }
-    return summaries.join("\n") || "No text response or tool calls.";
-}
+
 function tokenCount(value) { return Number.isFinite(value) ? value : 0; }
 function getCachedTokens(usage) { return tokenCount(usage?.input_tokens_details?.cached_tokens); }
 function usageSummary(usage) { const total = tokenCount(usage?.total_tokens); const cached = getCachedTokens(usage); return { total, cached, totalMinusCache: total - cached }; }
 function totalUsage(tokenUsage) {
     return tokenUsage.reduce((sum, usage) => ({ total: sum.total + tokenCount(usage.total_tokens), cached: sum.cached + tokenCount(usage.cached_tokens), totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache) }), { total: 0, cached: 0, totalMinusCache: 0 });
 }
-class CompatibleResponseWrapper { constructor(response) { this.response = response; } print(prefix = "") { status.response(summarizeResponse(this.response), prefix); } }
+class CompatibleResponseWrapper {
+    response: any;
+    constructor(response) { this.response = response; }
+    print(prefix = "") {
+        const text = responseDisplayText(this.response);
+        if (!text) return; // Suppress the empty "[RESPONSE] No text response or tool calls." line.
+        status.response("", prefix);
+        for (const line of wrapResponseText(text, prefix)) console.log(line.length > 0 ? `${prefix}${line}` : "");
+    }
+}
 function writeFileAtomically(filename, content) {
     const directory = dirname(filename);
     const temporaryFilename = join(directory, `.${basename(filename)}.${process.pid}.${randomUUID()}.tmp`);
