@@ -385,11 +385,11 @@ function readData(filename = dataFilename) { try { return JSON.parse(readFileSyn
  */
 function buildEpicPlanContext(epicSync: { epic?: Record<string, unknown> | null; tasks?: unknown[]; selection?: string } | null | undefined) {
     if (!epicSync) return "";
-    const epic = epicSync.epic ?? {};
+    const epic: any = epicSync.epic ?? {};
     const epicLabel = epic.key ?? epic.public_id ?? epic.title ?? "(epic)";
     const tasks = Array.isArray(epicSync.tasks) ? epicSync.tasks : [];
     const taskLines = tasks.map((task, index) => {
-        const t = task ?? {};
+        const t: any = task ?? {};
         return "  " + (index + 1) + ". " + (t.key ?? t.public_id ?? "task") + ": " + (t.title ?? t.description ?? "(no title)");
     }).join("\n");
     const taskBlock = tasks.length > 0
@@ -504,7 +504,7 @@ function captureExecutionFeedback(configData, response, stepIndex) {
     if (!Array.isArray(configData.executionFeedback)) configData.executionFeedback = [];
     const rawResponse = responseText(response);
     const parsed = parseExecutionFeedback(rawResponse);
-    const entry = { response_id: response.id, step: stepIndex + 1, valid: parsed.valid };
+    const entry: any = { response_id: response.id, step: stepIndex + 1, valid: parsed.valid };
     if (parsed.valid) entry.feedback = parsed.feedback;
     else {
         entry.validationError = parsed.reason;
@@ -553,19 +553,20 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
         recordUsage(configData, response);
         const validation = actionablePlanSteps(responseText(response));
-        const historyEntry = { attempt, response_id: response.id, reason: feedback.replanReason, applied: false };
+        const historyEntry: any = { attempt, response_id: response.id, reason: feedback.replanReason, applied: false };
         if (!validation.valid) {
             historyEntry.failure = validation.reason;
             configData.replanHistory.push(historyEntry);
             status.warning(`Rejected revised plan; keeping the existing remaining plan: ${validation.reason}`, hierarchyIndent("contentInStep"));
             return { attempted: true, applied: false, reason: validation.reason };
         }
-        activeSteps.splice(remainingStart, remainingSteps.length, ...validation.steps);
+        const revisedSteps: string[] = validation.steps as string[];
+        activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
         historyEntry.applied = true;
-        historyEntry.replacementStepCount = validation.steps.length;
+        historyEntry.replacementStepCount = revisedSteps.length;
         configData.replanHistory.push(historyEntry);
-        status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${validation.steps.length}.`, hierarchyIndent("contentInStep"));
-        return { attempted: true, applied: true, steps: validation.steps };
+        status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
+        return { attempted: true, applied: true, steps: revisedSteps };
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         configData.replanHistory.push({ attempt, reason: feedback.replanReason, applied: false, failure: reason });
@@ -609,7 +610,7 @@ function reportAppliedPlanChanges(appliedChanges) {
     }
 }
 function applyExecutionFeedback(feedbackEntry, activeSteps, completedStepCount) {
-    const result = { localUpdate: null, planUpdates: [], rejectedPlanUpdates: [] };
+    const result: { localUpdate: any; planUpdates: any[]; rejectedPlanUpdates: any[] } = { localUpdate: null, planUpdates: [], rejectedPlanUpdates: [] };
     if (!feedbackEntry?.valid || !feedbackEntry.feedback) return result;
 
     const feedback = feedbackEntry.feedback;
@@ -659,7 +660,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         status.step(line, hierarchyIndent("planStep"));
     }
     let previousResponseId;
-    let toolOutputs = [];
+    let toolOutputs: any[] = [];
     while (true) {
         const request = { tools } as any;
         if (previousResponseId) {
@@ -842,7 +843,7 @@ async function runSingleStep(prompt: string, configData: any, reviewMode: boolea
     try {
         status.step("Executing request directly without a plan.", hierarchyIndent("planStep"));
         let previousResponseId;
-        let toolOutputs = [];
+        let toolOutputs: any[] = [];
         while (true) {
             const request = { tools } as any;
             if (previousResponseId) {
@@ -929,7 +930,7 @@ async function main(options: { review?: boolean } = {}) {
     // available to the planning prompt so the plan incorporates the epic tasks.
     // Best-effort: when Spec Keeper is unreachable we proceed without it so the
     // run is not blocked by coordination unavailability.
-    let epicSync = null;
+    let epicSync: any = null;
     try {
         epicSync = await syncSpecKeeperEpic({ title: commandLinePrompt, description: `Execution requested for: ${commandLinePrompt}`, projectSlug: process.env.SPEC_KEEPER_PROJECT_SLUG });
         status.success(`Spec Keeper: ${epicSync.selection}.`);

@@ -4,11 +4,11 @@ const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const vm = require("node:vm");
 
-const source = readFileSync("main2.js", "utf8");
+const source = readFileSync("main.ts", "utf8");
 const helperStart = source.indexOf("function truncate(");
 const helperEnd = source.indexOf("function appendHistory(", helperStart);
-assert.notEqual(helperStart, -1, "main2.js must define tool-call rendering helpers");
-assert.notEqual(helperEnd, -1, "main2.js must retain a boundary after tool-call rendering helpers");
+assert.notEqual(helperStart, -1, "main.ts must define tool-call rendering helpers");
+assert.notEqual(helperEnd, -1, "main.ts must retain a boundary after tool-call rendering helpers");
 
 const events = [];
 const context = {
@@ -17,9 +17,11 @@ const context = {
     success: (message) => events.push(["succeeded", message]),
     error: (message) => events.push(["failed", message]),
   },
+  hierarchyIndent: () => "",
+  toolChildIndent: "",
 };
 vm.createContext(context);
-vm.runInContext(source.slice(helperStart, helperEnd), context, { filename: "main2-tool-rendering-helpers.js" });
+vm.runInContext(source.slice(helperStart, helperEnd), context, { filename: "main-tool-rendering-helpers.js" });
 
 // Pending output is concise and safely summarizes parseable arguments.
 context.renderToolCallPending({ name: "Read", arguments: '{"path":"/tmp/example.txt"}' });
@@ -36,9 +38,11 @@ assert.deepEqual(events.pop(), ["failed", "Failed: Read: permission denied"]);
 // The execution loop must emit pending before parsing/execution, then a single
 // terminal state, while retaining function_call_output and TLDR history on both paths.
 const executionStart = source.indexOf("async function executePlanStep(");
-const executionEnd = source.indexOf("\nasync function main()", executionStart);
-assert.notEqual(executionStart, -1, "main2.js must define executePlanStep");
-assert.notEqual(executionEnd, -1, "main2.js must retain the main boundary");
+const executionEnd = source.indexOf("\nasync function runExecutionPhase(", executionStart);
+const mainStart = source.indexOf("\nasync function main(", executionStart);
+assert.notEqual(executionStart, -1, "main.ts must define executePlanStep");
+assert.notEqual(executionEnd, -1, "main.ts must retain a boundary after executePlanStep");
+assert.notEqual(mainStart, -1, "main.ts must retain the main boundary");
 const execution = source.slice(executionStart, executionEnd);
 const pendingAt = execution.indexOf("renderToolCallPending(output);");
 const parseAt = execution.indexOf("toolArguments = JSON.parse(output.arguments);");

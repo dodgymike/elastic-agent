@@ -14,7 +14,7 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-export default interface WriteOption {
+export interface WriteOption {
     path: string;
     content: string;
     overwrite: boolean;

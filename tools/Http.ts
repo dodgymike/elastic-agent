@@ -1,9 +1,9 @@
-export default interface HttpResult {
+export interface HttpResult {
   response: Response;
   body: string;
 }
 
-export default interface HttpOption {
+export interface HttpOption {
   url: string;
 }
 

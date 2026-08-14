@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 
-export default interface ListDirectoryOptions { directory: string; }
-export default interface ListDirectoryResponse { name: string; parentPath: string; path: string; }
+export interface ListDirectoryOptions { directory: string; }
+export interface ListDirectoryResponse { name: string; parentPath: string; path: string; }
 
 /** Lists a directory after validating the caller-provided filesystem path. */
 export default async function listDirectory(options: ListDirectoryOptions): Promise<ListDirectoryResponse[]> {
