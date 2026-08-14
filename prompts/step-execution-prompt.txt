@@ -1,5 +1,7 @@
 ${claudeInstructions}
 
+${toolsAvailable}
+
 Commit instruction for this step: ${commitInstruction}
 
 Execution plan:

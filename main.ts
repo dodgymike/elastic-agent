@@ -276,6 +276,22 @@ const tools = [
     },
 ];
 
+/**
+ * Render the tools-available prompt section. Each tool is listed together with
+ * its repository-relative usage prompt filename (for example
+ * tools/read-usage.md) so the model can load that file through the ordinary
+ * Read tool. The section is injected into prompts whose LLM request also
+ * carries the native tool definitions.
+ */
+function buildToolsAvailablePrompt(tools) {
+    const lines = tools
+        .map((tool) => `${tool.name} - usage prompt: ${tool.usagePromptFile ?? "(none)"}`)
+        .join("\n");
+    return `Tools available:\n${lines}`;
+}
+
+const toolsAvailable = buildToolsAvailablePrompt(tools);
+
 function truncate(value, maxLength = 240) {
     const text = String(value).replace(/\s+/g, " ").trim();
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
@@ -650,7 +666,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
         } else {
-            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext });
+            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable });
         }
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print(toolChildIndent);
@@ -683,7 +699,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             reportExecutionFeedback(feedbackEntry);
             saveData(configData);
             if (!feedbackEntry.valid) {
-                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext });
+                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable });
                 configData.retryPrompt =
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
@@ -900,7 +916,7 @@ async function main(options: { review?: boolean } = {}) {
         // plan-derived worktree lifecycle. The existing --review flag still
         // controls commit behavior via commitInstruction and the Git commit
         // guard handled by runSingleStep.
-        const directPrompt = `${prompt}\n\nCommit instruction for this step: ${commitInstruction}`;
+        const directPrompt = `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}`;
         await runSingleStep(directPrompt, configData, options.review === true);
         const totals = totalUsage(configData.tokenUsage);
         status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
