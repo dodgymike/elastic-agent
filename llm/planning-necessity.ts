@@ -22,6 +22,18 @@ export interface PlanningNecessityResult {
   readonly reason: string;
 }
 
+/** The execution path selected by the planning-necessity classifier. */
+export type ExecutionMode = "plan-then-execute" | "single-step";
+
+/**
+ * Map a classification result to the execution path used by main.ts. This is
+ * the single routing decision point so tests can assert which flow runs for
+ * each classifier outcome without booting the CLI's side-effecting main().
+ */
+export function selectExecutionMode(result: PlanningNecessityResult): ExecutionMode {
+  return result.requiresPlanning ? "plan-then-execute" : "single-step";
+}
+
 type ParsedPlanningNecessity = { readonly valid: true; readonly result: PlanningNecessityResult } | { readonly valid: false; readonly reason: string };
 
 /** Extract the assistant text from the legacy-compatible response shape. */

@@ -1,7 +1,7 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
-import { determinePlanningNecessity } from "./llm/planning-necessity.js";
+import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary } from "./worktree.js";
@@ -882,7 +882,7 @@ async function main(options: { review?: boolean } = {}) {
     // missing classifier output falls back to requiresPlanning=true so the
     // safer plan flow runs.
     const planningNecessity = await determinePlanningNecessity(commandLinePrompt, client);
-    const selectedMode = planningNecessity.requiresPlanning ? "plan-then-execute" : "single-step";
+    const selectedMode = selectExecutionMode(planningNecessity);
     status.classification(`requiresPlanning=${planningNecessity.requiresPlanning} (${planningNecessity.reason}); mode: ${selectedMode}`, hierarchyIndent("plan"));
     if (!planningNecessity.requiresPlanning) {
         // No-plan single-step path: run the original command-line prompt
