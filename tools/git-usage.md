@@ -39,8 +39,11 @@ are passed as literal arguments and cannot alter the command being run.
 
 ## Error handling
 
-- Validation `TypeError`s: missing/invalid action, `paths` + `all` conflict,
-  no paths and no `all`, or empty commit message.
+- The `action` value is constrained by the tool schema to `list`, `stage`, or
+  `commit`; the tool validates the options for the selected action.
+- Validation `TypeError`s: a `cwd` that is not a non-empty string, `paths` +
+  `all` conflict, no `paths` and no `all`, a path that is empty or contains
+  NUL, or an empty commit message.
 - A non-zero `exitCode` is returned in the result rather than thrown; inspect
   `stdout`/`stderr` for the cause.
 - Spawn error or termination by signal rejects the promise.

@@ -12,8 +12,8 @@ edit only applies when the file is unchanged since it was read.
 - `read_hash` (string): SHA-256 (64 hexadecimal characters) of the file version
   last read.
 
-Plus exactly one replacement form (both may be combined; the single pair is
-applied after the `edits` array):
+At least one replacement form must be supplied (both may be combined; the
+single pair is applied after the `edits` array):
 
 - `old_string` + `new_string` (both strings), or
 - `edits` (array): an ordered list of `{ old_string, new_string }` operations.
