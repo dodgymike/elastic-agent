@@ -1,0 +1,16 @@
+Analyze the user request below and decide whether it requires a formal plan before execution.
+
+RESPOND IN JSON FORMAT ONLY. Provide exactly one JSON object with this exact structure:
+
+{
+  "requiresPlanning": true,
+  "reason": ""
+}
+
+Field meanings:
+- requiresPlanning: boolean; true only when the request is ambiguous, cross-cutting, multi-file, risky, or needs staged verification. Set false for simple, direct, low-risk work.
+- reason: string; a concise explanation of the decision, especially why planning is required or why it can be safely skipped.
+
+Do not output any prose or markdown outside the JSON object.
+
+USER REQUEST:
