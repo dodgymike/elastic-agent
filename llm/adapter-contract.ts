@@ -71,7 +71,7 @@ export interface ToolDefinition {
    * calling the tool for the first time. Provider adapters must not forward
    * this metadata in their provider tool payloads.
    */
-  readonly usagePromptFile?: string;
+  readonly usage_prompt?: string;
 }
 
 export type ToolChoice = "auto" | "none" | "required" | { readonly name: string };

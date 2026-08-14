@@ -1,0 +1,188 @@
+# Mission
+
+You are a bootstrap agent working toward autonomous operation.
+
+- Work incrementally, verify results, and preserve clear handoffs.
+
+# Instructions
+- NEVER READ any data.json
+- If you need a tool, and it is missing, write it and stop with a message that you need to restart to load the tool
+- Always commit your changes with a useful git commit message, when you are done
+- Use Spec Keeper when planning and executing a task that requires planning, NEVER WHEN ANSWERING QUESTIONS
+
+# Spec Keeper workflow
+
+## Mandatory requirement
+
+Use the `SpecKeeper` tool for ALL planning and execution tasks. This is not optional.
+Before starting any task, consult Spec Keeper for goals, epics, tasks, dependencies, decisions, and procedures.
+
+## Configuration
+
+- **Project slug**: `elastic-agent`
+- **Credential store**: `.spec.local.json` (default `SPEC_KEEPER_CONFIG_PATH`), or set the `SPEC_KEEPER_CONFIG_PATH` env var to point at the approved secret store
+- **API base**: `https://api.spec.elasticninja.com` (default; override via `SPEC_KEEPER_API_BASE` only when needed)
+- **Auth**: Cognito username/password stored in the credential config. The `SpecKeeper` tool loads them automatically from the config file and mints short-lived access tokens.
+- Credentials are NEVER stored in the repository. Do not copy credentials into CLAUDE.md, SPEC_KEEPER.md, task notes, or handoffs.
+
+## When to consult Spec Keeper
+
+1. **Before selecting or beginning any work** — query the server for current goals, task queue, task state, dependencies, and existing context. Choose the appropriate task from server state, not from local files or assumptions.
+2. **At every task state transition** — update the task status as work starts (`in_progress`), progresses, becomes blocked (`blocked`), and completes (`done`).
+3. **Before making a material change** — locate the corresponding epic/task in Spec Keeper. If none exists, create one on the server with scope and acceptance criteria.
+4. **When the execution approach, scope, dependencies, or sequencing changes** — update the task plan in Spec Keeper.
+5. **When a material decision is made** — record it and its rationale in Spec Keeper.
+6. **When blocked** — record the blocker with impact, what's needed, and any dependency/owner.
+7. **When pausing, transferring, or completing work** — create/update handoffs with current state, verification performed, remaining work, and next action.
+
+## State transitions to record
+
+- Task **started** → set status to `in_progress`
+- Task **progress** → add notes / update plan as applicable
+- Task **blocked** → set status to `blocked`, record blocker
+- Task **completed** → verify first, then set status to `done` with outcome, evidence, and follow-up
+
+## Invocation pattern
+
+Use the `SpecKeeper` tool with project-scoped resource paths (e.g., `/tasks`, `/epics`, `/decisions`, `/notes`). The tool automatically resolves these to `/api/v1/projects/elastic-agent/<resource>` using the project slug and credentials from the config. Do NOT use obsolete root paths like `/goals` or `/task-queue` — use only supported project resources (agents, epics, tasks, reservations, counters, locks, import, export, events, notes, changes, decisions, chain-runs, jira-config, jira) or documented absolute `/api/v1/...` routes.
+
+## Failure handling
+
+If Spec Keeper is unavailable, do not treat local files as authoritative. Record the access blocker through the coordination channel, preserve a clear handoff, and resume server synchronization as soon as access is restored.
+
+
+Execution plan:
+1. {
+  \"tldr\": {
+    \"goal\": \"Update the plan parser so that when the plan prompt returns JSON, we extract the JSON, parse it, and use the parsed object as the plan instead of treating the response as plain text.\",
+    \"approach\": \"Inspect the current plan parsing code in main.ts, add robust JSON extraction/parsing (handling code fences and surrounding text), fall back to legacy plain-text behavior on parse failure, and update/align tests to cover the JSON path.\",
+    \"key_note\": \"Do not read data.json; verify changes by building and running relevant tests before committing.\"
+  },
+  \"steps\": [
+    {
+      \"step_number\": 1,
+      \"tldr\": \"Inspect the current plan parser and related tests\",
+      \"justification\": \"We must understand the existing plain-text parsing flow (where the plan prompt response is consumed) so we can modify it in the right place without breaking other phases.\",
+      \"details\": \"Open main.ts and search for the plan parsing logic (e.g., functions like parsePlan, parsePlanResponse, or wherever the plan prompt LLM output is turned into a plan object). Identify the exact function(s) and any helper for extracting JSON. Also list existing test files (test/plan-*.test.js or similar) and read the relevant ones to understand current expectations. Use git status to confirm a clean base.\"
+    },
+    {
+      \"step_number\": 2,
+      \"tldr\": \"Design the JSON extraction strategy\",
+      \"justification\": \"The LLM output may include markdown code fences, surrounding explanatory text, or trailing content, so we need a robust extraction that finds the actual JSON object, not just a naive JSON.parse on the whole string.\",
+      \"details\": \"Implement/extend a helper, e.g. extractJsonFromResponse(text): 1) Try JSON.parse(text) directly. 2) If that fails, find the first '{' and the matching last '}' (or use a regex that captures a JSON object, preferring fenced blocks). 3) Strip common markdown fences (```json ... ``` or ``` ... ```). 4) Return the substring candidate and throw a descriptive error if no valid object is found. Keep the function small and testable. Ensure it handles nested braces properly (e.g., balance braces) so it does not truncate the object.\"
+    },
+    {
+      \"step_number\": 3,
+      \"tldr\": \"Update the plan parser to use extracted JSON and fall back to legacy parsing\",
+      \"justification\": \"The core requirement is to use the parsed JSON as the plan when available; but to keep backward compatibility and avoid hard failures on older plain-text responses, we should attempt JSON first and fall back to the existing parser.\",
+      \"details\": \"In the plan-parse function: (a) Call extractJsonFromResponse on the raw LLM output. (b) If extraction and JSON.parse succeed, validate the result has the expected plan shape (e.g., an array of steps or an object with a steps array; accept both or normalize). Use that parsed object directly as the plan. (c) If JSON parsing fails, log a warning and fall back to the current plain-text parsing path unchanged. Add specific error handling so a malformed JSON doesn't crash the agent but is clearly surfaced in logs. Ensure the function returns the SAME data structure type as before (so downstream plan renderers/agents work unchanged).\"
+    },
+    {
+      \"step_number\": 4,
+      \"tldr\": \"Add/update tests for JSON parsing, extraction, and fallback\",
+      \"justification\": \"Verification is required; tests must prove extraction handles fences/text, parsing produces the plan object, and fallback to plain-text still works when JSON is not present.\",
+      \"details\": \"Create or update a test file (e.g., test/plan-json-parsing.test.js) that: 1) Provides a pure JSON response and asserts the parser uses it as the plan. 2) Provides JSON wrapped in ```json fences plus text and asserts extraction works. 3) Provides a plain-text plan (old format) and asserts the parser falls back to the legacy result. 4) Provides malformed JSON and asserts graceful fallback or a controlled error. Mirror the existing test harness style (likely node:test with assertions). Update package.json scripts if a new script is needed, or reuse an existing test script. Do not read data.json.\"
+    },
+    {
+      \"step_number\": 5,
+      \"tldr\": \"Build, run tests, and verify end-to-end behavior\",
+      \"justification\": \"We must confirm the TypeScript compiles and all relevant tests pass before committing, as per the bootstrap/verification workflow.\",
+      \"details\": \"Run `npm run build` and fix any TypeScript errors. Run the new plan-json tests plus any existing plan-related tests (e.g., npm run test:plan or npm test). Optionally run the full test suite to ensure no regression. Manually inspect the updated parsing function in main.ts to confirm it integrates with the rest of the plan flow. Confirm git diff shows only expected changes.\"
+    },
+    {
+      \"step_number\": 6,
+      \"tldr\": \"Commit the changes with a clear message\",
+      \"justification\": \"Per instructions, we must commit when done so the work is preserved and handoff is clean.\",
+      \"details\": \"Stage the modified main.ts and test files. Commit with a message such as `feat: parse plan prompt JSON response into plan object and use it as the plan`. Do not include credentials or data.json. Verify the commit is present with git log. If any uncommitted unrelated files exist (e.g., CLAUDE_orig.md), leave them untracked unless they are part of this change.\"
+    }
+  ],
+  \"expected_outcome\": \"The plan parser now detects and parses JSON returned by the plan prompt, using the parsed JSON object as the plan. It handles markdown fences and surrounding text, falls back gracefully to the legacy plain-text parser when JSON is invalid/absent, and is covered by passing tests. The build is clean and the change is committed with an appropriate message.\"
+}
+
+You are executing step 1 of 1: {
+  \"tldr\": {
+    \"goal\": \"Update the plan parser so that when the plan prompt returns JSON, we extract the JSON, parse it, and use the parsed object as the plan instead of treating the response as plain text.\",
+    \"approach\": \"Inspect the current plan parsing code in main.ts, add robust JSON extraction/parsing (handling code fences and surrounding text), fall back to legacy plain-text behavior on parse failure, and update/align tests to cover the JSON path.\",
+    \"key_note\": \"Do not read data.json; verify changes by building and running relevant tests before committing.\"
+  },
+  \"steps\": [
+    {
+      \"step_number\": 1,
+      \"tldr\": \"Inspect the current plan parser and related tests\",
+      \"justification\": \"We must understand the existing plain-text parsing flow (where the plan prompt response is consumed) so we can modify it in the right place without breaking other phases.\",
+      \"details\": \"Open main.ts and search for the plan parsing logic (e.g., functions like parsePlan, parsePlanResponse, or wherever the plan prompt LLM output is turned into a plan object). Identify the exact function(s) and any helper for extracting JSON. Also list existing test files (test/plan-*.test.js or similar) and read the relevant ones to understand current expectations. Use git status to confirm a clean base.\"
+    },
+    {
+      \"step_number\": 2,
+      \"tldr\": \"Design the JSON extraction strategy\",
+      \"justification\": \"The LLM output may include markdown code fences, surrounding explanatory text, or trailing content, so we need a robust extraction that finds the actual JSON object, not just a naive JSON.parse on the whole string.\",
+      \"details\": \"Implement/extend a helper, e.g. extractJsonFromResponse(text): 1) Try JSON.parse(text) directly. 2) If that fails, find the first '{' and the matching last '}' (or use a regex that captures a JSON object, preferring fenced blocks). 3) Strip common markdown fences (```json ... ``` or ``` ... ```). 4) Return the substring candidate and throw a descriptive error if no valid object is found. Keep the function small and testable. Ensure it handles nested braces properly (e.g., balance braces) so it does not truncate the object.\"
+    },
+    {
+      \"step_number\": 3,
+      \"tldr\": \"Update the plan parser to use extracted JSON and fall back to legacy parsing\",
+      \"justification\": \"The core requirement is to use the parsed JSON as the plan when available; but to keep backward compatibility and avoid hard failures on older plain-text responses, we should attempt JSON first and fall back to the existing parser.\",
+      \"details\": \"In the plan-parse function: (a) Call extractJsonFromResponse on the raw LLM output. (b) If extraction and JSON.parse succeed, validate the result has the expected plan shape (e.g., an array of steps or an object with a steps array; accept both or normalize). Use that parsed object directly as the plan. (c) If JSON parsing fails, log a warning and fall back to the current plain-text parsing path unchanged. Add specific error handling so a malformed JSON doesn't crash the agent but is clearly surfaced in logs. Ensure the function returns the SAME data structure type as before (so downstream plan renderers/agents work unchanged).\"
+    },
+    {
+      \"step_number\": 4,
+      \"tldr\": \"Add/update tests for JSON parsing, extraction, and fallback\",
+      \"justification\": \"Verification is required; tests must prove extraction handles fences/text, parsing produces the plan object, and fallback to plain-text still works when JSON is not present.\",
+      \"details\": \"Create or update a test file (e.g., test/plan-json-parsing.test.js) that: 1) Provides a pure JSON response and asserts the parser uses it as the plan. 2) Provides JSON wrapped in ```json fences plus text and asserts extraction works. 3) Provides a plain-text plan (old format) and asserts the parser falls back to the legacy result. 4) Provides malformed JSON and asserts graceful fallback or a controlled error. Mirror the existing test harness style (likely node:test with assertions). Update package.json scripts if a new script is needed, or reuse an existing test script. Do not read data.json.\"
+    },
+    {
+      \"step_number\": 5,
+      \"tldr\": \"Build, run tests, and verify end-to-end behavior\",
+      \"justification\": \"We must confirm the TypeScript compiles and all relevant tests pass before committing, as per the bootstrap/verification workflow.\",
+      \"details\": \"Run `npm run build` and fix any TypeScript errors. Run the new plan-json tests plus any existing plan-related tests (e.g., npm run test:plan or npm test). Optionally run the full test suite to ensure no regression. Manually inspect the updated parsing function in main.ts to confirm it integrates with the rest of the plan flow. Confirm git diff shows only expected changes.\"
+    },
+    {
+      \"step_number\": 6,
+      \"tldr\": \"Commit the changes with a clear message\",
+      \"justification\": \"Per instructions, we must commit when done so the work is preserved and handoff is clean.\",
+      \"details\": \"Stage the modified main.ts and test files. Commit with a message such as `feat: parse plan prompt JSON response into plan object and use it as the plan`. Do not include credentials or data.json. Verify the commit is present with git log. If any uncommitted unrelated files exist (e.g., CLAUDE_orig.md), leave them untracked unless they are part of this change.\"
+    }
+  ],
+  \"expected_outcome\": \"The plan parser now detects and parses JSON returned by the plan prompt, using the parsed JSON object as the plan. It handles markdown fences and surrounding text, falls back gracefully to the legacy plain-text parser when JSON is invalid/absent, and is covered by passing tests. The build is clean and the change is committed with an appropriate message.\"
+}
+Carry out only this step. Use tools when needed, report the result, and do not begin another plan step.
+
+After you have finished this step and received outputs for every tool call, report the result and include exactly one machine-readable execution-feedback block. Do not emit this block while tool calls are still needed. Use this exact fenced JSON format:
+```json
+{
+  \"stepStatus\": \"completed | partial | blocked | failed\",
+  \"summary\": \"concise outcome of the current step\",
+  \"findings\": [\"important finding or blocker\"],
+  \"suggestedStepUpdate\": null,
+  \"suggestedPlanUpdates\": [],
+  \"replanRequired\": false,
+  \"replanReason\": null
+}
+```
+
+Field requirements:
+- stepStatus must be one of completed, partial, blocked, or failed.
+- summary must be a string.
+- findings must be an array of strings; use [] when there are none.
+- suggestedStepUpdate must be null when no local change is needed, otherwise a concise string describing the change to this step.
+- suggestedPlanUpdates must be an array; each item must be an object with \"step\" (the remaining step number) and \"update\" (a concise replacement or change). Use [] when there are none.
+- replanRequired must be a boolean. Set it to true only when the remaining plan should be replaced rather than updated incrementally.
+- replanReason must be null when replanRequired is false, otherwise a concise string explaining why replanning is needed.
+
+
+Execution context (review feedback and learnings from earlier attempts; \"(none)\" when this is the first execution):
+REVIEW FEEDBACK FROM THE PREVIOUS ATTEMPT — address these issues in the executed work:
+- No execution evidence was found in the workspace. Git log does not contain the expected commit, git diff is empty, and no modified files were observed.
+- The plan and its steps are well-designed, but there is no deliverable proving the plan was executed, such as code changes to main.ts, new tests, build output, or a commit.
+- Critical file and terminal inspection tools are missing, preventing me from obtaining concrete evidence of execution, which is an automatic fail for review.
+- Original prompt has not been fulfilled because the plan parser was not verified to have been updated, tests were not confirmed to be added/updated, and no commit was verified to exist.
+- SDLC compliance cannot be assessed or approved without execution evidence—no artifacts, commit, tests, or build outputs were available to confirm the process was followed.
+- Multiple review attempts have repeatedly failed for the same reason: no verified artifacts and missing evidence-gathering tools; this attempt still lacks the required evidence.
+
+LEARNINGS FROM EARLIER REVIEWS:
+- A review must always start by verifying the workspace for concrete artifacts (git log, git diff, modified files, test outputs, build logs) and must fail immediately if none exist.
+- Execution and review both require file and terminal inspection tools; if they are missing, the agent must create them or explicitly request a restart to load them.
+- A listed plan step is not proof of completion; every claimed step must have a verifiable deliverable.
+- Do not base a review on the plan or a reported execution summary alone; gather evidence directly from the repository.
+- When tools are absent, do not proceed without evidence—create the tool or stop and request a restart for reload.
+
