@@ -31,7 +31,7 @@ import {
   syncPlanStepTasks,
   epicIdentifier,
 } from "./specKeeperFlow.ts";
-import { resolveSpecKeeperDefaults } from "./specKeeperConfig.ts";
+import { resolveSpecKeeperDefaults, describeSpecKeeperDefaults } from "./specKeeperConfig.ts";
 import { Command } from "commander";
 
 const program = new Command();
@@ -394,11 +394,15 @@ function specKeeperClientOptions(defaults: any) {
     return { projectSlug: defaults?.projectSlug, apiBase: defaults?.apiBase };
 }
 
-/** Run a best-effort Spec Keeper sync operation, logging success or a warning. */
+/**
+ * Run a best-effort Spec Keeper sync operation, logging success under the
+ * dedicated [SPEC KEEPER] label and failures as clear, actionable warnings.
+ * Operation names and statuses are logged; request/response bodies never are.
+ */
 async function specKeeperSync(action: string, run: () => Promise<any>): Promise<any> {
     try {
         const value = await run();
-        status.success(`Spec Keeper: ${action}.`);
+        status.specKeeper(`${action}.`);
         return value;
     } catch (error) {
         status.warning(`Spec Keeper ${action} skipped: ${error instanceof Error ? error.message : String(error)}`);
@@ -1008,11 +1012,7 @@ async function main(options: { review?: boolean } = {}) {
     // reports the winning config source without ever logging secret values.
     const specKeeperDefaults = resolveSpecKeeperDefaults();
     for (const warning of specKeeperDefaults.warnings) status.warning(warning);
-    status.specKeeper(
-        `defaults loaded: projectSlug=${specKeeperDefaults.projectSlug ?? "(none)"} (source: ${specKeeperDefaults.sources.projectSlug}), ` +
-        `apiBase=${specKeeperDefaults.apiBase} (source: ${specKeeperDefaults.sources.apiBase}), ` +
-        `credentialStore=${specKeeperDefaults.credentialStore} (source: ${specKeeperDefaults.sources.credentialStore})`,
-    );
+    status.specKeeper(`defaults loaded: ${describeSpecKeeperDefaults(specKeeperDefaults)}`);
 
     // Planning-necessity classification: before entering the plan-then-execute
     // flow, ask the LLM whether the original command-line prompt genuinely
@@ -1045,7 +1045,7 @@ async function main(options: { review?: boolean } = {}) {
     let epicSync: any = null;
     try {
         epicSync = await syncSpecKeeperEpic({ title: commandLinePrompt, description: `Execution requested for: ${commandLinePrompt}`, projectSlug: specKeeperDefaults.projectSlug });
-        status.success(`Spec Keeper: ${epicSync.selection}.`);
+        status.specKeeper(`${epicSync.selection}.`);
     } catch (error) {
         status.warning(`Spec Keeper epic-first sync skipped: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1099,7 +1099,7 @@ async function main(options: { review?: boolean } = {}) {
     if (epicSync?.epic) {
         try {
             await updateEpicWithPlan(epicSync.epic, formatPlan(activeSteps), { title: commandLinePrompt, projectSlug: specKeeperDefaults.projectSlug });
-            status.success("Spec Keeper: updated epic with the generated plan.");
+            status.specKeeper("updated epic with the generated plan.");
         } catch (error) {
             status.warning(`Spec Keeper plan update skipped: ${error instanceof Error ? error.message : String(error)}`);
         }

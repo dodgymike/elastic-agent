@@ -100,7 +100,11 @@ function resolveFromCwd(cwd: string, filename: string): string {
   return isAbsolute(filename) ? filename : resolve(cwd, filename);
 }
 
-/** Read a non-empty string from the first recognized key, warning on wrong types. */
+/**
+ * Read a non-empty string from the recognized keys, warning on wrong types.
+ * Empty/whitespace values are treated as absent for this layer so a blank
+ * first alias does not shadow a later valid alias or a lower-precedence layer.
+ */
 function readString(
   record: Record<string, unknown>,
   keys: string[],
@@ -112,19 +116,22 @@ function readString(
     const value = record[key];
     if (typeof value === "string") {
       const trimmed = value.trim();
-      return trimmed ? trimmed : undefined;
+      if (trimmed) return trimmed;
+      continue;
     }
     if (value !== undefined && value !== null) {
       warnings.push(
         `Spec Keeper .spec-keeper has an invalid '${fieldLabel}' value; ignoring it.`,
       );
     }
-    return undefined;
   }
   return undefined;
 }
 
-/** Read a nested object from the first recognized key, warning on wrong types. */
+/**
+ * Read a nested object from the recognized keys, warning on wrong types.
+ * Null and non-object values do not shadow later aliases or lower layers.
+ */
 function readObject(
   record: Record<string, unknown>,
   keys: string[],
@@ -142,7 +149,6 @@ function readObject(
         `Spec Keeper .spec-keeper has an invalid '${fieldLabel}' value; ignoring it.`,
       );
     }
-    return undefined;
   }
   return undefined;
 }
@@ -394,4 +400,35 @@ export function resolveSpecKeeperDefaults(
     },
     warnings,
   };
+}
+
+/**
+ * Return an API base suitable for verification logging. Embedded URL userinfo
+ * (username/password) is replaced so a misconfigured apiBase never leaks
+ * credentials into logs.
+ */
+export function redactUrlCredentialsForLogging(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username) url.username = "REDACTED";
+    if (url.password) url.password = "REDACTED";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return value.replace(/(https?:\/\/)([^/@\s]+)@/gi, "$1[REDACTED]@");
+  }
+}
+
+/**
+ * One-line, secret-safe summary of resolved Spec Keeper defaults for logs.
+ * Reports the winning value and source for each operational field without
+ * including credential-store contents or embedded URL credentials.
+ */
+export function describeSpecKeeperDefaults(
+  defaults: ResolvedSpecKeeperDefaults,
+): string {
+  return (
+    `projectSlug=${defaults.projectSlug ?? "(none)"} (source: ${defaults.sources.projectSlug}), ` +
+    `apiBase=${redactUrlCredentialsForLogging(defaults.apiBase)} (source: ${defaults.sources.apiBase}), ` +
+    `credentialStore=${defaults.credentialStore} (source: ${defaults.sources.credentialStore})`
+  );
 }
