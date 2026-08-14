@@ -28,7 +28,10 @@ An enrollment recipe containing:
 
 ## Error handling
 
-- Empty token: `Error` (`A non-empty Spec Keeper enrollment token is required.`).
+- Missing or non-string `token`: `TypeError` (from `token.trim()`); the schema
+  requires `token`, so always pass it as a non-empty string.
+- Empty or whitespace-only token: `Error`
+  (`A non-empty Spec Keeper enrollment token is required.`).
 - Non-OK redeem response: throws
   `Spec Keeper enrollment failed (<status>): <body>`.
 - Network/fetch failures propagate.

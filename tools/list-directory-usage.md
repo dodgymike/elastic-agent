@@ -33,7 +33,8 @@ An array of entries, each with:
 - `directory` must be a non-empty string without NUL characters.
 - Non-recursive: only direct children are returned.
 - The response does not include whether an entry is a file or directory; use
-  `Read`, `ExecuteCommand`, or additional calls to distinguish or recurse.
+  `ExecuteCommand` (for example `ls -la` or `find`) to distinguish files from
+  directories or to recurse.
 
 ## Examples
 

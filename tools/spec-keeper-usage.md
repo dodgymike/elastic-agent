@@ -8,11 +8,12 @@ answering simple questions. The client authenticates with Cognito (username and
 password from the approved credential store) and mints short-lived access
 tokens.
 
-## Mandatory requirement
+## When to use
 
-Use the `SpecKeeper` tool for ALL planning and execution tasks. This is not
-optional. Before starting any task, consult Spec Keeper for goals, epics,
-tasks, dependencies, decisions, and procedures.
+**Mandatory**: use the `SpecKeeper` tool for ALL planning and execution tasks;
+never for answering simple questions. This is not optional. Before starting any
+task, consult Spec Keeper for goals, epics, tasks, dependencies, decisions, and
+procedures.
 
 ## Required parameters
 
@@ -106,6 +107,24 @@ handoff, and resume server synchronization as soon as access is restored.
 - Non-OK API response: throws with the method, resolved path, status, and a
   redacted diagnostic (secret-shaped values are redacted).
 - Network failure: throws `Spec Keeper request <METHOD> <path> could not be sent.`
+
+## Critical operating constraints
+
+- Use Spec Keeper for ALL planning and execution tasks; never for answering
+  simple questions.
+- Use only supported project resources (`agents`, `epics`, `tasks`,
+  `reservations`, `counters`, `locks`, `import`, `export`, `events`, `notes`,
+  `changes`, `decisions`, `chain-runs`, `jira-config`, `jira`) or documented
+  absolute `/api/v1/...` routes. Do not use obsolete root paths such as
+  `/goals` or `/task-queue`.
+- Project resource routes require the `elastic-agent` project slug (or an
+  explicit URL-safe `projectSlug`).
+- Credentials and enrollment recipes are NEVER stored in the repository and
+  never copied into notes, CLAUDE.md, or handoffs.
+- If Spec Keeper is unavailable, do not treat local files as authoritative;
+  record the blocker and preserve a clear handoff.
+- Record task state transitions (`in_progress`, `blocked`, `done`) and material
+  decisions on the server.
 
 ## Examples
 

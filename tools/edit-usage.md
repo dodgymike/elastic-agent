@@ -18,11 +18,16 @@ rewrite. Always obtain `read_hash` from a fresh `Read` first.
 - `read_hash` (string): SHA-256 (64 hexadecimal characters) of the file version
   last read.
 
+## Optional parameters
+
 At least one replacement form must be supplied (both may be combined; the
 single pair is applied after the `edits` array):
 
-- `old_string` + `new_string` (both strings), or
-- `edits` (array): an ordered list of `{ old_string, new_string }` operations.
+- `old_string` (string): exact text that must appear exactly once in the
+  current file content; used together with `new_string`.
+- `new_string` (string): replacement text for `old_string`.
+- `edits` (array): an ordered list of `{ old_string, new_string }` objects
+  applied in sequence.
 
 ## Result
 
