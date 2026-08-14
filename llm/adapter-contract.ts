@@ -65,6 +65,13 @@ export interface ToolDefinition {
   readonly name: string;
   readonly description?: string;
   readonly parameters: JsonObject;
+  /**
+   * Repository-relative path to a per-tool usage prompt file (for example
+   * tools/read-usage.md). The LLM is instructed to read this file before
+   * calling the tool for the first time. Provider adapters must not forward
+   * this metadata in their provider tool payloads.
+   */
+  readonly usagePromptFile?: string;
 }
 
 export type ToolChoice = "auto" | "none" | "required" | { readonly name: string };

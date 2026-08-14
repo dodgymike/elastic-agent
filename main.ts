@@ -150,6 +150,7 @@ const toolChildIndent = hierarchyIndent("toolResult");
 const tools = [
     {
         type: "function", name: "Write",
+        usagePromptFile: "tools/write-usage.md",
         parameters: {
             type: "object",
             properties: { path: { type: "string" }, content: { type: "string" }, overwrite: { type: "boolean" }, read_hash: { type: "string" } },
@@ -159,11 +160,13 @@ const tools = [
     },
     {
         type: "function", name: "Read",
+        usagePromptFile: "tools/read-usage.md",
         parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
         exec_handler: ({ path }) => Read({ path }),
     },
     {
         type: "function", name: "Edit",
+        usagePromptFile: "tools/edit-usage.md",
         description: "Edit a file in place using replacement operations. Provide the read_hash returned by the last Read (or Write/Edit) of this file so an edit only applies when the file is unchanged. Pass either a single { old_string, new_string } replacement or an ordered edits array; each old_string must appear exactly once.",
         parameters: {
             type: "object",
@@ -177,11 +180,13 @@ const tools = [
     },
     {
         type: "function", name: "Http",
+        usagePromptFile: "tools/http-usage.md",
         parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
         exec_handler: ({ url }) => Http({ url }),
     },
     {
         type: "function", name: "HttpRequest",
+        usagePromptFile: "tools/http-request-usage.md",
         description: "Send an HTTP request, including authenticated or mutating requests when required.",
         parameters: {
             type: "object",
@@ -194,11 +199,13 @@ const tools = [
     },
     {
         type: "function", name: "ListDirectory",
+        usagePromptFile: "tools/list-directory-usage.md",
         parameters: { type: "object", properties: { directory: { type: "string" } }, required: ["directory"] },
         exec_handler: ({ directory }) => ListDirectory({ directory }),
     },
     {
         type: "function", name: "ExecuteCommand",
+        usagePromptFile: "tools/execute-command-usage.md",
         description: "Run a Bash command and return its exit code, standard output, and standard error. Parameters are safely supplied as positional arguments.",
         parameters: {
             type: "object",
@@ -209,6 +216,7 @@ const tools = [
     },
     {
         type: "function", name: "Git",
+        usagePromptFile: "tools/git-usage.md",
         description: "List repository changes, stage selected changes, or commit staged changes.",
         parameters: {
             type: "object",
@@ -233,6 +241,7 @@ const tools = [
     },
     {
         type: "function", name: "AgentBus",
+        usagePromptFile: "tools/agent-bus-usage.md",
         description: "Send coordination messages or retrieve Agent Bus status and handoff feeds.",
         parameters: {
             type: "object",
@@ -244,6 +253,7 @@ const tools = [
     },
     {
         type: "function", name: "SpecKeeper",
+        usagePromptFile: "tools/spec-keeper-usage.md",
         description: "Query and update Spec Keeper goals, epics, tasks, decisions, plans, procedures, and task state.",
         parameters: {
             type: "object",
@@ -257,6 +267,7 @@ const tools = [
     },
     {
         type: "function", name: "SpecKeeperEnroll",
+        usagePromptFile: "tools/spec-keeper-enroll-usage.md",
         description: "Redeem a one-time Spec Keeper enrollment token and return its enrollment recipe. The recipe contains secrets and must not be written to the repository.",
         parameters: {
             type: "object", properties: { token: { type: "string", description: "Token from the #token= fragment of a Spec Keeper enrollment URL." } }, required: ["token"],
