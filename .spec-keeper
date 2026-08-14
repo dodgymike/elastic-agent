@@ -1,0 +1,16 @@
+{
+  "projectSlug": "elastic-agent",
+  "apiBase": "https://api.spec.elasticninja.com",
+  "credentialStore": ".spec.local.json",
+  "defaultEpic": {
+    "key": "elastic-agent-bootstrap",
+    "title": "Elastic Agent bootstrap",
+    "description": "Bootstrap work for the elastic-agent.",
+    "status": "in_progress"
+  },
+  "defaultTask": {
+    "epicKey": "elastic-agent-bootstrap",
+    "keyPrefix": "EA-",
+    "status": "in_progress"
+  }
+}

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolveSpecKeeperDefaults } from "../specKeeperConfig.js";
 /**
  * Authenticated Spec Keeper client for goals, plans, decisions, and task state.
  *
@@ -77,8 +78,7 @@ function normalizeSecretConfig(raw: Record<string, unknown>): SpecKeeperSecretCo
  * secret store. Explicit call options and environment variables always take
  * precedence, so deployments can continue to use their normal secret manager.
  */
-function loadSecretConfig(): SpecKeeperSecretConfig {
-  const filename = process.env.SPEC_KEEPER_CONFIG_PATH ?? ".spec.local.json";
+function loadSecretConfig(filename: string): SpecKeeperSecretConfig {
   try {
     const value: unknown = JSON.parse(readFileSync(filename, "utf8"));
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -114,13 +114,8 @@ const MAX_FAILURE_DIAGNOSTIC_LENGTH = 512;
 const SENSITIVE_DIAGNOSTIC_KEY = /(?:authorization|token|password|secret|credential|api[-_]?key|cookie|session|access[_-]?key|refresh[_-]?token)/i;
 const PROJECT_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-/** Resolve an explicit slug, without ever inferring a project from a task route. */
-function getProjectSlug(options: SpecKeeperOptions): string | undefined {
-  const config = loadSecretConfig();
-  const configured = options.projectSlug
-    ?? process.env.SPEC_KEEPER_PROJECT_SLUG
-    ?? config.projectSlug
-    ?? config.project_slug;
+/** Validate a resolved project slug before it is embedded in a project route. */
+function validateProjectSlug(configured: string | undefined): string | undefined {
   if (configured === undefined) return undefined;
   const slug = configured.trim();
   if (!PROJECT_SLUG_PATTERN.test(slug)) {
@@ -149,7 +144,9 @@ export function resolveSpecKeeperPath(path: string, projectSlug?: string): strin
     throw new Error(`Unsupported Spec Keeper project resource '${resource}'. Use a documented /api/v1 route.`);
   }
   if (!projectSlug || !PROJECT_SLUG_PATTERN.test(projectSlug)) {
-    throw new Error("A URL-safe Spec Keeper projectSlug is required for project resource routes.");
+    throw new Error(
+      "A URL-safe Spec Keeper projectSlug is required for project resource routes. Configure it in .spec-keeper (projectSlug), SPEC_KEEPER_PROJECT_SLUG, or restore the built-in default 'elastic-agent'.",
+    );
   }
   return `/api/v1/projects/${projectSlug}${route}${query ? `?${query}` : ""}`;
 }
@@ -195,8 +192,11 @@ interface CognitoResponse {
 }
 
 /** Mint a short-lived Cognito access token without persisting credentials. */
-async function getAccessToken(options: SpecKeeperOptions): Promise<string> {
-  const config = loadSecretConfig();
+async function getAccessToken(
+  options: SpecKeeperOptions,
+  config: SpecKeeperSecretConfig,
+  userAgent: string,
+): Promise<string> {
   const suppliedToken = options.accessToken ?? process.env.SPEC_KEEPER_ACCESS_TOKEN ?? config.accessToken;
   if (suppliedToken?.trim()) return suppliedToken.trim();
 
@@ -230,7 +230,7 @@ async function getAccessToken(options: SpecKeeperOptions): Promise<string> {
         "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
         // Unlike the Spec Keeper API, Cognito does not mandate a User-Agent, but
         // declare one explicitly for reliable proxy behavior.
-        "User-Agent": options.userAgent ?? "elastic-agent-spec-keeper/1.1",
+        "User-Agent": userAgent,
       },
       body: JSON.stringify({
         AuthFlow: authFlow,
@@ -264,20 +264,24 @@ async function getAccessToken(options: SpecKeeperOptions): Promise<string> {
  * compatible with evolving Spec Keeper project schemas.
  */
 export default async function specKeeper(options: SpecKeeperOptions): Promise<SpecKeeperResult> {
+  const defaults = resolveSpecKeeperDefaults(options);
   const {
     path,
     method = "GET",
     body,
-    apiBase,
-    userAgent = "elastic-agent-spec-keeper/1.1",
   } = options;
-  const requestPath = resolveSpecKeeperPath(path, getProjectSlug(options));
-  if (!userAgent.trim()) {
+  const userAgent = (
+    options.userAgent ?? process.env.SPEC_KEEPER_USER_AGENT ?? "elastic-agent-spec-keeper/1.1"
+  ).trim();
+  if (!userAgent) {
     throw new Error("Spec Keeper requires a non-empty User-Agent header.");
   }
 
-  const accessToken = await getAccessToken(options);
-  const configuredApiBase = apiBase ?? process.env.SPEC_KEEPER_API_BASE ?? loadSecretConfig().apiBase ?? "https://api.spec.elasticninja.com";
+  const projectSlug = validateProjectSlug(defaults.projectSlug);
+  const requestPath = resolveSpecKeeperPath(path, projectSlug);
+  const configuredApiBase = defaults.apiBase;
+  const secretConfig = loadSecretConfig(defaults.credentialStore);
+  const accessToken = await getAccessToken(options, secretConfig, userAgent);
   const headers: Record<string, string> = {
     Accept: "application/json",
     Authorization: `Bearer ${accessToken}`,
@@ -287,7 +291,7 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
 
   let response: Response;
   try {
-    response = await fetch(`${configuredApiBase.replace(/\/+$/, "")}${requestPath}`, {
+    response = await fetch(`${configuredApiBase}${requestPath}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
