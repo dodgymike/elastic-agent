@@ -37,11 +37,11 @@ const colored = { color: true };
     );
     assertLines(
         renderToolPhase("succeeded", { name: "Read" }, { content: "hello" }, plain),
-        ['Read ● {"content":"hello"}'],
+        ["Read", ' ● {"content":"hello"}'],
     );
     assertLines(
         renderToolPhase("failed", { name: "Read" }, "permission denied", plain),
-        ["Read ● permission denied"],
+        ["Read", " ● permission denied"],
     );
 }
 
@@ -76,11 +76,11 @@ const colored = { color: true };
 {
     assertLines(
         renderToolPhase("failed", { name: "UnknownTool" }, { error: "no handler" }, plain),
-        ["UnknownTool ● no handler"],
+        ["UnknownTool", " ● no handler"],
     );
     assertLines(
         renderToolPhase("failed", { name: "Read" }, { error: "access denied" }, plain),
-        ["Read ● access denied"],
+        ["Read", " ● access denied"],
     );
 }
 
@@ -220,7 +220,7 @@ const colored = { color: true };
     const editCall = { name: "Edit", arguments: '{"path":"/tmp/a.txt"}' };
     assertLines(
         renderToolPhase("succeeded", editCall, { content: "new" }, plain),
-        ['Edit({"path":"/tmp/a.txt"}) ● {"content":"new"}'],
+        ['Edit({"path":"/tmp/a.txt"})', ' ● {"content":"new"}'],
     );
 }
 
@@ -333,7 +333,7 @@ const colored = { color: true };
     };
     assertLines(
         renderToolPhase("succeeded", gitCall, result, plain),
-        ["● git status --porcelain=v1 --branch failed (exit 128)", "fatal: not a git repository"],
+        [" ● git status --porcelain=v1 --branch failed (exit 128)", " fatal: not a git repository"],
     );
 }
 
@@ -343,15 +343,15 @@ const colored = { color: true };
     const gitCall = { name: "Git", arguments: '{"action":"stage"}' };
     assertLines(
         renderToolPhase("succeeded", gitCall, { command: ["add", "--all"], exitCode: 0, stdout: "", stderr: "" }, plain),
-        ["Git('stage') ●"],
+        ["Git('stage')", " ●"],
     );
     assertLines(
         renderToolPhase("succeeded", gitCall, { command: ["add", "--", "a.txt"], exitCode: 0, stdout: "staged\n", stderr: "" }, plain),
-        ["Git('stage') ●", "staged"],
+        ["Git('stage')", " ●", " staged"],
     );
     assertLines(
         renderToolPhase("succeeded", gitCall, { command: ["add", "--", "a.txt"], exitCode: 0, stdout: "staged\n", stderr: "warning\n" }, plain),
-        ["Git('stage') ●", "staged", "warning"],
+        ["Git('stage')", " ●", " staged", " warning"],
     );
 }
 
@@ -361,7 +361,7 @@ const colored = { color: true };
     const gitCall = { name: "Git", arguments: '{"action":"commit"}' };
     assertLines(
         renderToolPhase("failed", gitCall, "The Git tool cannot commit during the execution phase.", plain),
-        ["Git('commit') ● The Git tool cannot commit during the execution phase."],
+        ["Git('commit')", " ● The Git tool cannot commit during the execution phase."],
     );
 }
 
@@ -370,7 +370,7 @@ const colored = { color: true };
     const gitCall = { name: "Git", arguments: '{"action":"commit"}' };
     assertLines(
         renderToolPhase("succeeded", gitCall, { error: "commit refused" }, plain),
-        ["Git('commit') ● commit refused"],
+        ["Git('commit')", " ● commit refused"],
     );
 }
 
@@ -379,7 +379,7 @@ const colored = { color: true };
     const gitCall = { name: "Git", arguments: '{"action":"list"}' };
     assertLines(
         renderToolPhase("succeeded", gitCall, { something: true }, plain),
-        ["Git('list') ● {\"something\":true}"],
+        ["Git('list')", ' ● {"something":true}'],
     );
 }
 
@@ -405,15 +405,15 @@ const colored = { color: true };
     const execCall = { name: "ExecuteCommand" };
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "hello\nworld\n", stderr: "" }, plain),
-        ["ExecuteCommand ●", "hello", "world"],
+        ["ExecuteCommand", " ●", " hello", " world"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "", stderr: "" }, plain),
-        ["ExecuteCommand ●"],
+        ["ExecuteCommand", " ●"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "hello\n", stderr: "warning\n" }, plain),
-        ["ExecuteCommand ●", "hello", "warning"],
+        ["ExecuteCommand", " ●", " hello", " warning"],
     );
 }
 
@@ -424,15 +424,15 @@ const colored = { color: true };
     const execCall = { name: "ExecuteCommand" };
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 1, stdout: "out-line\n", stderr: "err-line\n" }, plain),
-        ["ExecuteCommand ● exit 1", "err-line", "out-line"],
+        ["ExecuteCommand", " ● exit 1", " err-line", " out-line"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 2, stdout: "", stderr: "err-line\n" }, plain),
-        ["ExecuteCommand ● exit 2", "err-line"],
+        ["ExecuteCommand", " ● exit 2", " err-line"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 3, stdout: "out-line\n", stderr: "" }, plain),
-        ["ExecuteCommand ● exit 3", "out-line"],
+        ["ExecuteCommand", " ● exit 3", " out-line"],
     );
 }
 
@@ -442,7 +442,7 @@ const colored = { color: true };
     const execCall = { name: "ExecuteCommand" };
     assertLines(
         renderToolPhase("failed", execCall, "Bash was terminated by signal SIGTERM", plain),
-        ["ExecuteCommand ● Bash was terminated by signal SIGTERM"],
+        ["ExecuteCommand", " ● Bash was terminated by signal SIGTERM"],
     );
 }
 
@@ -458,7 +458,7 @@ const colored = { color: true };
         { exitCode: 0, stdout: "ok\n", stderr: "" },
         colored,
     );
-    assertLines(successLines, [`${ch.green("ExecuteCommand")} ${ch.green("●")}`, "ok"]);
+    assertLines(successLines, [ch.green("ExecuteCommand"), ` ${ch.green("●")}`, " ok"]);
     assert.ok(successLines[0].includes("\u001b"), "success line must be colored green");
 
     const errorLines = renderToolPhase(
@@ -467,7 +467,7 @@ const colored = { color: true };
         { exitCode: 1, stdout: "", stderr: "bad\n" },
         colored,
     );
-    assertLines(errorLines, [`${ch.red("ExecuteCommand")} ${ch.red("●")} exit 1`, "bad"]);
+    assertLines(errorLines, [ch.red("ExecuteCommand"), ` ${ch.red("●")} exit 1`, " bad"]);
     assert.ok(errorLines[0].includes("\u001b"), "error line must be colored red");
 }
 
@@ -480,11 +480,11 @@ const colored = { color: true };
     assert.ok(pending[0].includes("\u001b"), "pending label must be colored orange");
 
     const succeeded = renderToolPhase("succeeded", { name: "Read" }, { content: "x" }, colored);
-    assertLines(succeeded, [`${ch.green("Read")} ${ch.green("●")} {\"content\":\"x\"}`]);
+    assertLines(succeeded, [ch.green("Read"), ` ${ch.green("●")} {"content":"x"}`]);
     assert.ok(succeeded[0].includes("\u001b"), "succeeded label must be colored green");
 
     const failed = renderToolPhase("failed", { name: "Read" }, "access denied", colored);
-    assertLines(failed, [`${ch.red("Read")} ${ch.red("●")} access denied`]);
+    assertLines(failed, [ch.red("Read"), ` ${ch.red("●")} access denied`]);
     assert.ok(failed[0].includes("\u001b"), "failed label must be colored red");
 
     // Git and ExecuteCommand pending labels follow the same orange rule.
@@ -501,7 +501,7 @@ const colored = { color: true };
 {
     assertLines(
         renderToolPhase("succeeded", { name: "ExecuteCommand" }, undefined, plain),
-        ["ExecuteCommand ●"],
+        ["ExecuteCommand", " ●"],
     );
 }
 
@@ -511,16 +511,16 @@ const colored = { color: true };
 {
     const call = { name: "ExecuteCommand" };
     const successWithStderr = renderToolCommand(call, { exitCode: 0, stdout: "out\n", stderr: "warn\n" }, plain);
-    assertLines(successWithStderr!, ["ExecuteCommand ●", "out", "warn"]);
+    assertLines(successWithStderr!, ["ExecuteCommand", " ●", " out", " warn"]);
 
     const successWithoutStderr = renderToolCommand(call, { exitCode: 0, stdout: "out\n", stderr: "" }, plain);
-    assertLines(successWithoutStderr!, ["ExecuteCommand ●", "out"]);
+    assertLines(successWithoutStderr!, ["ExecuteCommand", " ●", " out"]);
 
     const failureWithStdout = renderToolCommand(call, { exitCode: 1, stdout: "out\n", stderr: "err\n" }, plain);
-    assertLines(failureWithStdout!, ["ExecuteCommand ● exit 1", "err", "out"]);
+    assertLines(failureWithStdout!, ["ExecuteCommand", " ● exit 1", " err", " out"]);
 
     const failureWithoutStdout = renderToolCommand(call, { exitCode: 2, stdout: "", stderr: "err\n" }, plain);
-    assertLines(failureWithoutStdout!, ["ExecuteCommand ● exit 2", "err"]);
+    assertLines(failureWithoutStdout!, ["ExecuteCommand", " ● exit 2", " err"]);
 
     const all = [successWithStderr!, successWithoutStderr!, failureWithStdout!, failureWithoutStdout!].flat().join("\n");
     assert.ok(!all.includes("[SUCCESS]"), "shared helper must never emit [SUCCESS]");

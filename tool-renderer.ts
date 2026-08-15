@@ -271,9 +271,13 @@ export function renderToolCommand(
         const success = streams.exitCode === 0;
         const coloredLabel = success ? a.green(label) : a.red(label);
         const circle = success ? a.green("●") : `${a.red("●")} exit ${streams.exitCode}`;
-        const lines = [`${coloredLabel} ${circle}`];
-        const stdoutLines = toolCommandOutputLines(streams.stdout);
-        const stderrLines = toolCommandOutputLines(streams.stderr);
+        // The colored tool-call label opens its own line; the status circle and
+        // any captured output follow on new lines, each indented one space
+        // relative to that tool-call line.
+        const indent = (line: string) => ` ${line}`;
+        const lines = [coloredLabel, indent(circle)];
+        const stdoutLines = toolCommandOutputLines(streams.stdout).map(indent);
+        const stderrLines = toolCommandOutputLines(streams.stderr).map(indent);
         if (success) {
             lines.push(...stdoutLines);
             if (stderrLines.length > 0) lines.push(...stderrLines);
@@ -285,7 +289,7 @@ export function renderToolCommand(
     }
 
     const message = redactSecretText(toolCommandErrorText(payload));
-    if (message) return [`${a.red(label)} ${a.red("●")} ${message}`];
+    if (message) return [a.red(label), ` ${a.red("●")} ${message}`];
     return undefined;
 }
 
@@ -300,7 +304,7 @@ function renderGenericSucceeded(toolCall: ToolCallDescriptor, result: unknown, o
     const a = ansiHelpers(options.color);
     const circle = a.green("●");
     const summary = result === undefined ? "" : ` ${truncate(stringify(result), 160)}`;
-    return [`${a.green(label)} ${circle}${summary}`];
+    return [a.green(label), ` ${circle}${summary}`];
 }
 
 function renderGenericFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
@@ -308,7 +312,7 @@ function renderGenericFailed(toolCall: ToolCallDescriptor, error: unknown, optio
     const a = ansiHelpers(options.color);
     const circle = a.red("●");
     const message = redactSecretText(toolCommandErrorText(error));
-    return message ? [`${a.red(label)} ${circle} ${message}`] : [`${a.red(label)} ${circle}`];
+    return message ? [a.red(label), ` ${circle} ${message}`] : [a.red(label), ` ${circle}`];
 }
 
 /**
@@ -733,9 +737,13 @@ function renderGitStatus(stdout: string, options: ToolRendererOptions): string[]
 /** Render a non-zero git exit with command evidence followed by diagnostics. */
 function renderGitCommandFailure(args: string[], exitCode: number, result: GitResultLike, a: AnsiHelpers): string[] {
     const command = `git ${args.join(" ")}`;
-    const lines = [`${a.red("●")} ${command} failed (exit ${exitCode})`];
-    lines.push(...gitOutputLines(result.stderr));
-    lines.push(...gitOutputLines(result.stdout));
+    // The status circle opens the result view one space indented relative to
+    // the tool-call line, matching the shared command helper's layout; the
+    // diagnostic lines follow at the same one-space indent.
+    const indent = (line: string) => ` ${line}`;
+    const lines = [indent(`${a.red("●")} ${command} failed (exit ${exitCode})`)];
+    lines.push(...gitOutputLines(result.stderr).map(indent));
+    lines.push(...gitOutputLines(result.stdout).map(indent));
     return lines;
 }
 
@@ -796,7 +804,7 @@ function renderRedactedSucceeded(toolCall: ToolCallDescriptor, result: unknown, 
     const a = ansiHelpers(options.color);
     const circle = a.green("●");
     const summary = redactedResultSummary(result);
-    return summary ? [`${a.green(label)} ${circle} ${summary}`] : [`${a.green(label)} ${circle}`];
+    return summary ? [a.green(label), ` ${circle} ${summary}`] : [a.green(label), ` ${circle}`];
 }
 
 /** Render a failed secret-carrying tool with a redacted error message. */
@@ -805,7 +813,7 @@ function renderRedactedFailed(toolCall: ToolCallDescriptor, error: unknown, opti
     const a = ansiHelpers(options.color);
     const circle = a.red("●");
     const message = redactSecretText(toolCommandErrorText(error));
-    return message ? [`${a.red(label)} ${circle} ${message}`] : [`${a.red(label)} ${circle}`];
+    return message ? [a.red(label), ` ${circle} ${message}`] : [a.red(label), ` ${circle}`];
 }
 
 const redactedToolRenderer: ToolRenderer = {
