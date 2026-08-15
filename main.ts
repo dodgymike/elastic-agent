@@ -338,7 +338,12 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
         }
         return true;
     }
-    if (result.queuedCount > 0) {
+    // In no-filter / respond-to-everything mode every message is classified as
+    // relevant and processed immediately, so there are never irrelevant
+    // (queued) messages to report. The count is always 0 in that mode; guard on
+    // it explicitly so a future change to classification cannot surface a
+    // misleading "queued" log for a mode that processes everything.
+    if (!runMode.respondAll && result.queuedCount > 0) {
         status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, reportPrefix);
     }
     return false;
@@ -2409,7 +2414,11 @@ async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } 
                             status.warning(`loop poll: ${warning}`, idlePrefix);
                         }
                     }
-                    if (!result.readFailed && result.queuedCount > 0) {
+                    // In no-filter / respond-to-everything mode every message is
+                    // classified as relevant and processed immediately, so there
+                    // are never irrelevant (queued) messages to report. Suppress
+                    // the misleading "queued" log for that mode.
+                    if (!runMode.respondAll && !result.readFailed && result.queuedCount > 0) {
                         status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, idlePrefix);
                     }
                 },
