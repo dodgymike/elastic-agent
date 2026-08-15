@@ -197,6 +197,281 @@ function renderExecuteCommandFailed(_toolCall: ToolCallDescriptor, error: unknow
     return message ? [`${red("●")} ${message}`] : [red("●")];
 }
 
+/** Maximum diff lines rendered per Edit result. Keeps terminal output bounded. */
+const MAX_EDIT_DIFF_LINES = 120;
+
+/**
+ * Upper bound for the LCS table used by the Edit diff renderer. The common
+ * prefix/suffix are trimmed before the LCS is built, so this limit is only
+ * reached by very large changed regions. Beyond it we emit a concise
+ * changed-line summary instead of risking an oversized allocation.
+ */
+const MAX_EDIT_DIFF_CELLS = 4_000_000;
+
+interface EditDiffEntry {
+    type: "context" | "addition" | "deletion";
+    text: string;
+    oldLine: number | null;
+    newLine: number | null;
+}
+
+interface EditDiff {
+    entries: EditDiffEntry[];
+    oldStart: number;
+    oldCount: number;
+    newStart: number;
+    newCount: number;
+    truncated: number;
+}
+
+/** Extract the `path` field from a raw tool-call arguments JSON string. */
+function editPathText(argumentsText: unknown): string {
+    if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
+    try {
+        const parsed = JSON.parse(argumentsText) as { path?: unknown };
+        return typeof parsed?.path === "string" ? parsed.path : "";
+    } catch {
+        return "";
+    }
+}
+
+/** Extract a displayable line-range label from Edit arguments, if present. */
+function editLineRangeText(argumentsText: unknown): string {
+    if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
+    try {
+        const parsed = JSON.parse(argumentsText) as { line_range?: unknown };
+        if (typeof parsed?.line_range === "string" && parsed.line_range.trim() !== "") {
+            return `lines ${parsed.line_range.trim()}`;
+        }
+        return "";
+    } catch {
+        return "";
+    }
+}
+
+/**
+ * Split text into display lines. As with the Read/Edit tools, a single
+ * trailing newline is a line terminator rather than an extra blank line, and
+ * an empty string has no lines.
+ */
+function editDiffLines(text: string): string[] {
+    if (text.length === 0) return [];
+    const lines = text.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    return lines;
+}
+
+/**
+ * Diff two already-trimmed middle line arrays with a classic LCS. Returns
+ * exact context/addition/deletion operations for small-to-medium regions; for
+ * a very large changed region it falls back to a compact summary so rendering
+ * can never exhaust memory or flood the terminal.
+ */
+function diffMiddleLines(
+    oldLines: string[],
+    newLines: string[],
+): Array<{ type: "context" | "addition" | "deletion"; text: string }> {
+    if (oldLines.length === 0 && newLines.length === 0) return [];
+    if (oldLines.length === 0) {
+        return newLines.map((text) => ({ type: "addition", text }));
+    }
+    if (newLines.length === 0) {
+        return oldLines.map((text) => ({ type: "deletion", text }));
+    }
+    if (oldLines.length * newLines.length > MAX_EDIT_DIFF_CELLS) {
+        return [
+            { type: "deletion", text: `… ${oldLines.length} line(s) removed` },
+            { type: "addition", text: `… ${newLines.length} line(s) added` },
+        ];
+    }
+
+    const width = newLines.length + 1;
+    const lcs = new Int32Array((oldLines.length + 1) * width);
+    for (let i = oldLines.length - 1; i >= 0; i -= 1) {
+        const row = i * width;
+        const nextRow = (i + 1) * width;
+        for (let j = newLines.length - 1; j >= 0; j -= 1) {
+            lcs[row + j] =
+                oldLines[i] === newLines[j]
+                    ? lcs[nextRow + j + 1] + 1
+                    : Math.max(lcs[nextRow + j], lcs[row + j + 1]);
+        }
+    }
+
+    const ops: Array<{ type: "context" | "addition" | "deletion"; text: string }> = [];
+    let i = 0;
+    let j = 0;
+    while (i < oldLines.length && j < newLines.length) {
+        if (oldLines[i] === newLines[j]) {
+            ops.push({ type: "context", text: oldLines[i] });
+            i += 1;
+            j += 1;
+        } else if (lcs[(i + 1) * width + j] >= lcs[i * width + j + 1]) {
+            ops.push({ type: "deletion", text: oldLines[i] });
+            i += 1;
+        } else {
+            ops.push({ type: "addition", text: newLines[j] });
+            j += 1;
+        }
+    }
+    while (i < oldLines.length) {
+        ops.push({ type: "deletion", text: oldLines[i] });
+        i += 1;
+    }
+    while (j < newLines.length) {
+        ops.push({ type: "addition", text: newLines[j] });
+        j += 1;
+    }
+    return ops;
+}
+
+/**
+ * Build a unified-diff-style view of the before/after file content supplied by
+ * the Edit tool. Common prefix/suffix lines become bounded context around the
+ * changed region, and the middle is diffed with an LCS so non-contiguous edits
+ * are classified correctly.
+ */
+function computeEditDiff(oldText: string, newText: string): EditDiff {
+    const oldLines = editDiffLines(oldText);
+    const newLines = editDiffLines(newText);
+
+    let prefix = 0;
+    while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
+        prefix += 1;
+    }
+
+    let suffix = 0;
+    while (
+        suffix < oldLines.length - prefix &&
+        suffix < newLines.length - prefix &&
+        oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+    ) {
+        suffix += 1;
+    }
+
+    const middleOld = oldLines.slice(prefix, oldLines.length - suffix);
+    const middleNew = newLines.slice(prefix, newLines.length - suffix);
+    const middleOps = diffMiddleLines(middleOld, middleNew);
+
+    const entries: EditDiffEntry[] = [];
+
+    // Up to three unchanged lines immediately before the changed region.
+    const contextStart = Math.max(0, prefix - 3);
+    for (let i = contextStart; i < prefix; i += 1) {
+        entries.push({ type: "context", text: oldLines[i], oldLine: i + 1, newLine: i + 1 });
+    }
+
+    // The changed middle. Line numbers advance independently per side.
+    let oldCursor = prefix;
+    let newCursor = prefix;
+    for (const op of middleOps) {
+        if (op.type === "deletion") {
+            entries.push({ type: "deletion", text: op.text, oldLine: oldCursor + 1, newLine: null });
+            oldCursor += 1;
+        } else if (op.type === "addition") {
+            entries.push({ type: "addition", text: op.text, oldLine: null, newLine: newCursor + 1 });
+            newCursor += 1;
+        } else {
+            entries.push({ type: "context", text: op.text, oldLine: oldCursor + 1, newLine: newCursor + 1 });
+            oldCursor += 1;
+            newCursor += 1;
+        }
+    }
+
+    // Up to three unchanged lines immediately after the changed region. These
+    // are equal in both files but may live at different line numbers.
+    const oldSuffixStart = oldLines.length - suffix;
+    const newSuffixStart = newLines.length - suffix;
+    const suffixContextCount = Math.min(3, suffix);
+    for (let offset = 0; offset < suffixContextCount; offset += 1) {
+        const oldIndex = oldSuffixStart + offset;
+        const newIndex = newSuffixStart + offset;
+        entries.push({ type: "context", text: newLines[newIndex], oldLine: oldIndex + 1, newLine: newIndex + 1 });
+    }
+
+    const oldStart = entries.reduce<number | null>(
+        (found, entry) => (found === null && entry.oldLine !== null ? entry.oldLine : found),
+        null,
+    );
+    const newStart = entries.reduce<number | null>(
+        (found, entry) => (found === null && entry.newLine !== null ? entry.newLine : found),
+        null,
+    );
+
+    const oldCount = entries.filter((entry) => entry.oldLine !== null).length;
+    const newCount = entries.filter((entry) => entry.newLine !== null).length;
+
+    let truncated = 0;
+    let visibleEntries = entries;
+    if (entries.length > MAX_EDIT_DIFF_LINES) {
+        truncated = entries.length - MAX_EDIT_DIFF_LINES;
+        visibleEntries = entries.slice(0, MAX_EDIT_DIFF_LINES);
+    }
+
+    return {
+        entries: visibleEntries,
+        oldStart: oldStart ?? prefix + 1,
+        oldCount,
+        newStart: newStart ?? prefix + 1,
+        newCount,
+        truncated,
+    };
+}
+
+interface EditResultLike {
+    content?: unknown;
+    previous_content?: unknown;
+    applied?: unknown;
+}
+
+/**
+ * Render a successful Edit as a unified diff. The Edit tool attaches the
+ * pre-edit file as `previous_content`; when it is missing (for example a
+ * serialized or hand-built result) this renderer defers to the generic output.
+ * Additions are green, deletions red, and context lines remain neutral so the
+ * no-color fallback still reads as a normal unified diff.
+ */
+function renderEditSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
+    if (!result || typeof result !== "object") return undefined;
+    const { content, previous_content, applied } = result as EditResultLike;
+    if (typeof content !== "string" || typeof previous_content !== "string") return undefined;
+
+    const a = ansiHelpers(options.color);
+    const path = editPathText(toolCall.arguments);
+    const lineRange = editLineRangeText(toolCall.arguments);
+    const target = path ? `'${path}'` : "file";
+    const scope = lineRange ? `${target} ${lineRange}` : target;
+    const appliedText = typeof applied === "number" ? ` applied ${applied} replacement${applied === 1 ? "" : "s"}` : "";
+
+    const lines = [`${a.bold("Edit")} ${scope}${appliedText}`];
+    if (previous_content === content) {
+        lines.push(a.gray("(no content change)"));
+        return lines;
+    }
+
+    const diff = computeEditDiff(previous_content, content);
+    if (diff.entries.length === 0) {
+        lines.push(a.gray("(no content change)"));
+        return lines;
+    }
+
+    const fileBase = path || "file";
+    lines.push(a.gray(`--- a/${fileBase}`));
+    lines.push(a.gray(`+++ b/${fileBase}`));
+    lines.push(a.cyan(`@@ -${diff.oldStart},${diff.oldCount} +${diff.newStart},${diff.newCount} @@`));
+
+    for (const entry of diff.entries) {
+        if (entry.type === "addition") lines.push(a.green(`+${entry.text}`));
+        else if (entry.type === "deletion") lines.push(a.red(`-${entry.text}`));
+        else lines.push(` ${entry.text}`);
+    }
+
+    if (diff.truncated > 0) {
+        lines.push(a.gray(`… ${diff.truncated} more diff line(s) omitted`));
+    }
+    return lines;
+}
+
 /**
  * Tool-specific renderers keyed by tool name. Each tool owns its renderer
  * object so later steps can attach specialized formatting (for example the
@@ -207,7 +482,10 @@ export const toolRenderers: Record<string, ToolRenderer> = {
     Write: { ...genericToolRenderer },
     Read: { ...genericToolRenderer },
     FileSize: { ...genericToolRenderer },
-    Edit: { ...genericToolRenderer },
+    Edit: {
+        ...genericToolRenderer,
+        succeeded: renderEditSucceeded,
+    },
     Http: { ...genericToolRenderer },
     HttpRequest: { ...genericToolRenderer },
     ListDirectory: { ...genericToolRenderer },
