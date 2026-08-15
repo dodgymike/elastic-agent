@@ -19,6 +19,7 @@ import {
     defaultBusCursorFilePath,
     extractCursorId,
     getLastCursorId,
+    isInvalidCursorFailure,
     loadAgentBusRoster,
     loadCursor,
     parseAgentBusCtlWatchOutput,
@@ -367,6 +368,92 @@ async function main(): Promise<void> {
     // djJ8YnVzfDE=) for the remaining tests. Its exact value is not asserted
     // downstream, but a definite value keeps later assertions deterministic.
     captureAndPersistCursor([{ message_id: "bus-1" }] as AgentBusCtlWatchRecord[]);
+
+    // 5e. INVALID-CURSOR DIAGNOSTIC: the isInvalidCursorFailure helper must spot
+    //     a cursor-rejection phrase in any of the supplied signals (stderr text
+    //     or the closing failure object), case-insensitively, and ignore
+    //     unrelated failure text.
+    check(
+        "isInvalidCursorFailure flags an 'invalid cursor' diagnostic",
+        isInvalidCursorFailure("agent-busctl: invalid cursor: stuck at 100") === true,
+    );
+    check(
+        "isInvalidCursorFailure flags a trailing failure object's invalid-cursor message",
+        isInvalidCursorFailure(JSON.stringify({ ok: false, error: "invalid cursor" })) === true,
+    );
+    check(
+        "isInvalidCursorFailure is case-insensitive",
+        isInvalidCursorFailure("Invalid Cursor") === true,
+    );
+    check(
+        "isInvalidCursorFailure ignores unrelated failures",
+        isInvalidCursorFailure("could not connect: ECONNREFUSED") === false,
+    );
+    check("isInvalidCursorFailure ignores undefined signals", isInvalidCursorFailure(undefined) === false);
+
+    // 5f. CURSOR RETRY — when a watch launched WITH a resume cursor fails because
+    //     the CLI rejects the cursor as invalid, the poll must retry the watch
+    //     WITHOUT --cursor and surface the retry's result (so a stale/pruned
+    //     cursor never hard-stalls a poll). A stub that fails with "invalid
+    //     cursor" only when --cursor is present, and otherwise emits a real
+    //     message, proves both the retry happens and its result is returned.
+    const retryStub = join(dir, "ctl-invalid-cursor-retry");
+    writeFileSync(
+        retryStub,
+        [
+            "#!/usr/bin/env node",
+            "const hasCursor = process.argv.includes('--cursor');",
+            // With a cursor: reject it (emit the closing failure object carrying
+            // the diagnostic from a non-zero process). Without a cursor: emit a
+            // genuine message so the retried poll has a body to return.
+            "if (hasCursor) {",
+            "  process.stderr.write('agent-busctl: invalid cursor\\n');",
+            `  process.stdout.write(${JSON.stringify(JSON.stringify({ ok: false, error: "invalid cursor", exit_code: 4 }))} + "\\n");`,
+            "  process.exit(4);",
+            "} else {",
+            `  process.stdout.write(${JSON.stringify(JSON.stringify({ message_id: "retried-1", text: "after-retry" }))} + "\\n");`,
+            "  process.exit(0);",
+            "}",
+        ].join("\n"),
+        { mode: 0o755 },
+    );
+    chmodSync(retryStub, 0o755);
+    // An in-memory cursor must be present so the first attempt passes --cursor.
+    captureAndPersistCursor([{ message_id: "stale-7" }] as AgentBusCtlWatchRecord[]);
+    const retryResult = await watchAgentBusOnce({
+        binary: retryStub,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check(
+        "an invalid-cursor watch is retried WITHOUT --cursor and its result is returned",
+        !retryResult.error &&
+            Array.isArray(retryResult.body) &&
+            (retryResult.body as AgentBusCtlWatchRecord[]).length === 1 &&
+            (retryResult.body as AgentBusCtlWatchRecord[])[0].text === "after-retry",
+    );
+
+    // 5g. CURSOR RETRY — a non-cursor failure must NOT trigger the retry: the
+    //     single failed attempt's error is returned as-is (no second spawn).
+    //     A stub that always fails with an unrelated error proves we don't
+    //     double-run or mask genuine transport failures.
+    const noRetryStub = join(dir, "ctl-no-retry");
+    writeFileSync(
+        noRetryStub,
+        '#!/usr/bin/env node\nprocess.stderr.write("could not connect: ECONNREFUSED\\n");\nprocess.exit(5);\n',
+        { mode: 0o755 },
+    );
+    chmodSync(noRetryStub, 0o755);
+    captureAndPersistCursor([{ message_id: "keep-3" }] as AgentBusCtlWatchRecord[]);
+    const noRetryResult = await watchAgentBusOnce({
+        binary: noRetryStub,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check(
+        "a non-invalid-cursor watch failure is returned as-is (no retry)",
+        typeof noRetryResult.error === "string" && /exit 5/.test(noRetryResult.error),
+    );
 
     // 6. Missing bus URL is an actionable soft error (no access token mention).
     const noBus = await watchAgentBusOnce({
