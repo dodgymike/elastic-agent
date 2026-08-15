@@ -126,6 +126,10 @@ async function main(): Promise<void> {
       staticVerdict("FileSize", { path: "package.json" }).decision === "safe"
         && staticVerdict("ListDirectory", { directory: "test" }).decision === "safe",
     );
+    check(
+      "safe Delete within workspace is allowed",
+      staticVerdict("Delete", { path: "scratch.txt", file_hash: "0".repeat(64), file_size: 5 }).decision === "safe",
+    );
 
     // ------------------------------------------------------------------
     // 1b. Harmless shell no-ops are allowed statically.
@@ -190,6 +194,10 @@ async function main(): Promise<void> {
     check(
       "ListDirectory data.json is blocked",
       staticVerdict("ListDirectory", { directory: "data.json" }).decision === "unsafe",
+    );
+    check(
+      "Delete data.json is blocked",
+      staticVerdict("Delete", { path: "data.json", file_hash: "0".repeat(64), file_size: 1 }).decision === "unsafe",
     );
 
     // ------------------------------------------------------------------
@@ -270,6 +278,10 @@ async function main(): Promise<void> {
     check(
       "ExecuteCommand reading outside the workspace is blocked",
       staticVerdict("ExecuteCommand", { command: "cat /etc/passwd" }).decision === "unsafe",
+    );
+    check(
+      "Delete path traversal is blocked",
+      staticVerdict("Delete", { path: "../../outside.txt", file_hash: "0".repeat(64), file_size: 1 }).decision === "unsafe",
     );
 
     // ------------------------------------------------------------------
@@ -555,9 +567,10 @@ async function main(): Promise<void> {
 
     // Risk levels drive the dispatch loop's fail-closed behavior.
     check(
-      "risk levels mark Write/ExecuteCommand as mutating and Read as readonly",
+      "risk levels mark Write/ExecuteCommand/Delete as mutating and Read as readonly",
       toolRiskLevel("Write") === "mutating"
         && toolRiskLevel("ExecuteCommand") === "mutating"
+        && toolRiskLevel("Delete") === "mutating"
         && toolRiskLevel("Read") === "readonly",
     );
   } finally {

@@ -339,6 +339,7 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
       return "readonly";
     case "Write":
     case "Edit":
+    case "Delete":
     case "ExecuteCommand":
     case "Git":
     case "HttpRequest":
@@ -738,6 +739,7 @@ export function classifyToolCallStatically(
     case "Read":
     case "Write":
     case "Edit":
+    case "Delete":
     case "FileSize":
     case "ListDirectory":
       return classifyFileTool(toolName, record, roots);
