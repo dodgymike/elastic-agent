@@ -3,7 +3,7 @@
 // path of the starting directory, packaging them for CLAUDE.md injection and
 // as trusted roots for the tool classifier.
 // Compiled and executed standalone by the `test:workspace-init` npm script.
-import { mkdtempSync, rmSync, symlinkSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, realpathSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import {
@@ -195,6 +195,45 @@ async function main(): Promise<void> {
         const second = writeWorkspaceInitMarkdown(filePath, init);
         check("second write did not change the file", second.changed === false);
       } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // 12. Missing write permissions: writeWorkspaceInitMarkdown surfaces a
+    //     clear error rather than silently succeeding. This documents the
+    //     fail-soft contract: the startup caller (main.ts) catches the error
+    //     and emits a warning instead of aborting the run, so a read-only or
+    //     otherwise non-writable CLAUDE.md never crashes initialisation.
+    // ------------------------------------------------------------------
+    {
+      const dir = mkdtempSync(join(tmpdir(), "ws-init-noperm-"));
+      try {
+        // Make the directory itself non-writable so any CLAUDE.md write fails
+        // with EACCES even when run as a non-root user. Skip the assertion
+        // when running as root (uid 0), where permission bits are ignored, so
+        // the test stays reliable in root containers.
+        chmodSync(dir, 0o500);
+        let threw = false;
+        try {
+          const lockDir = join(dir, "sub");
+          mkdirSync(lockDir);
+          writeWorkspaceInitMarkdown(join(lockDir, "CLAUDE.md"), resolveWorkspaceInit(dir));
+        } catch {
+          threw = true;
+        }
+        if (typeof process.getuid === "function" && process.getuid() === 0) {
+          console.log("SKIP: running as root; permission-based write failure not exercised");
+        } else {
+          check("write into a non-writable directory throws", threw);
+        }
+      } finally {
+        // Restore permissions so cleanup can remove the tree.
+        try {
+          chmodSync(dir, 0o700);
+        } catch {
+          // best-effort
+        }
         rmSync(dir, { recursive: true, force: true });
       }
     }
