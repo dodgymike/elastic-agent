@@ -3,10 +3,10 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
-import { RunAbortError, throwIfAborted, type RunAbortKind } from "./llm/run-abort.js";
+import { RunAbortError, throwIfAborted, type RunAbortKind, type RunAbortPhase } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
-import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { extractJsonFromResponse, parsePlanOrAbort, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
 import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
@@ -109,6 +109,11 @@ const dataFilename = "/tmp/data.json";
 const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
 const historyLimit = 10;
 const maxReplanAttempts = 3;
+const maxConsecutiveNoProgressReplans = 2;
+const maxReplanDurationMs = 120000;
+const maxReplanParseRetries = 2;
+const maxPlanParseRetries = 1;
+const maxReviewParseRetries = 2;
 const maxReviewAttempts = 3;
 const maxRevisedPlanSteps = 50;
 const abortReasonMaxLength = 400;
@@ -163,6 +168,23 @@ const status = {
  */
 function boundedAbortReason(reason: string): string {
     return truncate(String(reason).replace(/\s+/g, " ").trim(), abortReasonMaxLength);
+}
+
+/**
+ * Detect provider-side cancellation that was not requested by our own signal.
+ * Per ABORT_SEMANTICS.md section 4.3, a generation that ends with
+ * finishReason "cancelled" while our AbortSignal is still un-aborted is an
+ * unable-to-complete abort, not a user-triggered one.
+ */
+function throwIfProviderCancelled(response: { finishReason?: string }, phase: RunAbortPhase, step?: number): void {
+    if (response.finishReason === "cancelled" && !abortController.signal.aborted) {
+        throw new RunAbortError(
+            "unable-to-complete",
+            phase,
+            "provider cancelled generation",
+            step === undefined ? undefined : { step },
+        );
+    }
 }
 
 const ABORT_STATE_LABELS: Readonly<Record<RunAbortKind, string>> = {
@@ -732,7 +754,7 @@ function summarizeReview(review: { passed: boolean; reasons?: string[]; learning
  */
 async function runReview(client, configData, reviewRequest, validationError) {
     let lastParsed;
-    for (let retry = 0; retry <= 2; retry += 1) {
+    for (let retry = 0; retry <= maxReviewParseRetries; retry += 1) {
         throwIfAborted(abortController.signal, "review");
         const promptToSend = retry === 0 && !validationError
             ? reviewRequest
@@ -741,11 +763,13 @@ async function runReview(client, configData, reviewRequest, validationError) {
         const response = await client.create({ input: promptToSend, abortPhase: "review" });
         new CompatibleResponseWrapper(response).print();
         recordUsage(configData, response);
+        throwIfProviderCancelled(response, "review");
         lastParsed = parseReviewResult(responseText(response));
         if (lastParsed.valid) return lastParsed.review as NonNullable<typeof lastParsed.review>;
     }
-    status.error(`Review response was not valid JSON after retries: ${lastParsed?.reason ?? "unknown"}`);
-    return { passed: false, reasons: [`Review response could not be parsed as JSON: ${lastParsed?.reason ?? "unknown"}`], learnings: [] };
+    const reason = `Review response was not valid JSON after ${maxReviewParseRetries} retries: ${lastParsed?.reason ?? "unknown"}`;
+    status.error(reason);
+    throw new RunAbortError("unable-to-complete", "review", reason);
 }
 
 function captureExecutionFeedback(configData, response, stepIndex) {
@@ -776,8 +800,84 @@ function actionablePlanSteps(plan) {
     if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
     return { valid: true, steps };
 }
+
+/**
+ * Parse a replan response. The replan prompt now asks for JSON with either a
+ * revised `steps` array or the explicit abort object. `abort: true` wins when
+ * both are present, matching ABORT_SEMANTICS.md section 4.1.
+ */
+function parseReplanResponse(text) {
+    let extracted;
+    try {
+        extracted = extractJsonFromResponse(text);
+    } catch (error) {
+        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+
+    let parsed;
+    try {
+        parsed = JSON.parse(extracted);
+    } catch (error) {
+        return { valid: false, reason: `Replan response JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { valid: false, reason: "Replan response must be a JSON object." };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(parsed, "abort")) {
+        if (typeof parsed.abort !== "boolean") return { valid: false, reason: "Replan response 'abort' must be a boolean." };
+        if (parsed.abort === true) {
+            const reason = typeof parsed.reason === "string" ? parsed.reason.trim() : "";
+            if (!reason) return { valid: false, reason: "An aborted replan response must provide a non-empty 'reason'." };
+            return { valid: true, abort: true, reason };
+        }
+    }
+
+    if (!Array.isArray(parsed.steps)) return { valid: false, reason: "Replan response JSON must contain a 'steps' array." };
+    if (parsed.steps.length === 0) return { valid: false, reason: "The revised plan must contain at least one step." };
+    if (parsed.steps.length > maxRevisedPlanSteps) return { valid: false, reason: `The revised plan has more than ${maxRevisedPlanSteps} steps.` };
+    const steps = parsed.steps.map((step) => typeof step === "string" ? step.trim() : "");
+    if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
+    return { valid: true, abort: false, steps };
+}
+
+/** Normalized key of the remaining plan used for duplicate/no-progress detection. */
+function replanRemainingKey(activeSteps, completedStepCount) {
+    return activeSteps.slice(completedStepCount + 1).map((step) => String(step ?? "").trim()).filter(Boolean).join("\n");
+}
+
+function throwIfReplanAttemptLimitReached(configData, step) {
+    if ((configData.replanAttemptCount ?? 0) >= maxReplanAttempts) {
+        throw new RunAbortError(
+            "stuck",
+            "replan",
+            `replan attempt limit reached (${maxReplanAttempts}/${maxReplanAttempts}) while step ${step} still requires replanning`,
+            { step },
+        );
+    }
+}
+
+function throwIfReplanTimeBudgetExceeded(configData, step) {
+    const elapsed = configData.replanElapsedMs ?? 0;
+    if (elapsed >= maxReplanDurationMs) {
+        throw new RunAbortError("stuck", "replan", `replan time budget exceeded (${maxReplanDurationMs} ms)`, { step });
+    }
+}
+
+/**
+ * Add the wall-clock time spent inside the current replan attempt to the run
+ * total and enforce the replan time budget. Called after an attempt returns so
+ * a successful parse cannot hide an exhausted budget.
+ */
+function recordReplanElapsedAndAssertBudget(configData, step, startedAt) {
+    configData.replanElapsedMs = (configData.replanElapsedMs ?? 0) + (Date.now() - startedAt);
+    throwIfReplanTimeBudgetExceeded(configData, step);
+}
+
 async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, configData) {
-    throwIfAborted(abortController.signal, "replan");
+    const step = completedStepCount + 1;
+    throwIfAborted(abortController.signal, "replan", step);
     const remainingStart = completedStepCount + 1;
     const remainingSteps = activeSteps.slice(remainingStart);
     const feedback = feedbackEntry?.feedback;
@@ -786,40 +886,75 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         status.warning("Replan request skipped because there are no remaining steps to replace.", hierarchyIndent("contentInStep"));
         return { attempted: false, applied: false, reason: "No remaining plan steps." };
     }
-    if (configData.replanAttemptCount >= maxReplanAttempts) {
-        status.warning(`Replan request skipped: the limit of ${maxReplanAttempts} attempts has been reached. Keeping the existing remaining plan.`, hierarchyIndent("contentInStep"));
-        return { attempted: false, applied: false, reason: "Replan attempt limit reached." };
-    }
 
+    throwIfReplanAttemptLimitReached(configData, step);
+    throwIfReplanTimeBudgetExceeded(configData, step);
+
+    const beforeKey = replanRemainingKey(activeSteps, completedStepCount);
+    const attemptStart = Date.now();
     configData.replanAttemptCount += 1;
     const attempt = configData.replanAttemptCount;
     status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`, hierarchyIndent("contentInStep"));
     const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
     const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps });
+    let lastFailure = "unknown";
     try {
-        const response = await client.create({ input: request, abortPhase: "replan" });
-        new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
-        recordUsage(configData, response);
-        const validation = actionablePlanSteps(responseText(response));
-        const historyEntry: any = { attempt, response_id: response.id, reason: feedback.replanReason, applied: false };
-        if (!validation.valid) {
-            historyEntry.failure = validation.reason;
-            configData.replanHistory.push(historyEntry);
-            status.warning(`Rejected revised plan; keeping the existing remaining plan: ${validation.reason}`, hierarchyIndent("contentInStep"));
-            return { attempted: true, applied: false, reason: validation.reason };
+        for (let parseAttempt = 0; parseAttempt <= maxReplanParseRetries; parseAttempt += 1) {
+            throwIfAborted(abortController.signal, "replan", step);
+            const promptToSend = parseAttempt === 0
+                ? request
+                : `${request}\n\nThe previous revised plan response was not valid JSON. Here's the error: ${lastFailure}. Please return valid JSON following the requested structure.`;
+            const response = await client.create({ input: promptToSend, abortPhase: "replan" });
+            new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
+            recordUsage(configData, response);
+            throwIfProviderCancelled(response, "replan", step);
+            const validation = parseReplanResponse(responseText(response));
+            if (validation.valid && validation.abort) {
+                throw new RunAbortError("unable-to-complete", "replan", validation.reason, { step });
+            }
+            if (validation.valid) {
+                const revisedSteps: string[] = validation.steps as string[];
+                activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
+                const afterKey = replanRemainingKey(activeSteps, completedStepCount);
+                const progressed = afterKey !== beforeKey;
+                if (progressed) {
+                    configData.consecutiveNoProgressReplans = 0;
+                } else {
+                    configData.consecutiveNoProgressReplans = (configData.consecutiveNoProgressReplans ?? 0) + 1;
+                }
+                configData.replanHistory.push({
+                    attempt,
+                    response_id: response.id,
+                    reason: feedback.replanReason,
+                    applied: true,
+                    replacementStepCount: revisedSteps.length,
+                    noProgress: !progressed,
+                });
+                recordReplanElapsedAndAssertBudget(configData, step, attemptStart);
+                if ((configData.consecutiveNoProgressReplans ?? 0) >= maxConsecutiveNoProgressReplans) {
+                    throw new RunAbortError("stuck", "replan", `no progress after ${maxConsecutiveNoProgressReplans} consecutive identical replans`, { step });
+                }
+                status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
+                return { attempted: true, applied: true, steps: revisedSteps };
+            }
+            lastFailure = validation.reason;
+            configData.replanHistory.push({ attempt, response_id: response.id, reason: feedback.replanReason, applied: false, failure: lastFailure });
+            if (parseAttempt < maxReplanParseRetries) {
+                status.warning(`Replan response was not valid JSON; sending a retry request with the parsing error appended: ${lastFailure}`, hierarchyIndent("contentInStep"));
+            }
         }
-        const revisedSteps: string[] = validation.steps as string[];
-        activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
-        historyEntry.applied = true;
-        historyEntry.replacementStepCount = revisedSteps.length;
-        configData.replanHistory.push(historyEntry);
-        status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
-        return { attempted: true, applied: true, steps: revisedSteps };
+
+        // Parse-retry exhaustion is unable-to-complete. Record elapsed time
+        // without throwing the stuck budget error so unable-to-complete keeps
+        // its documented precedence over stuck when both would fire at once.
+        configData.replanElapsedMs = (configData.replanElapsedMs ?? 0) + (Date.now() - attemptStart);
+        throw new RunAbortError("unable-to-complete", "replan", `Revised plan response was not valid after ${maxReplanParseRetries} parse retries: ${lastFailure}`, { step });
     } catch (error) {
-        throwIfAborted(abortController.signal, "replan");
+        throwIfAborted(abortController.signal, "replan", step);
         if (error instanceof RunAbortError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
+        recordReplanElapsedAndAssertBudget(configData, step, attemptStart);
         configData.replanHistory.push({ attempt, reason: feedback.replanReason, applied: false, failure: reason });
         status.warning(`Replan request failed; keeping the existing remaining plan: ${reason}`, hierarchyIndent("contentInStep"));
         return { attempted: true, applied: false, reason };
@@ -1016,6 +1151,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print(toolChildIndent);
         recordUsage(configData, response);
+        throwIfProviderCancelled(response, "execution", index + 1);
         previousResponseId = response.id;
         toolOutputs = [];
         for (const output of response.output ?? []) {
@@ -1040,6 +1176,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                 const retryResponse = await client.create({ input: configData.retryPrompt, abortPhase: "execution" });
                 new CompatibleResponseWrapper(retryResponse).print(toolChildIndent);
                 recordUsage(configData, retryResponse);
+                throwIfProviderCancelled(retryResponse, "execution", index + 1);
                 saveData(configData);
                 if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
                 const retryEntry = captureExecutionFeedback(configData, retryResponse, index);
@@ -1057,6 +1194,8 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     configData.completedSteps = [];
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
+    configData.consecutiveNoProgressReplans = 0;
+    configData.replanElapsedMs = 0;
     configData.activePlanSteps = [...activeSteps];
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
@@ -1159,6 +1298,7 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, orig
     const reviewPlanResponse = await client.create({ input: reviewPlanPrompt, abortPhase: "review-plan" });
     new CompatibleResponseWrapper(reviewPlanResponse).print();
     recordUsage(configData, reviewPlanResponse);
+    throwIfProviderCancelled(reviewPlanResponse, "review-plan");
     const reviewPlan = responseText(reviewPlanResponse);
     saveData(configData);
 
@@ -1276,6 +1416,7 @@ async function runSingleStep(
             const response = await client.create(request);
             new CompatibleResponseWrapper(response).print(toolChildIndent);
             recordUsage(configData, response);
+            throwIfProviderCancelled(response, "execution");
             previousResponseId = response.id;
             toolOutputs = [];
             for (const output of response.output ?? []) {
@@ -1344,6 +1485,8 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     if (!Array.isArray(configData.toolCallTldrs)) configData.toolCallTldrs = [];
     if (!Array.isArray(configData.replanHistory)) configData.replanHistory = [];
     if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
+    if (!Number.isInteger(configData.consecutiveNoProgressReplans) || configData.consecutiveNoProgressReplans < 0) configData.consecutiveNoProgressReplans = 0;
+    if (!Number.isFinite(configData.replanElapsedMs) || configData.replanElapsedMs < 0) configData.replanElapsedMs = 0;
 
     // Resolve Spec Keeper operational defaults once before any planning or
     // execution sync. This loads the local .spec-keeper file (when present) and
@@ -1442,30 +1585,40 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
 
     const planningPrompt = `${prompt}\n\n${planningSuffix}${epicContext}`;
 
-    const planningResponse = await client.create({ input: planningPrompt, abortPhase: "planning" });
-    new CompatibleResponseWrapper(planningResponse).print();
-    recordUsage(configData, planningResponse);
-    const plan = responseText(planningResponse);
-    // Extract the plan JSON from the planning prompt response and use that
-    // object as the plan. The parsed JSON's step array becomes the active
-    // execution plan, replacing the previous text-based parsing. The
-    // planSteps() flow remains only as a fallback for responses that are not
-    // valid plan JSON.
-    const parsedPlan = extractPlanJson(plan);
-    let activeSteps;
-    if (parsedPlan.valid) {
-        printPlan(parsedPlan.plan);
-        activeSteps = planStepsFromObject(parsedPlan.plan);
-        if (activeSteps.length === 0) {
-            status.warning("Planning response JSON had steps without usable text; falling back to text parsing.");
-            activeSteps = planSteps(plan);
+    let planParseFailure: string | null = null;
+    let parsedPlanningResponse: ReturnType<typeof parsePlanOrAbort> = { valid: false, reason: "Planning did not produce a response." };
+    for (let attempt = 0; attempt <= maxPlanParseRetries; attempt += 1) {
+        throwIfAborted(abortController.signal, "planning");
+        const promptToSend = attempt === 0
+            ? planningPrompt
+            : `${planningPrompt}\n\nThe previous response was not valid plan JSON. Here's the error: ${planParseFailure}. Please return either a valid plan JSON object or an abort object.`;
+        const planningResponse = await client.create({ input: promptToSend, abortPhase: "planning" });
+        new CompatibleResponseWrapper(planningResponse).print();
+        recordUsage(configData, planningResponse);
+        throwIfProviderCancelled(planningResponse, "planning");
+        parsedPlanningResponse = parsePlanOrAbort(responseText(planningResponse));
+        if (parsedPlanningResponse.valid) break;
+        planParseFailure = parsedPlanningResponse.reason;
+        if (attempt < maxPlanParseRetries) {
+            status.warning("Planning response was not valid plan JSON; sending a retry request with the parsing error appended.", hierarchyIndent("plan"));
         }
-    } else {
-        status.warning(`Planning response was not parseable as plan JSON (${parsedPlan.reason}); falling back to text parsing.`);
-        activeSteps = planSteps(plan);
     }
+    if (!parsedPlanningResponse.valid) {
+        throw new RunAbortError("unable-to-complete", "planning", `Planning response was not valid after ${maxPlanParseRetries} parse retries: ${parsedPlanningResponse.reason}`);
+    }
+    if (parsedPlanningResponse.result.kind === "abort") {
+        throw new RunAbortError("unable-to-complete", "planning", parsedPlanningResponse.result.reason);
+    }
+    printPlan(parsedPlanningResponse.result.plan);
+    const activeSteps = planStepsFromObject(parsedPlanningResponse.result.plan);
+    if (activeSteps.length === 0) {
+        throw new RunAbortError("unable-to-complete", "planning", "Planning response JSON had steps without usable text.");
+    }
+    const plan = formatPlan(activeSteps);
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
+    configData.consecutiveNoProgressReplans = 0;
+    configData.replanElapsedMs = 0;
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
     saveData(configData);

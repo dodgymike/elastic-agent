@@ -14,4 +14,16 @@ ${toolFindings}
 Existing remaining steps:
 ${formatPlan(remainingSteps)}
 
-Return a concise, actionable revised plan containing one or more numbered steps only.
+RESPOND IN JSON FORMAT ONLY. Return one of the two shapes below.
+
+A concise, actionable revised plan containing one or more numbered steps:
+{
+  "steps": ["first revised step", "second revised step"]
+}
+
+If you cannot honestly produce a usable revised plan, do NOT invent one. Instead return exactly:
+{
+  "abort": true,
+  "reason": "why no usable revised plan could be produced"
+}
+When "abort" is true, "reason" must be a non-empty string. If both "steps" and "abort": true are present, "abort": true wins.

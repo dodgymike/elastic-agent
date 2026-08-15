@@ -1,6 +1,7 @@
 import {
   type AssistantMessage,
   type ConversationMessage,
+  type FinishReason,
   type GenerateResponse,
   type JsonObject,
   type JsonValue,
@@ -25,6 +26,8 @@ export interface CompatibleResponse {
   readonly id: string;
   readonly output: readonly CompatibleOutput[];
   readonly usage?: CompatibleUsage;
+  /** Provider-normalized finish reason, exposed for unable-to-complete detection. */
+  readonly finishReason?: FinishReason;
 }
 export type CompatibleOutput = CompatibleMessageOutput | CompatibleFunctionCallOutput;
 export interface CompatibleMessageOutput {
@@ -149,6 +152,6 @@ export class MultiTurnLlmRuntime {
       responseId: id,
     };
     appendLlmLog(record);
-    return { id, output: outputOf(generated.message), usage: usageOf(generated) };
+    return { id, output: outputOf(generated.message), usage: usageOf(generated), finishReason: generated.finishReason };
   }
 }

@@ -282,6 +282,8 @@ finalized:
 | `maxConsecutiveNoProgressReplans` | `2` | Consecutive accepted replans that leave the remaining plan unchanged before the run is `stuck`. |
 | `maxReplanDurationMs` | `120000` | Total wall-clock replan budget before the run is `stuck`. |
 | `maxReplanParseRetries` | `2` | Parse retries for a single replan response before it is `unable-to-complete`. |
+| `maxPlanParseRetries` | `1` | Parse retries for the initial planning response before it is `unable-to-complete`. |
+| `maxReviewParseRetries` | `2` | Parse retries for a review result before it is `unable-to-complete`. |
 | `abortReasonMaxLength` | `400` | Maximum printed/stored abort reason length. |
 
 ## 11. Acceptance notes for later steps
