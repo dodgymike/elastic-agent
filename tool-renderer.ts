@@ -117,6 +117,121 @@ export function toolCallArgumentSummary(argumentsText: unknown): string {
     }
 }
 
+/** Shape of a command-like tool result carrying captured process streams. */
+export interface ToolCommandResultLike {
+    exitCode?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+}
+
+/** Normalized command streams extracted from a command-like tool result. */
+export interface ToolCommandStreams {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+}
+
+/**
+ * Extract command streams from a tool result. Returns `undefined` when the
+ * payload is not command-like (no finite numeric `exitCode`), so callers can
+ * defer to a tool-specific or generic renderer.
+ */
+export function commandStreamsFrom(payload: unknown): ToolCommandStreams | undefined {
+    if (!payload || typeof payload !== "object") return undefined;
+    const { exitCode, stdout, stderr } = payload as ToolCommandResultLike;
+    if (typeof exitCode !== "number" || !Number.isFinite(exitCode)) return undefined;
+    return {
+        exitCode,
+        stdout: typeof stdout === "string" ? stdout : "",
+        stderr: typeof stderr === "string" ? stderr : "",
+    };
+}
+
+/** Convert captured stdout/stderr into non-empty display lines. */
+export function toolCommandOutputLines(text: unknown): string[] {
+    if (typeof text !== "string") return [];
+    if (text.trim() === "") return [];
+    return text.split(/\r?\n/).filter((line) => line.length > 0);
+}
+
+/**
+ * Build the unified `ToolName(args)` label for a tool call. Command-like tools
+ * use their natural single-argument form (`ExecuteCommand('...')` and
+ * `Git('action')`); every other tool falls back to the JSON argument summary.
+ */
+export function toolCommandLabel(toolCall: ToolCallDescriptor): string {
+    const name = toolCall?.name ?? "Tool";
+    if (name === "ExecuteCommand") {
+        const command = truncate(executeCommandText(toolCall.arguments), 160);
+        if (!command) return "ExecuteCommand";
+        const quoted = command.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        return `ExecuteCommand('${quoted}')`;
+    }
+    if (name === "Git") {
+        const action = gitActionText(toolCall.arguments);
+        if (!action) return "Git";
+        return `Git('${action.replace(/'/g, "\\'")}')`;
+    }
+    const argumentsSummary = toolCallArgumentSummary(toolCall.arguments);
+    return argumentsSummary ? `${name}(${argumentsSummary})` : name;
+}
+
+/** Return a one-line message from a thrown or serialized error payload. */
+export function toolCommandErrorText(payload: unknown): string {
+    if (typeof payload === "string") return payload.trim();
+    if (payload instanceof Error) return payload.message.trim();
+    if (payload && typeof payload === "object") {
+        const record = payload as { error?: unknown };
+        if (typeof record.error === "string" && record.error.trim() !== "") return record.error.trim();
+    }
+    return "";
+}
+
+/**
+ * Shared tool-command render helper.
+ *
+ * Renders one tool call as `ToolName(args)` followed by a green (success) or
+ * red (error) circle, then the captured streams:
+ * - success: stdout, plus stderr only when non-empty
+ * - failure: stderr, plus stdout when non-empty (stdout can carry useful
+ *   diagnostics even when the command failed)
+ *
+ * A rejected call (thrown error or serialized `{ error }`) renders the same
+ * `ToolName(args)` label with a red circle and the error message. The helper
+ * returns `undefined` when the payload is neither command-like nor an error,
+ * so the caller can defer to a more specific or generic renderer.
+ *
+ * It never emits `[SUCCESS]` or `[ERROR]` text prefixes.
+ */
+export function renderToolCommand(
+    toolCall: ToolCallDescriptor,
+    payload: unknown,
+    options: ToolRendererOptions,
+): string[] | undefined {
+    const label = toolCommandLabel(toolCall);
+    const a = ansiHelpers(options.color);
+
+    const streams = commandStreamsFrom(payload);
+    if (streams) {
+        const circle = streams.exitCode === 0 ? a.green("●") : `${a.red("●")} exit ${streams.exitCode}`;
+        const lines = [`${label} ${circle}`];
+        const stdoutLines = toolCommandOutputLines(streams.stdout);
+        const stderrLines = toolCommandOutputLines(streams.stderr);
+        if (streams.exitCode === 0) {
+            lines.push(...stdoutLines);
+            if (stderrLines.length > 0) lines.push(...stderrLines);
+        } else {
+            lines.push(...stderrLines);
+            lines.push(...stdoutLines);
+        }
+        return lines;
+    }
+
+    const message = toolCommandErrorText(payload);
+    if (message) return [`${label} ${a.red("●")} ${message}`];
+    return undefined;
+}
+
 function renderGenericPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
     const argumentsSummary = toolCallArgumentSummary(toolCall.arguments);
     return [`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`];
@@ -165,10 +280,7 @@ interface ExecuteCommandResultLike {
 }
 
 function renderExecuteCommandPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
-    const command = truncate(executeCommandText(toolCall.arguments), 160);
-    if (!command) return ["ExecuteCommand"];
-    const quoted = command.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    return [`ExecuteCommand('${quoted}')`];
+    return [toolCommandLabel(toolCall)];
 }
 
 function renderExecuteCommandSucceeded(_toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
@@ -583,9 +695,7 @@ function renderGitCommandFailure(args: string[], exitCode: number, result: GitRe
 }
 
 function renderGitPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
-    const action = gitActionText(toolCall.arguments);
-    if (!action) return ["Git"];
-    return [`Git('${action.replace(/'/g, "\\'")}')`];
+    return [toolCommandLabel(toolCall)];
 }
 
 function renderGitSucceeded(_toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
