@@ -46,6 +46,7 @@ import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskComp
 import { Command } from "commander";
 import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
+import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
 
 const terminalColor = terminalColorEnabled(process.stdout);
 if (!terminalColor) chalk.level = 0;
@@ -868,6 +869,22 @@ function functionCallOutput(toolCall, resultOrError) {
 }
 
 /**
+ * Load (or create) the persisted fighting-with-classifier counter from
+ * configData. The tracker is stored in configData.denialTrackerState so its
+ * per-goal denial counts survive across saveData/reload cycles. threshold
+ * defaults to DENIAL_REPLAN_THRESHOLD.
+ */
+function loadDenialTracker(configData, threshold = DENIAL_REPLAN_THRESHOLD) {
+    return new DenialTracker(threshold, configData?.denialTrackerState);
+}
+
+/** Persist the fighting-with-classifier counter back into configData. */
+function persistDenialTracker(configData, tracker) {
+    if (!configData) return;
+    configData.denialTrackerState = tracker.toJSON();
+}
+
+/**
  * Shared tool-call dispatch used by both executePlanStep and runSingleStep.
  * Pending output is emitted before argument parsing, and the safety classifier
  * runs before any exec_handler so an unsafe call never reaches the tool. If the
@@ -875,8 +892,16 @@ function functionCallOutput(toolCall, resultOrError) {
  * tools may proceed only with an explicit warning so the check is never
  * silently bypassed. Once the call is cleared, an in-place timer tracks the
  * command and success/failure output routes through the shared render helper.
+ *
+ * The fighting-with-classifier counter is wired in here: every classifier
+ * denial increments a per-goal counter, and when repeated denials for the same
+ * goal reach the threshold the denied result carries an explicit REPLAN
+ * DIRECTIVE telling the model to stop repeating the blocked action and re-plan.
+ * Progress (a successful call) resets the current goal's counter, and the
+ * tracker is reset at plan/step boundaries in runExecutionPhase and
+ * runSingleStep, so a fresh approach is not mistaken for fighting.
  */
-async function dispatchToolCall(output) {
+async function dispatchToolCall(output, configData, goalKey) {
     renderToolCallPending(output);
     const tool = tools.find((candidate) => candidate.name === output.name);
     let toolArguments;
@@ -936,8 +961,21 @@ async function dispatchToolCall(output) {
 
     if (classification && !classification.safe) {
         const message = `Tool call blocked by safety classifier (${classification.source}): ${classification.reason}`;
-        renderToolCallFailed(output, { error: message });
-        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+        // Fighting-with-classifier counter: track this denial for the current
+        // goal. When repeated denials for the same goal reach the threshold,
+        // attach an explicit REPLAN DIRECTIVE so the model stops repeating the
+        // blocked action and re-plans its approach instead.
+        const tracker = loadDenialTracker(configData);
+        const denial = tracker.recordDenial(goalKey ?? "(default-goal)", output.name, classification.reason);
+        persistDenialTracker(configData, tracker);
+        if (denial.thresholdReached && denial.replanDirective) {
+            status.replan(`Repeated classifier denials for goal '${goalKey ?? "(default-goal)"}' (${denial.count}); issuing a replan directive.`, toolChildIndent);
+        }
+        const fullMessage = denial.thresholdReached && denial.replanDirective
+            ? `${message}\n\n${denial.replanDirective}`
+            : message;
+        renderToolCallFailed(output, { error: fullMessage });
+        return { output, toolArguments, toolResponse: { error: fullMessage }, errorMessage: fullMessage };
     }
 
     const timer = startToolTimer({ prefix: toolChildIndent, color: terminalColor });
@@ -946,6 +984,13 @@ async function dispatchToolCall(output) {
         const toolResponse = await tool.exec_handler(toolArguments);
         timer.stop();
         renderToolCallSucceeded(output, toolResponse);
+        // Progress: a cleared call counts as forward motion, so reset the
+        // current goal's denial counter so the next denial starts afresh.
+        if (configData) {
+            const tracker = loadDenialTracker(configData);
+            tracker.recordSuccess(goalKey ?? "(default-goal)");
+            persistDenialTracker(configData, tracker);
+        }
         return { output, toolArguments, toolResponse, errorMessage: null };
     } catch (error) {
         timer.stop();
@@ -978,7 +1023,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         toolOutputs = [];
         for (const output of response.output ?? []) {
             if (output.type !== "function_call") continue;
-            const dispatched = await dispatchToolCall(output);
+            const dispatched = await dispatchToolCall(output, configData, `plan-${index + 1}`);
             toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
             appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
         }
@@ -1017,6 +1062,9 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     configData.activePlanSteps = [...activeSteps];
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
+    // A new plan execution phase begins a fresh denial-tracking context, so
+    // denials from a previous run step are not carried into this one.
+    persistDenialTracker(configData, new DenialTracker());
     saveData(configData);
     if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
     // Execution staging (review mode only): plan steps write into a dedicated
@@ -1173,6 +1221,8 @@ async function runSingleStep(
     configData.activePlanSteps = [stepText];
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
+    // Start a fresh denial-tracking context for this direct step.
+    persistDenialTracker(configData, new DenialTracker());
     saveData(configData);
     if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
 
@@ -1233,7 +1283,7 @@ async function runSingleStep(
             toolOutputs = [];
             for (const output of response.output ?? []) {
                 if (output.type !== "function_call") continue;
-                const dispatched = await dispatchToolCall(output);
+                const dispatched = await dispatchToolCall(output, configData, "direct-step");
                 toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
                 appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
             }
