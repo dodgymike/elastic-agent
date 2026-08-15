@@ -886,7 +886,10 @@ async function dispatchToolCall(output) {
     // classifier runs; unclear mappings are sent to the git-command router LLM
     // and its refusal is respected here.
     if (output.name === "ExecuteCommand") {
-        const routing = await routeGitExecuteCommand(toolArguments.command, {
+        const command = toolArguments && typeof toolArguments === "object" && !Array.isArray(toolArguments)
+            ? toolArguments.command
+            : undefined;
+        const routing = await routeGitExecuteCommand(command, {
             runtime: client,
             promptPath: isAbsolute(GIT_COMMAND_ROUTER_PROMPT_PATH)
                 ? GIT_COMMAND_ROUTER_PROMPT_PATH
