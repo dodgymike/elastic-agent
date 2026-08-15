@@ -13,6 +13,7 @@
  * Compiled and executed standalone by the `test:loop-busctl-read` npm script.
  */
 import {
+    buildResumeCursor,
     captureAndPersistCursor,
     clearInMemoryCursor,
     defaultBusCursorFilePath,
@@ -79,21 +80,81 @@ async function main(): Promise<void> {
     const nonEmpty = parseAgentBusCtlWatchOutput(JSON.stringify({ message_id: "bus-9", text: "x" }));
     check("a non-empty watch flags empty=false", nonEmpty.empty === false && nonEmpty.messages.length === 1);
 
-    // 2a. Cursor extraction: a message's cursor id is its message_id (the stable
-    //     <bus-id>-<seq> position); it falls back to `seq`, and yields nothing
-    //     when neither is present.
-    check("cursor id is extracted from message_id", extractCursorId({ message_id: "bus-1", seq: 1 }) === "bus-1");
-    check("cursor id falls back to seq", extractCursorId({ seq: 42 }) === "42");
+    // 2a. Cursor extraction: a message's resume cursor is built from its bus id
+    //     and sequence as the base64-encoded `v2|<bus-id>|<seq>` token that
+    //     `agent-busctl watch --cursor` expects. The bus id is read from
+    //     `bus_path` or derived from `message_id` (the stable `<bus-id>-<seq>`
+    //     position), and the sequence from `seq` (falling back to the
+    //     `message_id` suffix). Because a cursor needs BOTH a bus id and a
+    //     sequence, a bare `seq` without any bus id — or a bare id without a
+    //     sequence — yields nothing rather than a malformed cursor.
+    check(
+        "resume cursor from message_id+seq is the base64 v2|<bus>|<seq> token",
+        extractCursorId({ message_id: "bus-1", seq: 1 }) === "djJ8YnVzfDE=",
+    );
+    check(
+        "no cursor when a seq is present but no bus id is resolvable",
+        extractCursorId({ seq: 42 }) === undefined,
+    );
     check("no cursor id when neither field is present", extractCursorId({ text: "x" } as any) === undefined);
 
-    // 2b. Cursor capture advances to the LAST message in a batch and updates the
-    //     in-process cursor.
+    // 2a-1. Realistic resume cursor: a message whose bus id is
+    //     `bus-matv6xu7ronvdq7o.elastic-agent-1` (dot separator) at seq 100 is
+    //     encoded as the exact base64 `v2|<bus-id>|<seq>` token the CLI accepts
+    //     (`djJ8YnVzLW1hdHY2eHU3cm9udmRxN28uZWxhc3RpYy1hZ2VudC0xfDEwMA==`).
+    const realisticBusId = "bus-matv6xu7ronvdq7o.elastic-agent-1";
+    check(
+        "a realistic message resumes at the base64 v2|<bus-id>|<seq> token",
+        extractCursorId({
+            message_id: `${realisticBusId}-100`,
+            seq: 100,
+        }) === "djJ8YnVzLW1hdHY2eHU3cm9udmRxN28uZWxhc3RpYy1hZ2VudC0xfDEwMA==",
+    );
+    // The bus_path field supplies the bus id directly (takes precedence over
+    // the message_id-derived id) and combines with seq the same way.
+    check(
+        "bus_path supplies the bus id for the resume cursor",
+        extractCursorId({
+            message_id: "unrelated-99",
+            bus_path: realisticBusId,
+            seq: 100,
+        }) === "djJ8YnVzLW1hdHY2eHU3cm9udmRxN28uZWxhc3RpYy1hZ2VudC0xfDEwMA==",
+    );
+
+    // 2a-2. Edge cases: a missing bus id OR a missing seq must yield no cursor
+    //     (never a malformed token). buildResumeCursor is the shared helper so
+    //     these guard both extraction paths.
+    check("no cursor when the bus id is missing", extractCursorId({ seq: 100 } as any) === undefined);
+    check("no cursor when the bus id is blank", extractCursorId({ message_id: "", seq: 100 } as any) === undefined);
+    check("no cursor when the seq is missing", extractCursorId({ message_id: "nobus" } as any) === undefined);
+    check(
+        "buildResumeCursor yields nothing for a missing bus id",
+        buildResumeCursor(undefined, 100) === undefined,
+    );
+    check(
+        "buildResumeCursor yields nothing for a blank bus id",
+        buildResumeCursor("  ", 100) === undefined,
+    );
+    check(
+        "buildResumeCursor yields nothing for a missing seq",
+        buildResumeCursor(realisticBusId, undefined) === undefined,
+    );
+    check(
+        "buildResumeCursor yields nothing for a null seq",
+        buildResumeCursor(realisticBusId, null as unknown as undefined) === undefined,
+    );
+
+    // 2b. Cursor capture advances to the LAST message that yields a valid
+    //     cursor in a batch (arrival order = sequence order) and updates the
+    //     in-process cursor. The trailing `{ seq: 99 }` record has no bus id, so
+    //     it produces no cursor and the last captured value is bus-2's
+    //     `v2|bus|2` resume token.
     const cursorCapture = captureAndPersistCursor([
         { message_id: "bus-1" },
         { message_id: "bus-2" },
         { seq: 99 },
     ] as AgentBusCtlWatchRecord[]);
-    check("capturing a batch advances to the last message's cursor", getLastCursorId() === "99");
+    check("capturing a batch advances to the last message's cursor", getLastCursorId() === "djJ8YnVzfDI=");
 
     // 2c. Cursor persistence: saveCursor writes to a state file (atomic
     //     temp+rename) and loadCursor reads it back; a missing file yields no
@@ -118,8 +179,8 @@ async function main(): Promise<void> {
     const captureFile = join(dir, "persist-cursor.json");
     const persistDiag = captureAndPersistCursor([{ message_id: "bus-5" }] as AgentBusCtlWatchRecord[], captureFile);
     check("capture+p: no diagnostic on success", persistDiag === undefined);
-    check("capture+p: persisted cursor is readable", loadCursor(captureFile).cursor === "bus-5");
-    check("capture+p: in-memory cursor matches", getLastCursorId() === "bus-5");
+    check("capture+p: persisted cursor is readable", loadCursor(captureFile).cursor === "djJ8YnVzfDU=");
+    check("capture+p: in-memory cursor matches", getLastCursorId() === "djJ8YnVzfDU=");
     // A parent that is an existing FILE makes the recursive mkdir fail
     // (ENOTDIR), driving the fail-soft diagnostic path.
     const fileAsDir = join(dir, "not-a-dir");
@@ -150,7 +211,7 @@ async function main(): Promise<void> {
         !cursorWatchResult.error &&
             Array.isArray(cursorWatchResult.body) &&
             (cursorWatchResult.body as AgentBusCtlWatchRecord[]).length === 2 &&
-            loadCursor(cursorWatchFile).cursor === "bus-2",
+            loadCursor(cursorWatchFile).cursor === "djJ8YnVzfDI=",
     );
 
     // 3. Roster loading reads non-secret busUrl/identityStore and tolerates
@@ -205,7 +266,8 @@ async function main(): Promise<void> {
     //     id in memory (getLastCursorId()), the NEXT poll must pass `--cursor
     //     <id>` to `agent-busctl watch` so it resumes rather than re-reading the
     //     retained window. A stub that records its argv proves the flag is
-    //     supplied. The in-memory cursor was set to "bus-1" by test 5 above.
+    //     supplied. The in-memory cursor is the base64 resume token for
+    //     `v2|resume|42` (djJ8cmVzdW1lfDQy).
     const argvRecorder = join(dir, "ctl-argv-capture");
     writeFileSync(
         argvRecorder,
@@ -236,7 +298,7 @@ async function main(): Promise<void> {
         "subsequent poll passes --cursor with the in-memory cursor id",
         !resumeResult.error &&
             capturedArgs.includes("--cursor") &&
-            capturedArgs[capturedArgs.indexOf("--cursor") + 1] === "resume-42",
+            capturedArgs[capturedArgs.indexOf("--cursor") + 1] === "djJ8cmVzdW1lfDQy",
     );
 
     // 5b. CURSOR RESUME — persisted cursor file: with NO in-memory cursor but a
@@ -282,12 +344,13 @@ async function main(): Promise<void> {
 
     // 5d. resolveStartCursorId precedence: in-memory cursor wins over a
     //     persisted file cursor; a persisted file cursor is used when there is
-    //     no in-memory cursor; and "none" when neither exists.
-    captureAndPersistCursor([{ message_id: "mem-wins" }] as AgentBusCtlWatchRecord[]);
+    //     no in-memory cursor; and "none" when neither exists. The in-memory
+    //     cursor is the base64 token for `v2|mem|1` (djJ8bWVtfDE=).
+    captureAndPersistCursor([{ message_id: "mem-1" }] as AgentBusCtlWatchRecord[]);
     const memVsFile = resolveStartCursorId(resumeFile);
     check(
         "resolveStartCursorId prefers the in-memory cursor over the file cursor",
-        memVsFile.cursor === "mem-wins" && memVsFile.source === "memory",
+        memVsFile.cursor === "djJ8bWVtfDE=" && memVsFile.source === "memory",
     );
     clearInMemoryCursor();
     const fileOnly = resolveStartCursorId(resumeFile);
@@ -300,9 +363,9 @@ async function main(): Promise<void> {
         "resolveStartCursorId yields none when no cursor is available",
         noneOnly.cursor === undefined && noneOnly.source === "none",
     );
-    // Re-establish a known in-memory cursor for the remaining tests (which rely
-    // on the last captured cursor being bus-1 is not required downstream, but a
-    // definite value keeps later assertions deterministic).
+    // Re-establish a known in-memory cursor (the base64 token for `v2|bus|1`,
+    // djJ8YnVzfDE=) for the remaining tests. Its exact value is not asserted
+    // downstream, but a definite value keeps later assertions deterministic.
     captureAndPersistCursor([{ message_id: "bus-1" }] as AgentBusCtlWatchRecord[]);
 
     // 6. Missing bus URL is an actionable soft error (no access token mention).
