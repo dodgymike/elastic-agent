@@ -72,6 +72,46 @@ enrolled defaults.
 repository, commit messages, docs, and handoffs. It never contains secret material, but it
 reveals enrollment layout and should stay local and mode 0600.
 
+**The `.agent-bus.local` format** is a single JSON object written by `AgentBusEnrol` (mode
+0600) holding only non-secret roster metadata:
+
+```json
+{
+  "busUrl": "https://bus.example.com",
+  "busFingerprint": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "agentId": "bus1.planner",
+  "name": "planner",
+  "identityStore": "/path/to/.agent-bus-identity",
+  "enrolledAt": "2026-01-01T00:00:00.000Z"
+}
+```
+
+`AgentBus` reads only the `busUrl` and `agentId` fields (accepting the synonymous keys
+`bus_url`/`bus` and `agent_id`/`id`). It never reads `data.json` or any secret store for
+these defaults.
+
+## Zero-configuration use for an enrolled agent
+
+After `AgentBusEnrol` succeeds and `AGENT_BUS_ACCESS_TOKEN` (or a per-call `accessToken`)
+is available, an enrolled agent can talk to the bus with just the API path — the base URL
+and agent identity resolve automatically:
+
+```js
+// Enrolled agent: base URL + agent id come from .agent-bus.local, token from env.
+await AgentBus({ path: "/api/v1/messages", method: "POST", body: { topic: "status", status: "in_progress" } });
+```
+
+The full resolution chain for a defaulted call (highest precedence first):
+
+1. Per-call options (`baseUrl`, `accessToken`, `identity`, `store`).
+2. Environment variables (`AGENT_BUS_BASE_URL`, `AGENT_BUS_ACCESS_TOKEN`,
+   `AGENT_BUS_AGENT_ID`, `AGENT_BUS_STORE`).
+3. The local roster `.agent-bus.local` (`busUrl`, `agentId`).
+
+Note that the **Bearer token is never read from `.agent-bus.local`** — it must come from
+`AGENT_BUS_ACCESS_TOKEN` or the `accessToken` call option. This is by design: the roster
+holds non-secret metadata only, so credentials never sit on disk in the workspace.
+
 ## Formatted terminal output
 
 The runtime first announces the call as `AgentBus({...})`. While the request

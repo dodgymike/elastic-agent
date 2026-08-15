@@ -297,7 +297,8 @@ function editableRoots(config: ToolSafetyConfig): string[] {
 }
 
 /**
- * Apply the configured edit/write policy to a file-targeted tool (Write/Edit).
+ * Apply the configured edit/write policy to a file-mutating tool
+ * (Write/Edit/Delete).
  * Returns a denial verdict when the policy forbids the edit, or null when the
  * call may continue through the normal file checks. A missing path yields null
  * so the existing tool-shape checks still produce the correct ambiguity error.
@@ -402,6 +403,7 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
       return "readonly";
     case "Write":
     case "Edit":
+    case "Delete":
     case "ExecuteCommand":
     case "Git":
     case "HttpRequest":
@@ -936,7 +938,8 @@ export function classifyToolCallStatically(
     case "ListDirectory":
       return classifyFileTool(toolName, record, roots);
     case "Write":
-    case "Edit": {
+    case "Edit":
+    case "Delete": {
       if (config) {
         const target = stringValue(record.path);
         const policyVerdict = fileEditPolicyVerdict(toolName, target, config, policyRoots);

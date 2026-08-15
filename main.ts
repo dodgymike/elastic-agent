@@ -30,6 +30,7 @@ import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
 import FileSize from "./tools/FileSize.ts";
 import Edit from "./tools/Edit.ts";
+import Delete from "./tools/Delete.ts";
 import ListDirectory from "./tools/ListDirectory.ts";
 import Http from "./tools/Http.ts";
 import HttpRequest from "./tools/HttpRequest.ts";
@@ -298,6 +299,21 @@ const tools = [
             required: ["path", "content", "read_hash"],
         },
         exec_handler: ({ path, content, overwrite, read_hash }) => Write({ path, content, overwrite, read_hash }),
+    },
+    {
+        type: "function", name: "Delete",
+        usage_prompt: "tools/delete-usage.md",
+        description: "Permanently delete a regular file, but only after verifying the file at path currently has exactly the supplied file_hash (SHA-256, 64 hex chars) AND file_size (bytes). If either value is missing, malformed, or does not match the file on disk, the tool aborts and leaves the file untouched. Read the file (for its read_hash) and FileSize it before calling, then delete with those exact values. Never use shell rm for an in-workspace file; use this tool.",
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string" },
+                file_hash: { type: "string", description: "SHA-256 of the file's current bytes, encoded as exactly 64 lowercase hex characters (the read_hash returned by Read)." },
+                file_size: { type: "number", description: "Exact size of the file in bytes (the size returned by FileSize). Must match the file on disk or the tool aborts." },
+            },
+            required: ["path", "file_hash", "file_size"],
+        },
+        exec_handler: ({ path, file_hash, file_size }) => Delete({ path, file_hash, file_size }),
     },
     {
         type: "function", name: "Read",

@@ -127,6 +127,23 @@ function main(): void {
     const storeMode = statSync(storeFile).mode & 0o777;
     check("store file mode is 0600", storeMode === 0o600);
 
+    // Extra/unknown invite fields are forward-compatible: they are accepted and
+    // never mirrored into the roster (which carries only the documented keys).
+    const extraPath = join(root, "agent-bus-invite-extra.json");
+    writeInvite(extraPath, { team: "infra", purpose: "ci-run", metadata: { zone: "us-east" } });
+    const extraResult = agentBusEnrol({ rootDir: root, inviteFile: extraPath });
+    const extraSaved = readFileSync(join(root, ".agent-bus.local"), "utf8");
+    check(
+      "an invite with extra fields still enrols successfully",
+      extraResult.agentId === "bus-a.agent-1",
+    );
+    check(
+      "extra invite fields are not persisted to the roster",
+      !extraSaved.includes("infra") &&
+        !extraSaved.includes("ci-run") &&
+        !extraSaved.includes("us-east"),
+    );
+
     // ---- validation: missing / malformed fields fail with diagnostics -----
     const missingUrl = join(root, "no-url.json");
     writeInvite(missingUrl);
@@ -201,6 +218,31 @@ function main(): void {
       /no agent name supplied/i.test(errNoName),
     );
 
+    // ---- failed enrolment never writes the roster ---------------------------
+    // Validation failures must not create or overwrite `.agent-bus.local`. Use a
+    // fresh root with no prior store so the assertion is unambiguous: after a
+    // failed parse the file must simply not exist.
+    const failRoot = mkdtempSync(join(tmpdir(), "agent-bus-failroot-"));
+    const failStore = join(failRoot, ".agent-bus.local");
+    writeFileSync(join(failRoot, "agent-bus-invite-fail.json"), "{ broken json");
+    captureError(() => agentBusEnrol({ rootDir: failRoot, inviteFile: "agent-bus-invite-fail.json" }));
+    check("a failed enrolment does not create .agent-bus.local", !existsSync(failStore));
+    // A successful enrolment into that same root afterwards proves the store is
+    // written only on the success path (no partial/leftover state from failures).
+    // (Install a fake busctl in the fresh root so the success path completes.)
+    const failBusctl = join(failRoot, "agent-busctl");
+    writeFileSync(
+      failBusctl,
+      "#!/bin/sh\nprintf '%s\\n' '{\"agentId\":\"bus-a.agent-2\",\"name\":\"test-agent\"}'\nexit 0\n",
+    );
+    chmodSync(failBusctl, 0o755);
+    writeInvite(join(failRoot, "agent-bus-invite-ok.json"));
+    const failRootResult = agentBusEnrol({ rootDir: failRoot, inviteFile: "agent-bus-invite-ok.json" });
+    check(
+      "a later successful enrolment writes the roster",
+      failRootResult.storeFile === failStore && existsSync(failStore),
+    );
+
     // ---- discovery: zero or multiple invites is refused rather than guessed --
     const emptyRoot = mkdtempSync(join(tmpdir(), "agent-bus-empty-"));
     const errNoInvite = captureError(() => agentBusEnrol({ rootDir: emptyRoot }));
@@ -222,6 +264,38 @@ function main(): void {
       agentBusEnrol({ rootDir: root, inviteFile: 42 as unknown as string }),
     );
     check("non-string inviteFile is rejected", /inviteFile must be a string/i.test(errNonStringInvite));
+
+    // ---- workspace boundary & protected-store protections -------------------
+    // An explicit inviteFile must resolve inside the workspace root and must
+    // never name the runtime's protected data store or the roster itself.
+    const outsideRoot = mkdtempSync(join(tmpdir(), "agent-bus-outside-"));
+    const outsideInvite = join(outsideRoot, "agent-bus-invite-x.json");
+    writeInvite(outsideInvite);
+    const errOutside = captureError(() =>
+      agentBusEnrol({ rootDir: root, inviteFile: outsideInvite }),
+    );
+    check(
+      "an invite path outside the workspace root is refused",
+      /outside the workspace root/i.test(errOutside),
+    );
+
+    const dataJson = join(root, "data.json");
+    const errDataJson = captureError(() =>
+      agentBusEnrol({ rootDir: root, inviteFile: dataJson }),
+    );
+    check(
+      "data.json is never read as an invite file",
+      /protected data store/i.test(errDataJson) && !/not valid JSON/i.test(errDataJson),
+    );
+
+    const rosterFile = join(root, ".agent-bus.local");
+    const errRoster = captureError(() =>
+      agentBusEnrol({ rootDir: root, inviteFile: rosterFile }),
+    );
+    check(
+      ".agent-bus.local is never read as an invite file",
+      /protected data store/i.test(errRoster),
+    );
 
     // ---- store not exposed to the repository --------------------------------
     // The roster file is git-ignored so enrollment metadata can never be

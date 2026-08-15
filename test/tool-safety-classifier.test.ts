@@ -142,6 +142,10 @@ async function main(): Promise<void> {
       staticVerdict("FileSize", { path: "package.json" }).decision === "safe"
         && staticVerdict("ListDirectory", { directory: "test" }).decision === "safe",
     );
+    check(
+      "safe Delete within workspace is allowed",
+      staticVerdict("Delete", { path: "scratch.txt", file_hash: "0".repeat(64), file_size: 5 }).decision === "safe",
+    );
 
     // ------------------------------------------------------------------
     // 1b. Harmless shell no-ops are allowed statically.
@@ -206,6 +210,10 @@ async function main(): Promise<void> {
     check(
       "ListDirectory data.json is blocked",
       staticVerdict("ListDirectory", { directory: "data.json" }).decision === "unsafe",
+    );
+    check(
+      "Delete data.json is blocked",
+      staticVerdict("Delete", { path: "data.json", file_hash: "0".repeat(64), file_size: 1 }).decision === "unsafe",
     );
 
     // ------------------------------------------------------------------
@@ -286,6 +294,10 @@ async function main(): Promise<void> {
     check(
       "ExecuteCommand reading outside the workspace is blocked",
       staticVerdict("ExecuteCommand", { command: "cat /etc/passwd" }).decision === "unsafe",
+    );
+    check(
+      "Delete path traversal is blocked",
+      staticVerdict("Delete", { path: "../../outside.txt", file_hash: "0".repeat(64), file_size: 1 }).decision === "unsafe",
     );
 
     // ------------------------------------------------------------------
@@ -372,6 +384,10 @@ async function main(): Promise<void> {
       staticVerdictWithConfig("Edit", { path: join(startDir, "notes.md"), old_string: "a", new_string: "b" }, denyEditsConfig).decision === "unsafe",
     );
     check(
+      "no allow flag denies Delete inside the configured directories",
+      staticVerdictWithConfig("Delete", { path: join(startDir, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, denyEditsConfig).decision === "unsafe",
+    );
+    check(
       "no allow flag denies file-modifying ExecuteCommand",
       staticVerdictWithConfig("ExecuteCommand", { command: `touch ${join(startDir, "created.txt")}` }, denyEditsConfig).decision === "unsafe",
     );
@@ -389,6 +405,10 @@ async function main(): Promise<void> {
       staticVerdictWithConfig("Write", { path: "notes.md", content: "hello" }, allowEditsConfig).decision === "safe",
     );
     check(
+      "allow flag permits Delete inside --start-dir",
+      staticVerdictWithConfig("Delete", { path: join(startDir, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, allowEditsConfig).decision === "safe",
+    );
+    check(
       "allow flag does not statically block a file-modifying command inside the configured directories",
       staticVerdictWithConfig("ExecuteCommand", { command: `touch ${join(agentSourceDir, "created.txt")}` }, allowEditsConfig).decision !== "unsafe",
     );
@@ -400,6 +420,10 @@ async function main(): Promise<void> {
     check(
       "allow flag denies Edit outside both configured directories",
       staticVerdictWithConfig("Edit", { path: "/etc/agent-notes.md", old_string: "a", new_string: "b" }, allowEditsConfig).decision === "unsafe",
+    );
+    check(
+      "allow flag denies Delete outside both configured directories",
+      staticVerdictWithConfig("Delete", { path: "/etc/agent-notes.md", file_hash: "0".repeat(64), file_size: 5 }, allowEditsConfig).decision === "unsafe",
     );
     check(
       "allow flag denies file-modifying ExecuteCommand outside both configured directories",
@@ -678,9 +702,10 @@ async function main(): Promise<void> {
 
     // Risk levels drive the dispatch loop's fail-closed behavior.
     check(
-      "risk levels mark Write/ExecuteCommand as mutating and Read as readonly",
+      "risk levels mark Write/ExecuteCommand/Delete as mutating and Read as readonly",
       toolRiskLevel("Write") === "mutating"
         && toolRiskLevel("ExecuteCommand") === "mutating"
+        && toolRiskLevel("Delete") === "mutating"
         && toolRiskLevel("Read") === "readonly",
     );
   } finally {

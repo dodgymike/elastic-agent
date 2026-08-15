@@ -64,7 +64,10 @@ assert.ok(failedWrapper.includes('renderToolPhase("failed"'), "failed wrapper mu
 assert.ok(!failedWrapper.includes("renderToolCommand(toolCall, error"), "failed wrapper must not preempt per-tool renderers with the shared helper");
 
 // The in-place timer starts after the safety check and before execution, and
-// stops once execution completes or throws.
+// stops once execution completes or throws. The timer's elapsed line is the
+// tool output that appears immediately after the pending tool-call line and
+// before any success/failure result line, so both the executing and completed
+// states render as: tool-call line, timer, result.
 const classifyAt = dispatch.indexOf("classification = await classifyToolCall(");
 const timerAt = dispatch.indexOf("const timer = startToolTimer(");
 const timerStartAt = dispatch.indexOf("timer.start();");
@@ -72,6 +75,13 @@ const timerStopAt = dispatch.indexOf("timer.stop();");
 assert.ok(classifyAt >= 0 && classifyAt < executeAt, "safety classifier must remain visible before execution");
 assert.ok(timerAt >= 0 && timerAt < timerStartAt && timerStartAt < executeAt, "timer must be created and started before tool execution");
 assert.ok(timerStopAt > executeAt, "timer must be stopped after tool execution");
+// The timer must be anchored immediately after the pending tool-call line (the
+// timer is created/started after the pending label is emitted) and must finish
+// before any success/failure result line so the elapsed time renders between
+// the tool call and its result in the completed state.
+assert.ok(pendingAt >= 0 && pendingAt < timerAt, "the pending tool-call line must be emitted before the timer is created");
+assert.ok(timerStopAt < successAt, "the timer must stop (and render its elapsed line) before the success result line");
+assert.ok(timerStopAt < failureAt, "the timer must stop (and render its elapsed line) before the failure result line");
 
 // The execution loop delegates to the dispatcher and no longer renders success
 // or failure directly from executePlanStep.
@@ -80,7 +90,10 @@ const executionEnd = source.indexOf("\nasync function runExecutionPhase(", execu
 assert.notEqual(executionStart, -1, "main.ts must define executePlanStep");
 assert.notEqual(executionEnd, -1, "main.ts must retain a boundary after executePlanStep");
 const execution = source.slice(executionStart, executionEnd);
-assert.ok(execution.includes("const dispatched = await dispatchToolCall(output);"), "executePlanStep must delegate to dispatchToolCall");
+assert.ok(
+  /const dispatched = await dispatchToolCall\(output, configData, `plan-\$\{index \+ 1\}`\);/u.test(execution),
+  "executePlanStep must delegate to dispatchToolCall with the plan-step goal key",
+);
 assert.ok(!execution.includes("renderToolCallSucceeded(dispatched.output"), "executePlanStep must not render success directly");
 assert.ok(!execution.includes("renderToolCallFailed(dispatched.output"), "executePlanStep must not render failure directly");
 assert.equal(

@@ -47,8 +47,8 @@ Deny the call (safe: false) when any of the following apply:
    call that reads, writes, edits, sizes, or lists a file named data.json.
 4. Path traversal: any parameter path contains "..", an absolute path that
    escapes the workspace, a symlink escape, or otherwise resolves outside the
-   workspace. Deny every Read, Write, Edit, FileSize, or ListDirectory call
-   targeting data.json. Note: /tmp/data.json is the runtime's own internal
+   workspace. Deny every Read, Write, Edit, Delete, FileSize, or ListDirectory
+   call targeting data.json. Note: /tmp/data.json is the runtime's own internal
    state file and is not a valid tool target; any tool call that names it is
    unsafe.
 5. Destructive commands: the call runs commands such as rm -rf, mkfs, dd,
@@ -64,7 +64,7 @@ Deny the call (safe: false) when any of the following apply:
    $( ) backticks > >> < or newlines, or uses eval, bash -c, sh -c, cmd /c, or
    PowerShell -Command with interpolated data in a way that enables arbitrary
    command execution.
-8. Edit/write policy: edit-capable calls (Write, Edit, and ExecuteCommand
+8. Edit/write policy: edit-capable calls (Write, Edit, Delete, and ExecuteCommand
    patterns that create, overwrite, truncate, delete, move, or otherwise modify
    files) are denied unless `--allow-agent-source-modifications` is set. When
    that flag is set, an edit is allowed only when the normalized target path

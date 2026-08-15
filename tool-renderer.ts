@@ -50,11 +50,13 @@ export interface AnsiHelpers {
     yellow(text: string): string;
     cyan(text: string): string;
     gray(text: string): string;
+    orange(text: string): string;
     bold(text: string): string;
     greenBold(text: string): string;
     redBold(text: string): string;
     cyanBold(text: string): string;
     yellowBold(text: string): string;
+    orangeBold(text: string): string;
 }
 
 /**
@@ -63,17 +65,22 @@ export interface AnsiHelpers {
  * contexts without conditional calls at each rendering site.
  */
 export function ansiHelpers(color: boolean): AnsiHelpers {
+    // Orange uses the 256-color palette (ANSI 38;5;208) so it degrades
+    // gracefully on terminals without truecolor support.
+    const orange = color ? chalk.ansi256(208) : (text: string) => text;
     return {
         green: (text) => (color ? chalk.green(text) : text),
         red: (text) => (color ? chalk.red(text) : text),
         yellow: (text) => (color ? chalk.yellow(text) : text),
         cyan: (text) => (color ? chalk.cyan(text) : text),
         gray: (text) => (color ? chalk.gray(text) : text),
+        orange,
         bold: (text) => (color ? chalk.bold(text) : text),
         greenBold: (text) => (color ? chalk.green.bold(text) : text),
         redBold: (text) => (color ? chalk.red.bold(text) : text),
         cyanBold: (text) => (color ? chalk.cyan.bold(text) : text),
         yellowBold: (text) => (color ? chalk.yellow.bold(text) : text),
+        orangeBold: (text) => (color ? chalk.ansi256(208).bold(text) : text),
     };
 }
 
@@ -236,16 +243,18 @@ export function toolCommandErrorText(payload: unknown): string {
 /**
  * Shared tool-command render helper.
  *
- * Renders one tool call as `ToolName(args)` followed by a green (success) or
- * red (error) circle, then the captured streams:
- * - success: stdout, plus stderr only when non-empty
- * - failure: stderr, plus stdout when non-empty (stdout can carry useful
- *   diagnostics even when the command failed)
+ * The pending phase owns the `ToolName(args)` label, so this helper renders
+ * only the outcome of a completed tool call: a green (success) or red (error)
+ * circle, then the captured streams. Repeating the label here would duplicate
+ * the already-emitted pending line.
+ * - success: circle, then stdout, plus stderr only when non-empty
+ * - failure: circle (with exit code), then stderr, plus stdout when non-empty
+ *   (stdout can carry useful diagnostics even when the command failed)
  *
- * A rejected call (thrown error or serialized `{ error }`) renders the same
- * `ToolName(args)` label with a red circle and the error message. The helper
- * returns `undefined` when the payload is neither command-like nor an error,
- * so the caller can defer to a more specific or generic renderer.
+ * A rejected call (thrown error or serialized `{ error }`) renders the red
+ * circle plus the error message. The helper returns `undefined` when the
+ * payload is neither command-like nor an error, so the caller can defer to a
+ * more specific or generic renderer.
  *
  * It never emits `[SUCCESS]` or `[ERROR]` text prefixes.
  */
@@ -254,16 +263,19 @@ export function renderToolCommand(
     payload: unknown,
     options: ToolRendererOptions,
 ): string[] | undefined {
-    const label = toolCommandLabel(toolCall);
     const a = ansiHelpers(options.color);
 
     const streams = commandStreamsFrom(payload);
     if (streams) {
-        const circle = streams.exitCode === 0 ? a.green("●") : `${a.red("●")} exit ${streams.exitCode}`;
-        const lines = [`${label} ${circle}`];
-        const stdoutLines = toolCommandOutputLines(streams.stdout);
-        const stderrLines = toolCommandOutputLines(streams.stderr);
-        if (streams.exitCode === 0) {
+        const success = streams.exitCode === 0;
+        const circle = success ? a.green("●") : `${a.red("●")} exit ${streams.exitCode}`;
+        // The status circle opens its own line; any captured output follows on
+        // new lines, each indented one space relative to the circle line.
+        const indent = (line: string) => ` ${line}`;
+        const lines = [indent(circle)];
+        const stdoutLines = toolCommandOutputLines(streams.stdout).map(indent);
+        const stderrLines = toolCommandOutputLines(streams.stderr).map(indent);
+        if (success) {
             lines.push(...stdoutLines);
             if (stderrLines.length > 0) lines.push(...stderrLines);
         } else {
@@ -274,34 +286,35 @@ export function renderToolCommand(
     }
 
     const message = redactSecretText(toolCommandErrorText(payload));
-    if (message) return [`${label} ${a.red("●")} ${message}`];
+    if (message) return [` ${a.red("●")} ${message}`];
     return undefined;
 }
 
-function renderGenericPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
+function renderGenericPending(toolCall: ToolCallDescriptor, options: ToolRendererOptions): string[] {
     const label = toolCommandLabel(toolCall);
-    return [label];
+    const a = ansiHelpers(options.color);
+    return [a.orange(label)];
 }
 
 function renderGenericSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] {
-    const label = toolCommandLabel(toolCall);
-    const circle = ansiHelpers(options.color).green("●");
+    const a = ansiHelpers(options.color);
+    const circle = a.green("●");
     const summary = result === undefined ? "" : ` ${truncate(stringify(result), 160)}`;
-    return [`${label} ${circle}${summary}`];
+    return [` ${circle}${summary}`];
 }
 
 function renderGenericFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
-    const label = toolCommandLabel(toolCall);
-    const circle = ansiHelpers(options.color).red("●");
+    const a = ansiHelpers(options.color);
+    const circle = a.red("●");
     const message = redactSecretText(toolCommandErrorText(error));
-    return message ? [`${label} ${circle} ${message}`] : [`${label} ${circle}`];
+    return message ? [` ${circle} ${message}`] : [` ${circle}`];
 }
 
 /**
  * Fallback renderer used for any tool or phase without a specialized renderer.
- * It follows the same unified `ToolName(args)` label plus circle convention as
- * the shared command helper, so no tool emits legacy `Pending:`/`Succeeded:`/
- * `Failed:` text prefixes.
+ * The pending phase owns the `ToolName(args)` label, and the succeeded/failed
+ * phases render only the status circle (plus any output), so no tool emits
+ * legacy `Pending:`/`Succeeded:`/`Failed:` text prefixes or repeats the label.
  */
 export const genericToolRenderer: CompleteToolRenderer = {
     pending: renderGenericPending,
@@ -320,8 +333,8 @@ function executeCommandText(argumentsText: unknown): string {
     }
 }
 
-function renderExecuteCommandPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
-    return [toolCommandLabel(toolCall)];
+function renderExecuteCommandPending(toolCall: ToolCallDescriptor, options: ToolRendererOptions): string[] {
+    return [ansiHelpers(options.color).orange(toolCommandLabel(toolCall))];
 }
 
 /**
@@ -584,7 +597,7 @@ function renderEditSucceeded(toolCall: ToolCallDescriptor, result: unknown, opti
     const scope = lineRange ? `${target} ${lineRange}` : target;
     const appliedText = typeof applied === "number" ? ` applied ${applied} replacement${applied === 1 ? "" : "s"}` : "";
 
-    const lines = [`${a.bold("Edit")} ${scope}${appliedText}`];
+    const lines = [`${a.green(a.bold("Edit"))} ${scope}${appliedText}`];
     if (previous_content === content) {
         lines.push(a.gray("(no content change)"));
         return lines;
@@ -719,14 +732,18 @@ function renderGitStatus(stdout: string, options: ToolRendererOptions): string[]
 /** Render a non-zero git exit with command evidence followed by diagnostics. */
 function renderGitCommandFailure(args: string[], exitCode: number, result: GitResultLike, a: AnsiHelpers): string[] {
     const command = `git ${args.join(" ")}`;
-    const lines = [`${a.red("●")} ${command} failed (exit ${exitCode})`];
-    lines.push(...gitOutputLines(result.stderr));
-    lines.push(...gitOutputLines(result.stdout));
+    // The status circle opens the result view one space indented relative to
+    // the tool-call line, matching the shared command helper's layout; the
+    // diagnostic lines follow at the same one-space indent.
+    const indent = (line: string) => ` ${line}`;
+    const lines = [indent(`${a.red("●")} ${command} failed (exit ${exitCode})`)];
+    lines.push(...gitOutputLines(result.stderr).map(indent));
+    lines.push(...gitOutputLines(result.stdout).map(indent));
     return lines;
 }
 
-function renderGitPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
-    return [toolCommandLabel(toolCall)];
+function renderGitPending(toolCall: ToolCallDescriptor, options: ToolRendererOptions): string[] {
+    return [ansiHelpers(options.color).orange(toolCommandLabel(toolCall))];
 }
 
 function renderGitSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
@@ -736,7 +753,7 @@ function renderGitSucceeded(toolCall: ToolCallDescriptor, result: unknown, optio
 
     // Some runtime guards return a serialized `{ error }` object rather than
     // throwing. Route it through the shared helper so it renders as a unified
-    // `Git('mode') ● message` error line.
+    // red-circle error line (the label is owned by the pending phase).
     if (typeof gitResult.error === "string" && gitResult.error.trim() !== "") {
         return renderToolCommand(toolCall, result, options);
     }
@@ -776,20 +793,22 @@ function redactedResultSummary(result: unknown): string {
  * Render a successful SpecKeeperEnroll/SpecKeeper/AgentBus call with every
  * secret-shaped argument and result value replaced by `[REDACTED]`. Non-secret
  * metadata (for example api_base, project_slug, role, status) remains visible.
+ * The pending phase owns the label, so only the circle plus redacted summary is
+ * emitted here.
  */
 function renderRedactedSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] {
-    const label = toolCommandLabel(toolCall);
-    const circle = ansiHelpers(options.color).green("●");
+    const a = ansiHelpers(options.color);
+    const circle = a.green("●");
     const summary = redactedResultSummary(result);
-    return summary ? [`${label} ${circle} ${summary}`] : [`${label} ${circle}`];
+    return summary ? [` ${circle} ${summary}`] : [` ${circle}`];
 }
 
 /** Render a failed secret-carrying tool with a redacted error message. */
 function renderRedactedFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
-    const label = toolCommandLabel(toolCall);
-    const circle = ansiHelpers(options.color).red("●");
+    const a = ansiHelpers(options.color);
+    const circle = a.red("●");
     const message = redactSecretText(toolCommandErrorText(error));
-    return message ? [`${label} ${circle} ${message}`] : [`${label} ${circle}`];
+    return message ? [` ${circle} ${message}`] : [` ${circle}`];
 }
 
 const redactedToolRenderer: ToolRenderer = {
@@ -854,11 +873,19 @@ export function renderToolPhase(
     payload: unknown,
     options: ToolRendererOptions,
 ): string[] {
+    // Pending renderers receive only (toolCall, options); succeeded/failed
+    // renderers receive (toolCall, payload, options), so the pending phase is
+    // invoked with options in the second position and a duplicated trailing
+    // argument that pending renderers ignore (the third positional slot is the
+    // `options` of the uniform phase-fn type).
+    const invokePhase = (fn: ToolPhaseRenderFn): string[] | undefined =>
+        phase === "pending" ? fn(toolCall, options, options) : fn(toolCall, payload, options);
+
     const renderer = toolRenderers[toolCall?.name];
     const phaseRenderer = renderer?.[phase] as ToolPhaseRenderFn | undefined;
     if (phaseRenderer) {
         try {
-            const lines = phaseRenderer(toolCall, payload, options);
+            const lines = invokePhase(phaseRenderer);
             if (Array.isArray(lines)) return normalizeLines(lines);
         } catch {
             // A specialized renderer must never break the agent loop. Fall back
@@ -866,5 +893,5 @@ export function renderToolPhase(
         }
     }
     const fallback = genericToolRenderer[phase] as ToolPhaseRenderFn;
-    return normalizeLines(fallback(toolCall, payload, options));
+    return normalizeLines(invokePhase(fallback));
 }
