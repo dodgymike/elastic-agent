@@ -8,8 +8,8 @@ import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
-import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
-import type { ToolRenderPhase } from "./tool-renderer.js";
+import { renderToolPhase, renderToolCommand, toolCommandLabel, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
+import { startToolTimer } from "./tool-timer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -176,10 +176,10 @@ function logWithHierarchy(message: string, level: ConsoleHierarchyLevel): void {
 }
 
 /**
- * Indentation prefix for child tool-call feedback lines (SUCCESS/ERROR/RESPONSE)
- * emitted below a [TOOL] pending line. The [TOOL] pending line uses the
- * content-in-step indent of 6 spaces, and these result lines sit one hierarchy
- * level below it at the tool-result indent of 8 spaces, sourced from
+ * Indentation prefix for child tool-call feedback lines emitted below the
+ * pending `ToolName(args)` line. The pending line uses the content-in-step
+ * indent of 6 spaces, and these result/timer lines sit one hierarchy level
+ * below it at the tool-result indent of 8 spaces, sourced from
  * plan-printer.ts through hierarchyIndent().
  */
 const toolChildIndent = hierarchyIndent("toolResult");
@@ -352,34 +352,43 @@ function buildToolsAvailablePrompt(tools) {
 
 const toolsAvailable = buildToolsAvailablePrompt(tools);
 
-const TOOL_PHASE_LABEL: Record<ToolRenderPhase, { write: (line: string) => void; label: string }> = {
-    pending: { write: (line) => console.log(line), label: chalk.blue.bold("[TOOL]") },
-    succeeded: { write: (line) => console.log(line), label: chalk.green.bold("[SUCCESS]") },
-    failed: { write: (line) => console.error(line), label: chalk.red.bold("[ERROR]") },
-};
+/**
+ * Emit tool-renderer lines under the tool-result hierarchy indent without any
+ * legacy [TOOL]/[SUCCESS]/[ERROR] status label. The shared render helper and
+ * per-tool renderers own circle/status formatting; this function only owns
+ * indentation and the write target.
+ */
+function emitToolLines(lines: string[], prefix = toolChildIndent): void {
+    for (const line of lines) console.log(`${prefix}${line}`);
+}
 
 /**
- * Emit one tool-call phase (pending, succeeded, or failed) through the
- * tool-specific renderer map. The first rendered line carries the phase's
- * status label; continuation lines are indented at the same hierarchy level.
- * Empty renderer output is suppressed entirely.
+ * Emit the pending tool-call label as `ToolName(args)` before argument parsing
+ * or execution. The unified label comes from tool-renderer.ts so every tool
+ * shares the same heading format without a legacy `[TOOL] Pending:` prefix.
  */
-function emitToolPhase(phase: ToolRenderPhase, toolCall, payload) {
-    const lines = renderToolPhase(phase, toolCall, payload, { color: terminalColor });
-    if (lines.length === 0) return;
-    const { write, label } = TOOL_PHASE_LABEL[phase];
-    const prefix = phase === "pending" ? hierarchyIndent("contentInStep") : toolChildIndent;
-    printStatusLine(write, label, lines[0], prefix);
-    for (let index = 1; index < lines.length; index += 1) write(`${prefix}${lines[index]}`);
-}
 function renderToolCallPending(toolCall) {
-    emitToolPhase("pending", toolCall, undefined);
+    const label = toolCommandLabel(toolCall);
+    if (!label) return;
+    console.log(`${hierarchyIndent("contentInStep")}${label}`);
 }
+
+/**
+ * Render a completed tool call through the shared tool-command helper first so
+ * command-like results follow the circle/stdout/stderr rules. Non-command
+ * results fall back to the per-tool renderer map, still without any legacy
+ * [SUCCESS] label.
+ */
 function renderToolCallSucceeded(toolCall, result) {
-    emitToolPhase("succeeded", toolCall, result);
+    const lines = renderToolCommand(toolCall, result, { color: terminalColor });
+    if (lines) { emitToolLines(lines); return; }
+    emitToolLines(renderToolPhase("succeeded", toolCall, result, { color: terminalColor }));
 }
+
 function renderToolCallFailed(toolCall, error) {
-    emitToolPhase("failed", toolCall, error);
+    const lines = renderToolCommand(toolCall, error, { color: terminalColor });
+    if (lines) { emitToolLines(lines); return; }
+    emitToolLines(renderToolPhase("failed", toolCall, error, { color: terminalColor }));
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
 /**
@@ -830,10 +839,12 @@ function functionCallOutput(toolCall, resultOrError) {
 
 /**
  * Shared tool-call dispatch used by both executePlanStep and runSingleStep.
- * Safety classification runs before any exec_handler so an unsafe call never
- * reaches the tool. If the classifier itself fails, mutating and high-risk
- * tools fail closed; read-only tools may proceed only with an explicit warning
- * so the check is never silently bypassed.
+ * Pending output is emitted before argument parsing, and the safety classifier
+ * runs before any exec_handler so an unsafe call never reaches the tool. If the
+ * classifier itself fails, mutating and high-risk tools fail closed; read-only
+ * tools may proceed only with an explicit warning so the check is never
+ * silently bypassed. Once the call is cleared, an in-place timer tracks the
+ * command and success/failure output routes through the shared render helper.
  */
 async function dispatchToolCall(output) {
     renderToolCallPending(output);
@@ -843,11 +854,13 @@ async function dispatchToolCall(output) {
         toolArguments = JSON.parse(output.arguments);
     } catch (error) {
         const message = `Tool arguments could not be parsed as JSON: ${error instanceof Error ? error.message : String(error)}`;
+        renderToolCallFailed(output, { error: message });
         return { output, toolArguments: {}, toolResponse: { error: message }, errorMessage: message };
     }
 
     if (!tool?.exec_handler) {
         const message = `No exec_handler found for tool: ${output.name}`;
+        renderToolCallFailed(output, { error: message });
         return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
     }
 
@@ -863,6 +876,7 @@ async function dispatchToolCall(output) {
         const risk = toolRiskLevel(output.name);
         if (risk !== "readonly") {
             const message = `Safety classifier failed for ${output.name} (${risk} tool); refusing to execute: ${reason}`;
+            renderToolCallFailed(output, { error: message });
             return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
         }
         status.warning(`Safety classifier failed for read-only tool ${output.name}; proceeding with an explicit warning: ${reason}`, toolChildIndent);
@@ -870,15 +884,23 @@ async function dispatchToolCall(output) {
 
     if (classification && !classification.safe) {
         const message = `Tool call blocked by safety classifier (${classification.source}): ${classification.reason}`;
+        renderToolCallFailed(output, { error: message });
         return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
     }
 
+    const timer = startToolTimer({ prefix: toolChildIndent, color: terminalColor });
+    timer.start();
     try {
         const toolResponse = await tool.exec_handler(toolArguments);
+        timer.stop();
+        renderToolCallSucceeded(output, toolResponse);
         return { output, toolArguments, toolResponse, errorMessage: null };
     } catch (error) {
+        timer.stop();
         const message = error instanceof Error ? error.message : String(error);
-        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+        const toolResponse = { error: message };
+        renderToolCallFailed(output, toolResponse);
+        return { output, toolArguments, toolResponse, errorMessage: message };
     }
 }
 
@@ -907,8 +929,6 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             const dispatched = await dispatchToolCall(output);
             toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
             appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
-            if (dispatched.errorMessage !== null) renderToolCallFailed(dispatched.output, dispatched.errorMessage);
-            else renderToolCallSucceeded(dispatched.output, dispatched.toolResponse);
         }
         saveData(configData);
         if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
@@ -1164,8 +1184,6 @@ async function runSingleStep(
                 const dispatched = await dispatchToolCall(output);
                 toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
                 appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
-                if (dispatched.errorMessage !== null) renderToolCallFailed(dispatched.output, dispatched.errorMessage);
-                else renderToolCallSucceeded(dispatched.output, dispatched.toolResponse);
             }
             saveData(configData);
             if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
