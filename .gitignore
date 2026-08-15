@@ -2,6 +2,7 @@ data.json
 # One-time enrollment links and deployment credentials; keep outside the repository.
 agent-bus-invite-*.json
 tmp/elastic-invite.json
+tmp/elastic-identity/
 spec-keeper-enrolment.json
 # Local Spec Keeper credential store; keep outside the repository.
 .spec.local.json
