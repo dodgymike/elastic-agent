@@ -3,7 +3,7 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
-import { RunAbortError, throwIfAborted } from "./llm/run-abort.js";
+import { RunAbortError, throwIfAborted, type RunAbortKind } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
@@ -88,6 +88,21 @@ const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
 const abortController = new AbortController();
+// SIGINT/SIGTERM are user-triggered aborts. The handlers only abort the
+// controller; the single top-level abort handler prints the [ABORT] block and
+// assigns the exit code. A second SIGINT is the emergency escape hatch.
+let sigintAbortObserved = false;
+process.on("SIGINT", () => {
+    if (sigintAbortObserved) {
+        // Escape hatch: a wedged cleanup must not trap the user.
+        process.exit(130);
+    }
+    sigintAbortObserved = true;
+    abortController.abort("SIGINT");
+});
+process.on("SIGTERM", () => {
+    abortController.abort("SIGTERM");
+});
 let client: MultiTurnLlmRuntime;
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
 const dataFilename = "/tmp/data.json";
@@ -96,6 +111,7 @@ const historyLimit = 10;
 const maxReplanAttempts = 3;
 const maxReviewAttempts = 3;
 const maxRevisedPlanSteps = 50;
+const abortReasonMaxLength = 400;
 // Execution worktree: plan steps stage their changes in a dedicated worktree
 // (git add --all) and never commit. The worktree is kept alive across review
 // attempts so the review step can inspect the staged changes before committing.
@@ -137,7 +153,39 @@ const status = {
     error: (message: string, prefix = "") => printStatusLine((line) => console.error(line), chalk.red.bold("[ERROR]"), message, prefix),
     classification: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLANNING NECESSITY]"), message, prefix),
     specKeeper: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[SPEC KEEPER]"), message, prefix),
+    abort: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.red.bold("[ABORT]"), message, prefix),
 };
+
+/**
+ * Bound and flatten an abort reason before it is printed or stored. Abort
+ * reasons must never leak secrets or unbounded response bodies, and the
+ * single-line replacement keeps the indented [ABORT] block intact.
+ */
+function boundedAbortReason(reason: string): string {
+    return truncate(String(reason).replace(/\s+/g, " ").trim(), abortReasonMaxLength);
+}
+
+const ABORT_STATE_LABELS: Readonly<Record<RunAbortKind, string>> = {
+    user: "Aborted by user",
+    "unable-to-complete": "LLM could not complete the request",
+    stuck: "Plan is stuck",
+};
+
+/**
+ * Render the concise indented abort block defined by ABORT_SEMANTICS.md
+ * section 6. The heading uses the [ABORT] label and the detail lines are
+ * indented to the plan level so they align with the existing console scheme.
+ */
+function abortBlockText(error: RunAbortError): string {
+    const detailIndent = hierarchyIndent("plan");
+    return [
+        ABORT_STATE_LABELS[error.kind],
+        `${detailIndent}phase: ${error.phase}`,
+        `${detailIndent}step: ${error.step ?? "-"}`,
+        `${detailIndent}reason: ${boundedAbortReason(error.message)}`,
+        `${detailIndent}exit code: ${error.exitCode}`,
+    ].join("\n");
+}
 
 /**
  * Console hierarchy levels shared by the agent loop and plan-printer.ts.
@@ -1638,6 +1686,23 @@ main(options)
         }
     })
     .catch(async (error) => {
+        if (error instanceof RunAbortError) {
+            // Deliberate abort: print exactly one concise [ABORT] block, then
+            // run best-effort cleanup and Spec Keeper diagnostics. Aborts never
+            // print a stack trace, and a second SIGINT can still force-exit.
+            status.abort(abortBlockText(error));
+            cleanupExecutionWorktree();
+            if (activeTaskLifecycle && !activeTaskLifecycle.finalized) {
+                try {
+                    await finalizeTaskModeFailure(activeTaskLifecycle, `Aborted (${error.kind}): ${boundedAbortReason(error.message)}`);
+                } catch (finalizeError) {
+                    status.warning(`Spec Keeper task failure update skipped: ${finalizeError instanceof Error ? finalizeError.message : String(finalizeError)}`);
+                }
+            }
+            process.exitCode = error.exitCode;
+            return;
+        }
+
         cleanupExecutionWorktree();
         const message = error instanceof Error ? error.message : String(error);
         status.error(error instanceof Error ? error.stack ?? message : message);
