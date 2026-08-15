@@ -36,6 +36,23 @@ try {
     /--agent-source-dir 'missing' does not exist/,
   );
 
+  // The --start-dir flag reports the same flag-specific usage error.
+  assert.throws(
+    () => resolveToolSafetyConfig({ startDir: "missing" }, sandbox),
+    /--start-dir 'missing' does not exist/,
+  );
+
+  // Directory validation still runs even when the classifier is disabled.
+  assert.throws(
+    () => resolveToolSafetyConfig({ agentSourceDir: "missing", disableClassifier: true }, sandbox),
+    /--agent-source-dir 'missing' does not exist/,
+  );
+
+  // Absolute directory values are normalized to resolved absolute paths.
+  const absoluteResolved = resolveToolSafetyConfig({ agentSourceDir: child, startDir: child }, sandbox);
+  assert.equal(absoluteResolved.agentSourceDir, resolve(child));
+  assert.equal(absoluteResolved.startDir, resolve(child));
+
   // A file passed as a directory is rejected with a clear usage error.
   const file = join(sandbox, "file.txt");
   writeFileSync(file, "x");
