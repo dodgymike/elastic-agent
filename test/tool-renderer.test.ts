@@ -102,8 +102,10 @@ const colored = { color: true };
     const coloredHelpers = ansiHelpers(true);
     assert.strictEqual(plainHelpers.green("ok"), "ok");
     assert.strictEqual(plainHelpers.redBold("bad"), "bad");
+    assert.strictEqual(plainHelpers.orange("pending"), "pending");
     assert.ok(!plainHelpers.green("ok").includes("\u001b"), "plain helpers must not emit ANSI");
     assert.ok(coloredHelpers.green("ok").includes("\u001b"), "colored helpers must emit ANSI");
+    assert.ok(coloredHelpers.orange("pending").includes("\u001b"), "colored orange helper must emit ANSI");
     assert.notStrictEqual(coloredHelpers.green("ok"), "ok");
 }
 
@@ -159,14 +161,15 @@ const colored = { color: true };
     );
 }
 
-// 8. Edit succeeded colors additions green and deletions red; context stays neutral.
+// 8. Edit succeeded colors additions green and deletions red; context stays
+// neutral and the success heading label is green.
 {
     const ch = ansiHelpers(true);
     const editCall = { name: "Edit", arguments: '{"path":"/tmp/a.txt","old_string":"x","new_string":"y"}' };
     const result = { content: "alpha\ny\ngamma\n", previous_content: "alpha\nx\ngamma\n", applied: 1 };
     const lines = renderToolPhase("succeeded", editCall, result, colored);
     assertLines(lines, [
-        `${ch.bold("Edit")} '/tmp/a.txt' applied 1 replacement`,
+        `${ch.green(ch.bold("Edit"))} '/tmp/a.txt' applied 1 replacement`,
         ch.gray("--- a//tmp/a.txt"),
         ch.gray("+++ b//tmp/a.txt"),
         ch.cyan("@@ -1,3 +1,3 @@"),
@@ -178,6 +181,7 @@ const colored = { color: true };
     assert.ok(!lines[4].includes("\u001b"), "context lines must remain neutral in colored mode");
     assert.ok(lines[5].includes("\u001b") && lines[5].includes("-x"), "deletion line must be colored red");
     assert.ok(lines[6].includes("\u001b") && lines[6].includes("+y"), "addition line must be colored green");
+    assert.ok(lines[0].includes("\u001b") && lines[0].includes("Edit"), "success heading must be colored green");
 }
 
 // 9. Edit succeeded surfaces the line_range label from the call arguments.
@@ -442,8 +446,9 @@ const colored = { color: true };
     );
 }
 
-// 28. ExecuteCommand colored output applies green/red circles on the shared
-// helper label; plain mode degrades to the same marker without ANSI escapes.
+// 28. ExecuteCommand colored output colors the label by execution status:
+// green circle + green label on success, red circle + red label on failure.
+// Plain mode degrades to the same marker without ANSI escapes.
 {
     const ch = ansiHelpers(true);
     const execCall = { name: "ExecuteCommand" };
@@ -453,8 +458,8 @@ const colored = { color: true };
         { exitCode: 0, stdout: "ok\n", stderr: "" },
         colored,
     );
-    assertLines(successLines, [`ExecuteCommand ${ch.green("●")}`, "ok"]);
-    assert.ok(successLines[0].includes("\u001b"), "success circle must be colored green");
+    assertLines(successLines, [`${ch.green("ExecuteCommand")} ${ch.green("●")}`, "ok"]);
+    assert.ok(successLines[0].includes("\u001b"), "success line must be colored green");
 
     const errorLines = renderToolPhase(
         "succeeded",
@@ -462,8 +467,34 @@ const colored = { color: true };
         { exitCode: 1, stdout: "", stderr: "bad\n" },
         colored,
     );
-    assertLines(errorLines, [`ExecuteCommand ${ch.red("●")} exit 1`, "bad"]);
-    assert.ok(errorLines[0].includes("\u001b"), "error circle must be colored red");
+    assertLines(errorLines, [`${ch.red("ExecuteCommand")} ${ch.red("●")} exit 1`, "bad"]);
+    assert.ok(errorLines[0].includes("\u001b"), "error line must be colored red");
+}
+
+// 28b. The pending tool-call label is colored orange, and the generic
+// succeeded/failed phases color the label green/red by execution status.
+{
+    const ch = ansiHelpers(true);
+    const pending = renderToolPhase("pending", { name: "Read" }, undefined, colored);
+    assertLines(pending, [ch.orange("Read")]);
+    assert.ok(pending[0].includes("\u001b"), "pending label must be colored orange");
+
+    const succeeded = renderToolPhase("succeeded", { name: "Read" }, { content: "x" }, colored);
+    assertLines(succeeded, [`${ch.green("Read")} ${ch.green("●")} {\"content\":\"x\"}`]);
+    assert.ok(succeeded[0].includes("\u001b"), "succeeded label must be colored green");
+
+    const failed = renderToolPhase("failed", { name: "Read" }, "access denied", colored);
+    assertLines(failed, [`${ch.red("Read")} ${ch.red("●")} access denied`]);
+    assert.ok(failed[0].includes("\u001b"), "failed label must be colored red");
+
+    // Git and ExecuteCommand pending labels follow the same orange rule.
+    assertLines(renderToolPhase("pending", { name: "Git", arguments: '{"action":"list"}' }, undefined, colored), [
+        ch.orange("Git('list')"),
+    ]);
+    assertLines(
+        renderToolPhase("pending", { name: "ExecuteCommand", arguments: '{"command":"ls"}' }, undefined, colored),
+        [ch.orange("ExecuteCommand('ls')")],
+    );
 }
 
 // 29. ExecuteCommand result without a numeric exit code defers to the generic renderer.
