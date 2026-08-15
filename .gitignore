@@ -21,6 +21,10 @@ test/.ab-enrol-check/
 test/.agent-bus-build/
 test/.agent-bus-enrol-build/
 test/.delete-tool-build/
+test/.loop-mode-build/
+test/.loop-queue-build/
+test/.loop-poll-build/
+test/.loop-replan-build/
 test/.compile-verify/
 test/.dt-verify/
 

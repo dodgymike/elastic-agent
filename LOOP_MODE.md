@@ -1,0 +1,180 @@
+# Loop mode (`--loop`)
+
+Loop mode lets the runtime keep running after it starts a plan and watch the
+Agent Bus between execution steps. Incoming coordination messages are
+classified at each step boundary and either interrupt the work order (a
+*relevant* message triggers a re-plan) or are persisted to a durable queue for
+later (an *irrelevant* message never disturbs the plan in flight).
+
+This document describes the CLI surface, the classification rule, the durable
+queue, the between-step poll loop, and the re-planning safety guard. The
+implementation is split across four small modules so each concern stays focused
+and independently testable:
+
+- `loop-mode.ts` — the classification rule (relevant vs. queued).
+- `loop-queue.ts` — durable queue persistence and restart draining.
+- `loop-poll.ts` — the between-step Agent Bus poll and message routing.
+- `loop-replan.ts` — turning a relevant message into a new plan and deciding
+  when that re-plan is safe.
+
+`main.ts` wires these together; `cli-task-mode.ts` owns the CLI argument rules.
+
+---
+
+## CLI usage
+
+Loop mode is a **mode modifier**, not a third exclusive mode. It is additive
+and may be combined with either base mode:
+
+```sh
+# Prompt mode + loop
+elastic-agent --loop "implement the payment retry"
+
+# Task mode + loop
+elastic-agent --loop --task-id TASK-42
+```
+
+Mode rules (see `cli-task-mode.ts`):
+
+- Prompt mode (positional `<prompt>`) and task mode (`--task-id <id>`) are
+  mutually exclusive; at least one is required.
+- `--loop` never selects a mode by itself and may be combined with either one.
+- `--loop` is passed through to `resolveCliRunMode` and stored on the resolved
+  run-mode object as `loop`.
+
+---
+
+## Classification rule (loop-mode.ts)
+
+Every bus message received at a step boundary is classified as either
+`relevant` or `queued`.
+
+A message is **RELEVANT** when it changes the work order in flight:
+
+1. it references the current task/plan ID (the classification context), or
+2. it carries a plan-change directive (a keyword/phrase in
+   `PLAN_CHANGE_DIRECTIVES`) — e.g. `replan`, `re-plan`, `pivot`, `redirect`,
+   `cancel the plan`, `abort plan`, `do not continue`.
+
+Any other message is **QUEUED**: it is persisted durably and does not interrupt
+execution.
+
+Classification is intentionally conservative and deterministic so it can be
+unit-tested without a network. It is the guardrail that decides whether a
+message warrants re-entering the planning phase; it is not a substitute for an
+LLM reading the message content.
+
+Helpers exported for testing and reuse:
+
+- `messageToSearchableText` — flattens a string, a shallow object, or an object
+  with a nested `body` into a single searchable string.
+- `normalizeForClassification` — lower-cases and collapses whitespace.
+- `classifyAgentBusMessage(message, context)` — returns `{ kind, reason }`.
+
+---
+
+## Durable queue (loop-queue.ts)
+
+Irrelevant messages are persisted to `bus-queue.json` in the project root
+(chosen via `defaultBusQueueFilePath`), the same file being drained on a later
+restart. The queue file and its `.tmp` sibling are git-ignored runtime state.
+
+Key properties:
+
+- **Atomic writes** — writes go to a sibling `<file>.tmp` then are renamed over
+  the target, so a crash mid-write never leaves a half-written queue that loses
+  messages.
+- **Graceful reads** — a missing file is an empty queue; a malformed file is
+  treated as an empty queue with a warning (never a crash). Individual bad rows
+  are skipped and reported rather than discarding the whole queue.
+- **Restart draining** — `drainBusQueue` replays all queued messages in order,
+  oldest first, through a caller-supplied handler. If the handler rejects, the
+  offending message and the ones after it are re-persisted so nothing is lost
+  across a restart.
+
+Exports:
+
+- `readBusQueue(filePath)` → `{ filePath, messages, warnings }`
+- `writeBusQueue(filePath, messages)` — atomic replace.
+- `enqueueBusMessage(filePath, message)` → updated snapshot.
+- `drainBusQueue(filePath, { handler })` → `{ drainedCount, remaining, warnings }`
+
+---
+
+## Between-step poll (loop-poll.ts)
+
+At each execution-step boundary, loop mode performs a bounded poll of the Agent
+Bus messages feed, classifies every message, persists the queued ones, and
+surfaces the relevant ones so the step loop can decide whether to abort and
+re-plan.
+
+- `normalizeAgentBusMessages` reduces an opaque GET response body to a flat list
+  of messages regardless of deployment shape (bare array, `{ messages: [...] }`,
+  `{ data: [...] }`, or a single `{ message }`/`{ data }` object).
+- `routeAgentBusMessages` classifies a batch and enqueues the irrelevant ones.
+- `pollLoopBusOnce` orchestrates one poll through an injectable `read`
+  dependency so it is fully unit-testable without a network.
+
+Poll timing:
+
+| Setting | Env var | Default | Notes |
+| ------- | ------- | ------- | ----- |
+| Poll interval | `LOOP_POLL_INTERVAL_MS` | `5000` | Minimum `100`; enforced to avoid a hot-loop. |
+| Per-poll request timeout | `LOOP_POLL_REQUEST_TIMEOUT_MS` | `2000` | One hung bus read never blocks a step boundary indefinitely. |
+| Feed path | `LOOP_BUS_MESSAGES_PATH` | `/api/v1/messages` | Route read from the Agent Bus. |
+
+Soft-failure contract: a missing/malformed queue file or an unreachable bus is
+reported as a warning and loop mode fails **open** to normal execution rather
+than crashing a step boundary.
+
+---
+
+## Re-planning on a relevant message (loop-replan.ts)
+
+When the poll returns one or more relevant messages, execution of the current
+plan is deferred and the runtime re-enters the planning phase with those
+messages as the new work order. `main.ts` runs the plan-then-execute flow again
+(`runAgentReplanLoop`) and eventually cleans up once the whole replan loop
+finishes or aborts.
+
+- `extractReplanPrompt` concatenates the searchable text of every relevant
+  message into the new prompt, so a multi-message directive is preserved.
+- `resolveLoopReplanMaxIterations` bounds how many consecutive loop-driven
+  replans a single run may perform to prevent an unbounded plan/execute churn.
+  Env var `LOOP_REPLAN_MAX_ITERATIONS`, default `5`, minimum `1`.
+- `decideSafeReplan` is the fail-safe guard run before re-entering planning:
+
+  - A preserved execution worktree with staged work is kept and reused — that
+    staged set is carried into the new plan rather than lost.
+  - **Uncommitted changes on the main checkout block re-planning** with an
+    actionable reason (commit, stash, or clean them), so a dirty main working
+    tree can never be corrupted by the new execution phase.
+  - An unknown ("cannot confirm") state is treated as a blocker so loop mode
+    fails **closed** when it cannot prove the repository is safe to re-plan
+    over.
+
+---
+
+## Module ownership and wiring
+
+| Concern | Module | Wired by |
+| ------- | ------ | -------- |
+| CLI flag + mode rules | `cli-task-mode.ts` | `main.ts` |
+| Classification rule | `loop-mode.ts` | `loop-poll.ts`, `main.ts` |
+| Durable queue + drain | `loop-queue.ts` | `loop-poll.ts`, `main.ts` |
+| Between-step poll | `loop-poll.ts` | `main.ts` |
+| Re-plan prompt + safety | `loop-replan.ts` | `main.ts` |
+
+## Tests
+
+Focused tests live in `test/` and compile standalone via these npm scripts (the
+Agent Bus is mocked — no network is touched):
+
+- `npm run test:loop-mode`
+- `npm run test:loop-queue`
+- `npm run test:loop-poll`
+- `npm run test:loop-replan`
+
+They cover classification of relevant vs. queued messages, queue save/load,
+restart draining (including the fail-safe undrained tail), and re-plan
+invocation on a relevant message.
