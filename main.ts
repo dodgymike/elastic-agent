@@ -273,13 +273,29 @@ const tools = [
     {
         type: "function", name: "Git",
         usage_prompt: "tools/git-usage.md",
-        description: "List repository changes, stage selected changes, or commit staged changes.",
+        description: "Inspect a Git repository (status, log, diff, ls-files), stage selected changes, or commit staged changes.",
         parameters: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["list", "stage", "commit"] }, cwd: { type: "string" },
-                paths: { type: "array", items: { type: "string" } }, all: { type: "boolean" }, message: { type: "string" },
-            }, required: ["action"],
+                mode: { type: "string", enum: ["status", "log", "diff", "ls-files"] },
+                action: { type: "string", enum: ["stage", "commit"] },
+                cwd: { type: "string" },
+                format: { type: "string", enum: ["short", "porcelain", "branch"] },
+                branch: { type: "boolean" },
+                oneline: { type: "boolean" },
+                stat: { type: "boolean" },
+                maxCount: { type: "integer" },
+                all: { type: "boolean" },
+                revision: { type: "string" },
+                path: { type: "string" },
+                paths: { type: "array", items: { type: "string" } },
+                staged: { type: "boolean" },
+                check: { type: "boolean" },
+                others: { type: "boolean" },
+                excludeStandard: { type: "boolean" },
+                message: { type: "string" },
+            },
+            anyOf: [{ required: ["mode"] }, { required: ["action"] }],
         },
         exec_handler: (options) => {
             // In review mode, execution steps stage changes in the worktree and
