@@ -52,6 +52,9 @@ elastic-agent --loop "implement the payment retry"
 
 # Task mode + loop
 elastic-agent --loop --task-id TASK-42
+
+# Loop mode with no-filter (respond to every bus message)
+elastic-agent --loop --respond-all "implement the payment retry"
 ```
 
 Mode rules (see `cli-task-mode.ts`):
@@ -61,6 +64,13 @@ Mode rules (see `cli-task-mode.ts`):
 - `--loop` never selects a mode by itself and may be combined with either one.
 - `--loop` is passed through to `resolveCliRunMode` and stored on the resolved
   run-mode object as `loop`.
+- `--respond-all` (loop-mode no-filter) makes every Agent Bus message RELEVANT
+  so the agent responds to all of them instead of filtering irrelevant ones.
+  It is only meaningful together with `--loop`; it defaults to `false`
+  (normal filtering behavior) when absent, and is carried on the resolved
+  run-mode object as `respondAll` and threaded into the classification context
+  (`context.respondAll`).
+
 
 ---
 

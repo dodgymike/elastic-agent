@@ -91,6 +91,7 @@ program
     .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
     .option("--loop", "keep running in loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
+    .option("--respond-all", "loop-mode no-filter: treat every Agent Bus message as relevant so the agent responds to all of them instead of filtering irrelevant ones; only meaningful together with --loop", false)
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--review", "Run the review stage after execution (default: false)", false)
     .option("--disable-classifier", "Bypass the tool safety classifier", false)
@@ -117,7 +118,7 @@ const options = program.opts();
 let commandLinePrompt = program.args[0];
 let runMode: ReturnType<typeof resolveCliRunMode>;
 try {
-    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.loop === true);
+    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.loop === true, options.respondAll === true);
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -319,7 +320,7 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
         path: loopBusMessagesPath,
         requestTimeoutMs: loopPollTiming.requestTimeoutMs,
         queueFilePath: loopQueueFilePath,
-        context: { planId },
+        context: { planId, respondAll: runMode.respondAll },
         report: (message) => status.warning(message, reportPrefix),
     });
     if (result.warnings.length > 0) {
@@ -374,7 +375,7 @@ async function pollAgentBus(): Promise<{ text?: string } | undefined> {
         path: loopBusMessagesPath,
         requestTimeoutMs: loopPollTiming.requestTimeoutMs,
         queueFilePath: loopQueueFilePath,
-        context: { planId },
+        context: { planId, respondAll: runMode.respondAll },
         report: (message) => status.warning(message, hierarchyIndent("plan")),
     });
     if (result.relevantMessages.length === 0) return undefined;
@@ -407,7 +408,7 @@ async function pollAgentBus(): Promise<{ text?: string } | undefined> {
  */
 async function drainLoopQueueAtRestart(reportPrefix = hierarchyIndent("plan")): Promise<void> {
     const planId = runMode.mode === "task" ? runMode.taskId : undefined;
-    const context = { planId };
+    const context = { planId, respondAll: runMode.respondAll };
 
     let warnings: string[] = [];
     let promotedCount = 0;
@@ -2388,7 +2389,7 @@ async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } 
                 requestTimeoutMs: loopPollTiming.requestTimeoutMs,
                 pollIntervalMs: loopPollTiming.pollIntervalMs,
                 queueFilePath: loopQueueFilePath,
-                context: { planId: runMode.mode === "task" ? runMode.taskId : undefined },
+                context: { planId: runMode.mode === "task" ? runMode.taskId : undefined, respondAll: runMode.respondAll },
                 maxIdlePolls,
                 signal: abortController.signal,
                 onPoll: (result) => {
