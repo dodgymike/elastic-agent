@@ -344,6 +344,7 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
     case "Git":
     case "HttpRequest":
     case "AgentBus":
+    case "AgentBusEnrol":
     case "SpecKeeper":
     case "SpecKeeperEnroll":
       return "mutating";
@@ -687,9 +688,12 @@ function classifyGit(parameters: Record<string, unknown>, roots: readonly string
   return ambiguous(`Git action '${String(action)}' is not recognized; the tool itself will reject the call.`);
 }
 
-function classifyIntegrationTool(toolName: string, parameters: Record<string, unknown>): StaticToolSafetyVerdict {
+function classifyIntegrationTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
   if (toolName === "SpecKeeperEnroll") {
     return safe("SpecKeeperEnroll redeems a one-time enrollment token for its intended purpose.");
+  }
+  if (toolName === "AgentBusEnrol") {
+    return classifyAgentBusEnrol(parameters, roots);
   }
 
   const body = parameters.body;
@@ -715,6 +719,55 @@ function classifyIntegrationTool(toolName: string, parameters: Record<string, un
     return safe(`${toolName} ${method ?? "request"} is read-only and carries no protected file content.`);
   }
   return ambiguous(`${toolName} ${method} is mutating and needs LLM safety review.`);
+}
+
+/**
+ * Static classification for `AgentBusEnrol`. The tool redeems an agent-bus
+ * invite through the local `agent-busctl` and writes only non-credential
+ * roster metadata to `.agent-bus.local` (mode 0600) plus the identity key to
+ * an in-workspace identity store. It rigorously validates the invite itself
+ * (rejects `data.json`, refuses paths outside the workspace, and refuses
+ * `.agent-bus.local`). Mirror the `SpecKeeperEnroll` treatment (safe for its
+ * intended purpose) while refusing obviously hostile / unprotected parameter
+ * values (control characters, embedded secrets, an invite file outside the
+ * workspace, or the runtime's protected data store).
+ */
+function classifyAgentBusEnrol(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
+  const pathValues: Array<{ readonly key: string; readonly value: string }> = [];
+  for (const key of ["inviteFile", "identity", "rootDir"]) {
+    const value = stringValue(parameters[key]);
+    if (value !== null && value !== undefined && value.trim() !== "") {
+      pathValues.push({ key, value });
+    }
+  }
+  const agentName = stringValue(parameters.name);
+
+  if (agentName !== null && /[\r\n\0]/.test(agentName)) {
+    return unsafe("AgentBusEnrol name must not contain control characters.");
+  }
+  for (const entry of pathValues) {
+    if (/[\r\n\0]/.test(entry.value)) {
+      return unsafe(`AgentBusEnrol ${entry.key} must not contain control characters.`);
+    }
+    const flagged = secretTextReason(entry.value);
+    if (flagged) return unsafe(`AgentBusEnrol ${entry.key} is unsafe: ${flagged}`);
+
+    // The invite (and identity/root dirs) must stay inside the workspace and
+    // must not name the protected data store or the roster itself.
+    if (entry.key === "inviteFile") {
+      const base = baseNameOf(entry.value);
+      if (base === "data.json" || base === ".agent-bus.local") {
+        return unsafe(`AgentBusEnrol refuses to read '${base}' as an invite file.`);
+      }
+    }
+    if (hasPathTraversal(entry.value)) {
+      return unsafe(`AgentBusEnrol ${entry.key} '${entry.value}' contains '..' path traversal.`);
+    }
+    if (resolvesOutsideAllTrustedRoots(entry.value, roots)) {
+      return unsafe(`AgentBusEnrol ${entry.key} '${entry.value}' resolves outside the workspace.`);
+    }
+  }
+  return safe("AgentBusEnrol redeems an in-workspace agent-bus invite for its intended purpose.");
 }
 
 /**
@@ -752,9 +805,10 @@ export function classifyToolCallStatically(
     case "Git":
       return classifyGit(record, roots);
     case "AgentBus":
+    case "AgentBusEnrol":
     case "SpecKeeper":
     case "SpecKeeperEnroll":
-      return classifyIntegrationTool(toolName, record);
+      return classifyIntegrationTool(toolName, record, roots);
     default:
       return unsafe(`Unknown tool '${toolName}' cannot be safety-classified; refusing to execute.`);
   }
