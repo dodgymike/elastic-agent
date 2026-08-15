@@ -9,6 +9,23 @@ flight). After a plan finishes, the agent does not exit: it keeps polling the
 bus waiting for new work, so it stays "listening" — exactly the behavior of a
 long-lived coordination agent.
 
+## Poll mode only
+
+Loop mode consumes the Agent Bus **exclusively by polling**. Every live read is
+a bounded HTTP `GET` of the messages feed through `loop-poll.ts`:
+
+- `pollLoopBusOnce` — one bounded between-step read.
+- `pollLoopBusUntilMessage` — the keep-listening loop that polls at
+  `LOOP_POLL_INTERVAL_MS` while idle between plans.
+
+Loop mode never subscribes, streams, long-polls, or opens a persistent
+connection to the bus. The only non-poll retrieval is the durable-queue drain
+on restart (below), which re-reads messages a *previous* run polled and
+persisted to `bus-queue.json` — it is not a live transport. Keeping delivery
+poll-only means each idle loop makes no outbound connection until the configured
+poll interval elapses, so an agent running `--loop` costs nothing between polls
+and always fails open when the bus is unreachable.
+
 This document describes the CLI surface, the classification rule, the durable
 queue, the between-step poll loop, and the re-planning safety guard. The
 implementation is split across four small modules so each concern stays focused
@@ -156,6 +173,27 @@ the Agent Bus via `pollLoopBusUntilMessage`:
 
 This is what makes `--loop` a true long-lived listener: it keeps watching the
 bus for new work after finishing a plan instead of stopping.
+
+---
+
+## Reading the queue on restart
+
+Loop mode "reads the queue when restarting". At the top of `runAgentReplanLoop`
+(in `main.ts`), before executing any work, `drainLoopQueueAtRestart` drains the
+durable `bus-queue.json` left by a prior run (via `drainBusQueue`) and
+re-classifies every drained message against the **current** plan:
+
+- A message that is **relevant now** (it references the current task/plan ID or
+  carries a plan-change directive) is promoted to a pending re-plan candidate,
+  so the restart re-enters planning with it.
+- A message that is **still irrelevant** is acknowledged and dropped — it was
+  queued precisely because it must not interrupt execution, and replaying it
+  verbatim into a fresh plan could corrupt the work order.
+
+This is a *local, non-live* read (the messages were already polled and persisted
+by an earlier run); it is not an Agent Bus connection, so the "poll mode only"
+live-delivery contract is unchanged. A missing or corrupt queue is a soft
+failure: it surfaces as a `[WARNING]` and does not abort startup.
 
 ---
 
