@@ -65,6 +65,8 @@ enrolled defaults.
   configured via the environment.
 - Only the non-secret `busUrl` and `agentId` keys are read; secrets are never read from or
   written to this file.
+- The tool never reads `data.json` or any secret store; it reads only the two non-secret
+  roster keys above.
 
 **Never commit `.agent-bus.local`.** It is added to `.gitignore`; keep it out of the
 repository, commit messages, docs, and handoffs. It never contains secret material, but it
