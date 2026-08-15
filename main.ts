@@ -71,6 +71,7 @@ program
     .description("Plan and execute a prompt with the selected LLM provider.")
     .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
+    .option("--loop", "keep running in loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--review", "Run the review stage after execution (default: false)", false)
     .option("--disable-classifier", "Bypass the tool safety classifier", false)
@@ -94,7 +95,7 @@ const options = program.opts();
 const commandLinePrompt = program.args[0];
 let runMode: ReturnType<typeof resolveCliRunMode>;
 try {
-    runMode = resolveCliRunMode(options.taskId, commandLinePrompt);
+    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.loop === true);
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -1557,7 +1558,7 @@ async function runSingleStep(
     }
 }
 
-async function main(options: { review?: boolean } = {}): Promise<{ success: boolean }> {
+async function main(options: { review?: boolean; loop?: boolean } = {}): Promise<{ success: boolean }> {
     client = new MultiTurnLlmRuntime(
         await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
         modelConfiguration.model,
