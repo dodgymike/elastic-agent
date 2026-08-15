@@ -90,7 +90,10 @@ const executionEnd = source.indexOf("\nasync function runExecutionPhase(", execu
 assert.notEqual(executionStart, -1, "main.ts must define executePlanStep");
 assert.notEqual(executionEnd, -1, "main.ts must retain a boundary after executePlanStep");
 const execution = source.slice(executionStart, executionEnd);
-assert.ok(execution.includes("const dispatched = await dispatchToolCall(output);"), "executePlanStep must delegate to dispatchToolCall");
+assert.ok(
+  /const dispatched = await dispatchToolCall\(output, configData, `plan-\$\{index \+ 1\}`\);/u.test(execution),
+  "executePlanStep must delegate to dispatchToolCall with the plan-step goal key",
+);
 assert.ok(!execution.includes("renderToolCallSucceeded(dispatched.output"), "executePlanStep must not render success directly");
 assert.ok(!execution.includes("renderToolCallFailed(dispatched.output"), "executePlanStep must not render failure directly");
 assert.equal(
