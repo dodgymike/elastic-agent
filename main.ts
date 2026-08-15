@@ -125,7 +125,6 @@ function printStatusLine(write: (line: string) => void, label: string, message: 
 const status = {
     planning: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLAN]"), message, prefix),
     step: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.yellow.bold("[STEP]"), message, prefix),
-    tool: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.blue.bold("[TOOL]"), message, prefix),
     response: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.gray("[RESPONSE]"), message, prefix),
     success: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.green.bold("[SUCCESS]"), message, prefix),
     feedback: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[FEEDBACK]"), message, prefix),

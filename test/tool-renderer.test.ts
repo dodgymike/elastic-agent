@@ -23,19 +23,20 @@ function setEnv(name: string, value: string | undefined): void {
 const plain = { color: false };
 const colored = { color: true };
 
-// 1. The generic fallback preserves the historical pending/succeeded/failed text.
+// 1. The generic fallback uses the unified ToolName(args) label plus circle
+// format and never emits legacy Pending:/Succeeded:/Failed: prefixes.
 {
     assertLines(
         renderToolPhase("pending", { name: "Read", arguments: '{"path":"/tmp/example.txt"}' }, undefined, plain),
-        ['Pending: Read {"path":"/tmp/example.txt"}'],
+        ['Read({"path":"/tmp/example.txt"})'],
     );
     assertLines(
         renderToolPhase("succeeded", { name: "Read" }, { content: "hello" }, plain),
-        ['Succeeded: Read → {"content":"hello"}'],
+        ['Read ● {"content":"hello"}'],
     );
     assertLines(
         renderToolPhase("failed", { name: "Read" }, "permission denied", plain),
-        ["Failed: Read: permission denied"],
+        ["Read ● permission denied"],
     );
 }
 
@@ -62,7 +63,7 @@ const colored = { color: true };
 
 // 3. Unknown tools fall back to the generic renderer.
 {
-    assertLines(renderToolPhase("pending", { name: "UnknownTool" }, undefined, plain), ["Pending: UnknownTool"]);
+    assertLines(renderToolPhase("pending", { name: "UnknownTool" }, undefined, plain), ["UnknownTool"]);
 }
 
 // 4. A specialized renderer can suppress output by returning an empty array.
@@ -71,7 +72,7 @@ const colored = { color: true };
     toolRenderers.Read = { ...genericToolRenderer, succeeded: () => [] };
     try {
         assertLines(renderToolPhase("succeeded", { name: "Read" }, { content: "hello" }, plain), []);
-        assertLines(renderToolPhase("pending", { name: "Read" }, undefined, plain), ["Pending: Read"]);
+        assertLines(renderToolPhase("pending", { name: "Read" }, undefined, plain), ["Read"]);
     } finally {
         toolRenderers.Read = original;
     }
@@ -197,7 +198,7 @@ const colored = { color: true };
     const editCall = { name: "Edit", arguments: '{"path":"/tmp/a.txt"}' };
     assertLines(
         renderToolPhase("succeeded", editCall, { content: "new" }, plain),
-        ['Succeeded: Edit → {"content":"new"}'],
+        ['Edit({"path":"/tmp/a.txt"}) ● {"content":"new"}'],
     );
 }
 
@@ -350,7 +351,7 @@ const colored = { color: true };
     const gitCall = { name: "Git", arguments: '{"action":"list"}' };
     assertLines(
         renderToolPhase("succeeded", gitCall, { something: true }, plain),
-        ['Succeeded: Git → {"something":true}'],
+        ["Git('list') ● {\"something\":true}"],
     );
 }
 
@@ -439,7 +440,7 @@ const colored = { color: true };
 {
     assertLines(
         renderToolPhase("succeeded", { name: "ExecuteCommand" }, undefined, plain),
-        ["Succeeded: ExecuteCommand"],
+        ["ExecuteCommand ●"],
     );
 }
 

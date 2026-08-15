@@ -233,21 +233,29 @@ export function renderToolCommand(
 }
 
 function renderGenericPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
-    const argumentsSummary = toolCallArgumentSummary(toolCall.arguments);
-    return [`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`];
+    const label = toolCommandLabel(toolCall);
+    return [label];
 }
 
-function renderGenericSucceeded(toolCall: ToolCallDescriptor, result: unknown, _options: ToolRendererOptions): string[] {
-    return [`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`];
+function renderGenericSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] {
+    const label = toolCommandLabel(toolCall);
+    const circle = ansiHelpers(options.color).green("●");
+    const summary = result === undefined ? "" : ` ${truncate(stringify(result), 160)}`;
+    return [`${label} ${circle}${summary}`];
 }
 
-function renderGenericFailed(toolCall: ToolCallDescriptor, error: unknown, _options: ToolRendererOptions): string[] {
-    return [`Failed: ${toolCall.name}: ${String(error)}`];
+function renderGenericFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
+    const label = toolCommandLabel(toolCall);
+    const circle = ansiHelpers(options.color).red("●");
+    const message = String(error).trim();
+    return message ? [`${label} ${circle} ${message}`] : [`${label} ${circle}`];
 }
 
 /**
- * Fallback renderer that preserves the historical generic tool-call output.
- * It is also the base every specialized renderer builds on.
+ * Fallback renderer used for any tool or phase without a specialized renderer.
+ * It follows the same unified `ToolName(args)` label plus circle convention as
+ * the shared command helper, so no tool emits legacy `Pending:`/`Succeeded:`/
+ * `Failed:` text prefixes.
  */
 export const genericToolRenderer: CompleteToolRenderer = {
     pending: renderGenericPending,
