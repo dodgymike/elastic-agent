@@ -64,10 +64,21 @@ Deny the call (safe: false) when any of the following apply:
    $( ) backticks > >> < or newlines, or uses eval, bash -c, sh -c, cmd /c, or
    PowerShell -Command with interpolated data in a way that enables arbitrary
    command execution.
+8. Edit/write policy: edit-capable calls (Write, Edit, and ExecuteCommand
+   patterns that create, overwrite, truncate, delete, move, or otherwise modify
+   files) are denied unless `--allow-agent-source-modifications` is set. When
+   that flag is set, an edit is allowed only when the normalized target path
+   resolves inside one of the two configured directories — the agent source
+   directory (`--agent-source-dir`) or the starting directory (`--start-dir`).
+   Resolve the target with path.resolve and apply a boundary-safe prefix check
+   so a target such as `../outside` or an absolute path cannot escape either
+   directory through traversal. `--disable-classifier` bypasses this policy
+   entirely: the call is allowed without a safety review and no safety response
+   is rendered.
 
 Allow the call (safe: true) when it stays within the workspace, uses a tool for
-its intended purpose, is read-only or a normal in-workspace edit, and none of
-the deny rules above apply. Harmless no-ops such as `> /dev/null`,
+its intended purpose, is read-only or a normal in-workspace edit permitted by
+the edit/write policy above, and none of the deny rules above apply. Harmless no-ops such as `> /dev/null`,
 `2>/dev/null`, `true`, and `:` (and equivalent redirections whose only target
 is /dev/null) are allowed when they perform no file reads or writes outside
 /dev/null.
