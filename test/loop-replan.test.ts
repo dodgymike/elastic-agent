@@ -40,6 +40,18 @@ async function main(): Promise<void> {
     check("empty input yields empty prompt", extractReplanPrompt([]).length === 0);
     check("null/undefined messages are skipped", extractReplanPrompt([null, undefined]).length === 0);
   }
+  {
+    // In no-filter (respond-to-everything) mode, ordinary messages that carry
+    // no plan directive are STILL surfaced as relevant by loop-mode.ts and
+    // therefore become the next work-order prompt through extractReplanPrompt —
+    // the received message, not the retained command-line prompt. This guards
+    // the runtime path that seeds the new prompt from a no-filter message.
+    const prompt = extractReplanPrompt([
+      "an ordinary status ping with no plan directive",
+      { content: "please also check the tests" },
+    ]);
+    check("no-filter: received message becomes the new prompt", /ordinary status ping/.test(prompt) && /check the tests/.test(prompt));
+  }
 
   // ---------------------------------------------------------------
   // 2. resolveLoopReplanMaxIterations resolves the bounded budget.

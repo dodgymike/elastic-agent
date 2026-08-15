@@ -121,6 +121,24 @@ async function main(): Promise<void> {
     }
 
     // ------------------------------------------------------------------
+    // 7b. No-filter cohort: enqueuing many messages stores ALL of them, in
+    //     arrival order, without dropping any — the property that loop-mode
+    //     classification relies on so a busy run never loses a message.
+    // ------------------------------------------------------------------
+    {
+      const cohortPath = join(dir, "cohort.json");
+      writeBusQueue(cohortPath, []);
+      const cohort = ["cohort-msg-1", "cohort-msg-2", "cohort-msg-3", "cohort-msg-4", "cohort-msg-5"];
+      let snap: ReturnType<typeof enqueueBusMessage> | undefined;
+      for (const text of cohort) {
+        snap = enqueueBusMessage(cohortPath, { text });
+      }
+      check("no-filter: every enqueued message is stored", snap?.messages.length === cohort.length);
+      const stored = readBusQueue(cohortPath).messages.map((m) => (m.message as { text?: string })?.text);
+      check("no-filter: stored payloads match arrival order, none dropped", stored.join(",") === cohort.join(","));
+    }
+
+    // ------------------------------------------------------------------
     // 8. drainBusQueue replays every message oldest-first, then clears it.
     // ------------------------------------------------------------------
     {

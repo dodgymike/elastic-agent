@@ -61,6 +61,34 @@ async function main(): Promise<void> {
       const queued = classifyAgentBusMessage({ text: "just a status note; observe and log it" }, { planId: "TASK-1" });
       check("message with no plan reference/directive is queued", queued.kind === "queued");
     }
+    {
+      // =================================================================
+      // No-filter / respond-to-everything mode (respondAll): EVERY message is
+      // classified as relevant, so nothing is ever deferred or dropped.
+      // =================================================================
+      const noIdBlank = classifyAgentBusMessage(
+        "a casual remark with no plan reference and no directive" as unknown as AgentBusMessageLike,
+        { planId: "TASK-1", respondAll: true },
+      );
+      check("no-filter: message with no plan reference is relevant", noIdBlank.kind === "relevant");
+
+      const blank = classifyAgentBusMessage({ text: "" }, { planId: "TASK-1", respondAll: true });
+      check("no-filter: an otherwise-blank message is still relevant", blank.kind === "relevant");
+
+      const structured = classifyAgentBusMessage(
+        { topic: "general chatter", body: { note: "nothing actionable" } },
+        { planId: "TASK-1", respondAll: true },
+      );
+      check("no-filter: structured non-directive message is relevant", structured.kind === "relevant");
+
+      // Default mode must remain unchanged: the same message without respondAll
+      // is queued, preserving the prior filtering behavior.
+      const defaultNoId = classifyAgentBusMessage(
+        "a casual remark with no plan reference and no directive" as unknown as AgentBusMessageLike,
+        { planId: "TASK-1" },
+      );
+      check("default (no respondAll): same message is queued, not relevant", defaultNoId.kind === "queued");
+    }
 
     // =================================================================
     // B. Queue save/load + enqueue (loop-queue.ts) with mocked bus.
@@ -84,6 +112,36 @@ async function main(): Promise<void> {
       check("direct enqueue persists a second message", direct.messages.length === 2);
       const loaded = readBusQueue(queuePath).messages.map((m) => m.message);
       check("read back preserves enqueued payload", loaded.some((m) => (m as AgentBusMessageLike)?.text === "saved directly"));
+    }
+    {
+      // =================================================================
+      // No-filter routing through the poll: with respondAll, every message is
+      // returned as relevant and NONE are dropped, so the durable queue stays
+      // empty (nothing to queue) — the respond-to-everything contract.
+      // =================================================================
+      // Drain the leftover queued message(s) so the queue file is empty before
+      // asserting the no-filter poll leaves it that way.
+      await drainBusQueue(queuePath, { handler: () => {} });
+      const noFilterResult = await pollLoopBusOnce({
+        read: fakeRead({ data: [
+          { text: "first, totally irrelevant chatter" },
+          { content: "second, also not actionable" },
+          { body: "third" },
+        ] }),
+        path: "/api/v1/messages",
+        queueFilePath: queuePath,
+        context: { planId: "TASK-2", respondAll: true },
+      });
+      check("no-filter: all three messages are surfaced as relevant", noFilterResult.relevantMessages.length === 3);
+      check("no-filter: zero messages are queued", noFilterResult.queuedCount === 0);
+      check("no-filter: no message was dropped", noFilterResult.readFailed === false);
+      check("no-filter: the durable queue stores nothing (none dropped)", readQueuedPayloads(queuePath).length === 0);
+
+      // Restore the two-message queued state that the original section B left
+      // behind, so the downstream draining section (C) still observes its
+      // documented precondition (two queued messages) unchanged.
+      await enqueueBusMessage(queuePath, { text: "the text, restored #1" });
+      await enqueueBusMessage(queuePath, { text: "the text, restored #2" });
     }
 
     // =================================================================
@@ -120,6 +178,28 @@ async function main(): Promise<void> {
     // =================================================================
     // D. Replan invocation on a relevant message (loop-replan.ts).
     // =================================================================
+    {
+      // In no-filter mode a received (otherwise-irrelevant) message becomes the
+      // agent's next prompt via extractReplanPrompt — exactly the path main.ts
+      // uses to re-enter planning with the received message instead of the
+      // original command-line prompt.
+      const noFilterResult = await pollLoopBusOnce({
+        read: fakeRead({ data: [
+          { text: "an ordinary status ping with no plan directive" },
+          { content: "please also check the tests" },
+        ] }),
+        path: "/api/v1/messages",
+        queueFilePath: queuePath,
+        context: { planId: "TASK-3", respondAll: true },
+      });
+      check("no-filter: each received message is surfaced as relevant", noFilterResult.relevantMessages.length === 2);
+      const noFilterPrompt = extractReplanPrompt(noFilterResult.relevantMessages as { text?: string }[]);
+      check(
+        "no-filter: the received message becomes the new prompt (not the retained command-line prompt)",
+        /ordinary status ping/.test(noFilterPrompt) && /check the tests/.test(noFilterPrompt),
+      );
+      check("no-filter: nothing was queued behind the prompt", noFilterResult.queuedCount === 0);
+    }
     {
       // A relevant message (from the mocked poll) becomes the new prompt.
       const result = await pollLoopBusOnce({
