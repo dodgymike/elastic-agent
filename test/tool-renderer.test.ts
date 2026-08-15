@@ -71,6 +71,19 @@ const colored = { color: true };
     assertLines(renderToolPhase("pending", { name: "UnknownTool" }, undefined, plain), ["UnknownTool"]);
 }
 
+// 3b. The generic failed renderer surfaces serialized `{ error }` payloads
+// rather than printing [object Object].
+{
+    assertLines(
+        renderToolPhase("failed", { name: "UnknownTool" }, { error: "no handler" }, plain),
+        ["UnknownTool ● no handler"],
+    );
+    assertLines(
+        renderToolPhase("failed", { name: "Read" }, { error: "access denied" }, plain),
+        ["Read ● access denied"],
+    );
+}
+
 // 4. A specialized renderer can suppress output by returning an empty array.
 {
     const original = toolRenderers.Read;

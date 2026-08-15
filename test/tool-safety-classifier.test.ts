@@ -5,6 +5,7 @@
 import {
   classifyToolCall,
   classifyToolCallStatically,
+  createToolSafetyLogger,
   normalizeToolParameters,
   parseToolSafetyClassification,
   toolRiskLevel,
@@ -26,6 +27,29 @@ function check(name: string, cond: boolean): void {
 }
 
 const silentLogger = (): void => {};
+
+function capturingLogger() {
+  const lines: Array<{ level: "info" | "error"; message: string }> = [];
+  return {
+    lines,
+    logger: (level: "info" | "error", message: string): void => {
+      lines.push({ level, message });
+    },
+  };
+}
+
+function capturingTarget() {
+  const info: string[] = [];
+  const error: string[] = [];
+  return {
+    info,
+    error,
+    target: {
+      info: (line: string): void => { info.push(line); },
+      error: (line: string): void => { error.push(line); },
+    },
+  };
+}
 
 function staticVerdict(toolName: string, parameters: unknown) {
   return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE });
@@ -96,6 +120,38 @@ async function main(): Promise<void> {
       "safe FileSize and ListDirectory are allowed",
       staticVerdict("FileSize", { path: "package.json" }).decision === "safe"
         && staticVerdict("ListDirectory", { directory: "test" }).decision === "safe",
+    );
+
+    // ------------------------------------------------------------------
+    // 1b. Harmless shell no-ops are allowed statically.
+    // ------------------------------------------------------------------
+    check(
+      "> /dev/null is an allowed no-op",
+      staticVerdict("ExecuteCommand", { command: "> /dev/null" }).decision === "safe",
+    );
+    check(
+      "2>/dev/null is an allowed no-op",
+      staticVerdict("ExecuteCommand", { command: "2>/dev/null" }).decision === "safe",
+    );
+    check(
+      "true is an allowed no-op",
+      staticVerdict("ExecuteCommand", { command: "true" }).decision === "safe",
+    );
+    check(
+      ": is an allowed no-op",
+      staticVerdict("ExecuteCommand", { command: ":" }).decision === "safe",
+    );
+    check(
+      "multiple /dev/null redirections are an allowed no-op",
+      staticVerdict("ExecuteCommand", { command: ">/dev/null 2>/dev/null" }).decision === "safe",
+    );
+    check(
+      "redirection to a real file is not an allowed no-op",
+      staticVerdict("ExecuteCommand", { command: "> notes.md" }).decision !== "safe",
+    );
+    check(
+      "no-op with a data.json argument stays blocked",
+      staticVerdict("ExecuteCommand", { command: "true data.json" }).decision === "unsafe",
     );
 
     // ------------------------------------------------------------------
@@ -304,10 +360,49 @@ async function main(): Promise<void> {
       staticAllowed.safe === true && staticAllowed.source === "static",
     );
 
+    const suppressedCapture = capturingLogger();
+    const suppressedAllowed = await classifyToolCall("Read", { path: "package.json" }, {
+      workspaceRoot: WORKSPACE,
+      logger: suppressedCapture.logger,
+    });
+    check(
+      "allowed static calls suppress [TOOL SAFETY] output",
+      suppressedAllowed.safe === true && suppressedCapture.lines.length === 0,
+    );
+
     const ambiguousCommand = { command: "mkdir -p ./build" };
     check(
       "benign-but-unfamiliar command is ambiguous statically",
       staticVerdict("ExecuteCommand", ambiguousCommand).decision === "ambiguous",
+    );
+
+    const indentedDenied = capturingTarget();
+    const indentedDeniedLogger = createToolSafetyLogger("        ", indentedDenied.target);
+    const deniedResult = await classifyToolCall("Read", { path: "data.json" }, {
+      workspaceRoot: WORKSPACE,
+      logger: indentedDeniedLogger,
+    });
+    check(
+      "denied safety messages are indented under the tool line",
+      deniedResult.safe === false
+        && indentedDenied.error.length === 1
+        && indentedDenied.error[0].startsWith("        [TOOL SAFETY] Read: unsafe (static):")
+        && indentedDenied.info.length === 0,
+    );
+
+    const indentedAmbiguous = capturingTarget();
+    const indentedAmbiguousLogger = createToolSafetyLogger("        ", indentedAmbiguous.target);
+    const ambiguousDenied = await classifyToolCall("ExecuteCommand", ambiguousCommand, {
+      workspaceRoot: WORKSPACE,
+      logger: indentedAmbiguousLogger,
+    });
+    check(
+      "ambiguous fail-closed safety messages are indented under the tool line",
+      ambiguousDenied.safe === false
+        && indentedAmbiguous.info.length === 1
+        && indentedAmbiguous.error.length === 1
+        && indentedAmbiguous.info[0].startsWith("        [TOOL SAFETY] ExecuteCommand: ambiguous static verdict")
+        && indentedAmbiguous.error[0].startsWith("        [TOOL SAFETY] ExecuteCommand: unsafe (fallback)"),
     );
 
     const noRuntime = await classifyToolCall("ExecuteCommand", ambiguousCommand, {
@@ -329,6 +424,21 @@ async function main(): Promise<void> {
     check(
       "LLM can approve an ambiguous call",
       llmSafe.safe === true && llmSafe.source === "llm" && llmSafe.reason === "benign",
+    );
+
+    const llmSafeCapture = capturingLogger();
+    const llmSafeCaptured = await classifyToolCall("ExecuteCommand", ambiguousCommand, {
+      runtime: safeRuntime,
+      workspaceRoot: WORKSPACE,
+      promptPath: tempPrompt,
+      logger: llmSafeCapture.logger,
+    });
+    check(
+      "LLM-approved calls emit no final [TOOL SAFETY] safe verdict",
+      llmSafeCaptured.safe === true
+        && llmSafeCapture.lines.length === 1
+        && llmSafeCapture.lines[0].level === "info"
+        && /ambiguous static verdict/.test(llmSafeCapture.lines[0].message),
     );
 
     const unsafeRuntime = mockRuntime(async () => '{"safe":false,"reason":"LLM says no"}');

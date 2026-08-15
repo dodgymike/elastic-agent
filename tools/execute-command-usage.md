@@ -13,6 +13,21 @@ and repository inspection not covered by the dedicated `Git` tool. Do not use it
 to edit files when `Read`/`Write`/`Edit` are appropriate. Prefer passing
 dynamic data as `parameters` instead of shell interpolation.
 
+## Git command routing
+
+`ExecuteCommand` refuses git commands that map directly to the dedicated `Git`
+tool:
+
+- `git status`, `git log`, `git diff`, `git ls-files` -> use
+  `Git({ mode: "status" | "log" | "diff" | "ls-files", ... })`.
+- `git add` -> use `Git({ action: "stage", ... })`.
+- `git commit` -> use `Git({ action: "commit", ... })`.
+
+Other git commands (for example `show`, `stash`, `worktree`, `tag`, `branch`,
+`checkout`, `config`, `check-ignore`, `rev-parse`, `push`, or `--version`) are
+sent to the git-command router classifier. If the classifier refuses the call,
+the refusal reason is returned as the tool error and the command does not run.
+
 ## Required parameters
 
 - `command` (string): Bash source to execute.
@@ -66,8 +81,9 @@ prefix is ever emitted for a tool call.
 ## Safe use
 
 **Allowed**
-- Read-only verification commands: builds, tests, grep, listing, `git diff
-  --check`, and repository inspection.
+- Read-only verification commands: builds, tests, grep, listing, and repository
+  inspection not covered by the dedicated `Git` tool. Use `Git({ mode: "diff",
+  check: true })` for whitespace checks instead of `git diff --check`.
 - Passing dynamic values as `parameters` (`$1`, `$2`, ...) instead of shell
   interpolation.
 - using agent-busctl and spec keeper related commands or binaries
@@ -98,7 +114,7 @@ prefix is ever emitted for a tool call.
 1. Simple command:
 
    ```js
-   await ExecuteCommand({ command: "git diff --check" });
+   await ExecuteCommand({ command: "npm run build" });
    ```
 
 2. Positional parameters:

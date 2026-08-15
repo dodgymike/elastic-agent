@@ -8,7 +8,7 @@ import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
-import { renderToolPhase, renderToolCommand, toolCommandLabel, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
+import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
 import { startToolTimer } from "./tool-timer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, isAbsolute, join } from "node:path";
@@ -43,7 +43,8 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
-import { classifyToolCall, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
+import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
+import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 
 const terminalColor = terminalColorEnabled(process.stdout);
 if (!terminalColor) chalk.level = 0;
@@ -273,13 +274,29 @@ const tools = [
     {
         type: "function", name: "Git",
         usage_prompt: "tools/git-usage.md",
-        description: "List repository changes, stage selected changes, or commit staged changes.",
+        description: "Inspect a Git repository (status, log, diff, ls-files), stage selected changes, or commit staged changes.",
         parameters: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["list", "stage", "commit"] }, cwd: { type: "string" },
-                paths: { type: "array", items: { type: "string" } }, all: { type: "boolean" }, message: { type: "string" },
-            }, required: ["action"],
+                mode: { type: "string", enum: ["status", "log", "diff", "ls-files"] },
+                action: { type: "string", enum: ["stage", "commit"] },
+                cwd: { type: "string" },
+                format: { type: "string", enum: ["short", "porcelain", "branch"] },
+                branch: { type: "boolean" },
+                oneline: { type: "boolean" },
+                stat: { type: "boolean" },
+                maxCount: { type: "integer" },
+                all: { type: "boolean" },
+                revision: { type: "string" },
+                path: { type: "string" },
+                paths: { type: "array", items: { type: "string" } },
+                staged: { type: "boolean" },
+                check: { type: "boolean" },
+                others: { type: "boolean" },
+                excludeStandard: { type: "boolean" },
+                message: { type: "string" },
+            },
+            anyOf: [{ required: ["mode"] }, { required: ["action"] }],
         },
         exec_handler: (options) => {
             // In review mode, execution steps stage changes in the worktree and
@@ -363,30 +380,28 @@ function emitToolLines(lines: string[], prefix = toolChildIndent): void {
 
 /**
  * Emit the pending tool-call label as `ToolName(args)` before argument parsing
- * or execution. The unified label comes from tool-renderer.ts so every tool
- * shares the same heading format without a legacy `[TOOL] Pending:` prefix.
+ * or execution. The label is produced by the per-tool renderer map so every
+ * tool shares the same heading format without a legacy `[TOOL] Pending:`
+ * prefix, while a tool can still customize or suppress its pending line.
  */
 function renderToolCallPending(toolCall) {
-    const label = toolCommandLabel(toolCall);
-    if (!label) return;
-    console.log(`${hierarchyIndent("contentInStep")}${label}`);
+    const lines = renderToolPhase("pending", toolCall, undefined, { color: terminalColor });
+    for (const line of lines) console.log(`${hierarchyIndent("contentInStep")}${line}`);
 }
 
 /**
- * Render a completed tool call through the shared tool-command helper first so
- * command-like results follow the circle/stdout/stderr rules. Non-command
- * results fall back to the per-tool renderer map, still without any legacy
- * [SUCCESS] label.
+ * Render a completed tool call through the per-tool renderer map first so
+ * specialized result views (the Edit diff, Git structured status, and
+ * redacted secret-carrying tools) are used when intended. Command-shaped tools
+ * (ExecuteCommand and the non-status Git modes) delegate to the shared
+ * tool-command helper inside their own renderers, so the circle/stdout/stderr
+ * rules stay exactly the same. No legacy [SUCCESS]/[ERROR] prefix is emitted.
  */
 function renderToolCallSucceeded(toolCall, result) {
-    const lines = renderToolCommand(toolCall, result, { color: terminalColor });
-    if (lines) { emitToolLines(lines); return; }
     emitToolLines(renderToolPhase("succeeded", toolCall, result, { color: terminalColor }));
 }
 
 function renderToolCallFailed(toolCall, error) {
-    const lines = renderToolCommand(toolCall, error, { color: terminalColor });
-    if (lines) { emitToolLines(lines); return; }
     emitToolLines(renderToolPhase("failed", toolCall, error, { color: terminalColor }));
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
@@ -863,12 +878,34 @@ async function dispatchToolCall(output) {
         return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
     }
 
+    // ExecuteCommand preflight: keep supported git commands on the dedicated
+    // Git tool. Clear mappings (status/log/diff/ls-files/add/commit) are
+    // refused with an actionable Git tool suggestion before the general safety
+    // classifier runs; unclear mappings are sent to the git-command router LLM
+    // and its refusal is respected here.
+    if (output.name === "ExecuteCommand") {
+        const command = toolArguments && typeof toolArguments === "object" && !Array.isArray(toolArguments)
+            ? toolArguments.command
+            : undefined;
+        const routing = await routeGitExecuteCommand(command, {
+            runtime: client,
+            promptPath: isAbsolute(GIT_COMMAND_ROUTER_PROMPT_PATH)
+                ? GIT_COMMAND_ROUTER_PROMPT_PATH
+                : join(mainCwd, GIT_COMMAND_ROUTER_PROMPT_PATH),
+        });
+        if (routing.action === "refuse") {
+            renderToolCallFailed(output, { error: routing.reason });
+            return { output, toolArguments, toolResponse: { error: routing.reason }, errorMessage: routing.reason };
+        }
+    }
+
     let classification;
     try {
         classification = await classifyToolCall(output.name, toolArguments, {
             runtime: client,
             workspaceRoot: process.cwd(),
             promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
+            logger: createToolSafetyLogger(toolChildIndent),
         });
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);

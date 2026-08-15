@@ -203,7 +203,7 @@ export function toolCommandOutputLines(text: unknown): string[] {
 /**
  * Build the unified `ToolName(args)` label for a tool call. Command-like tools
  * use their natural single-argument form (`ExecuteCommand('...')` and
- * `Git('action')`); every other tool falls back to the JSON argument summary.
+ * `Git('mode'|'action')`); every other tool falls back to the JSON argument summary.
  */
 export function toolCommandLabel(toolCall: ToolCallDescriptor): string {
     const name = toolCall?.name ?? "Tool";
@@ -214,9 +214,9 @@ export function toolCommandLabel(toolCall: ToolCallDescriptor): string {
         return `ExecuteCommand('${quoted}')`;
     }
     if (name === "Git") {
-        const action = gitActionText(toolCall.arguments);
-        if (!action) return "Git";
-        return `Git('${action.replace(/'/g, "\\'")}')`;
+        const mode = gitModeText(toolCall.arguments);
+        if (!mode) return "Git";
+        return `Git('${mode.replace(/'/g, "\\'")}')`;
     }
     const argumentsSummary = toolCallArgumentSummary(toolCall.arguments);
     return argumentsSummary ? `${name}(${argumentsSummary})` : name;
@@ -293,7 +293,7 @@ function renderGenericSucceeded(toolCall: ToolCallDescriptor, result: unknown, o
 function renderGenericFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
     const label = toolCommandLabel(toolCall);
     const circle = ansiHelpers(options.color).red("●");
-    const message = String(error).trim();
+    const message = redactSecretText(toolCommandErrorText(error));
     return message ? [`${label} ${circle} ${message}`] : [`${label} ${circle}`];
 }
 
@@ -613,12 +613,14 @@ function renderEditSucceeded(toolCall: ToolCallDescriptor, result: unknown, opti
     return lines;
 }
 
-/** Extract the `action` field from a raw tool-call arguments JSON string. */
-function gitActionText(argumentsText: unknown): string {
+/** Extract the `mode` (or legacy `action`) field from raw tool-call arguments JSON. */
+function gitModeText(argumentsText: unknown): string {
     if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
     try {
-        const parsed = JSON.parse(argumentsText) as { action?: unknown };
-        return typeof parsed?.action === "string" ? parsed.action : "";
+        const parsed = JSON.parse(argumentsText) as { mode?: unknown; action?: unknown };
+        if (typeof parsed?.mode === "string") return parsed.mode;
+        if (typeof parsed?.action === "string") return parsed.action;
+        return "";
     } catch {
         return "";
     }
@@ -734,7 +736,7 @@ function renderGitSucceeded(toolCall: ToolCallDescriptor, result: unknown, optio
 
     // Some runtime guards return a serialized `{ error }` object rather than
     // throwing. Route it through the shared helper so it renders as a unified
-    // `Git('action') ● message` error line.
+    // `Git('mode') ● message` error line.
     if (typeof gitResult.error === "string" && gitResult.error.trim() !== "") {
         return renderToolCommand(toolCall, result, options);
     }
@@ -754,9 +756,9 @@ function renderGitSucceeded(toolCall: ToolCallDescriptor, result: unknown, optio
         return statusLines;
     }
 
-    // Stage/commit results are command-shaped. Delegate to the shared helper so
-    // their stdout/stderr ordering matches ExecuteCommand and the central
-    // dispatch path exactly.
+    // Log/diff/ls-files/stage/commit results are command-shaped. Delegate to
+    // the shared helper so their stdout/stderr ordering matches ExecuteCommand
+    // and the central dispatch path exactly.
     return renderToolCommand(toolCall, result, options);
 }
 
