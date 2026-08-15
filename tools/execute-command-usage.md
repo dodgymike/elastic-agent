@@ -30,14 +30,21 @@ dynamic data as `parameters` instead of shell interpolation.
 
 ## Formatted terminal output
 
-The terminal renders a successful call as a green circle followed by captured
-`stdout` only; empty `stdout` shows the green circle alone. A non-zero
-`exitCode` renders a red circle with `exit <code>`, then `stderr` when present,
-then `stdout` when present (stdout can contain useful diagnostics even on
-failure). Empty `stdout`/`stderr` are suppressed. In no-color/non-TTY contexts
-the circle markers and ANSI colors degrade to plain text; the exit code and
-streams are still shown. A rejected call (spawn error or signal) renders a red
-circle with the error message.
+The runtime first announces the call as `ExecuteCommand('...')`. While the
+command runs, an in-place timer line ticks on the same terminal line (for
+example `⏱ 0.50s` in color mode, or `elapsed 0.50s` in non-TTY logs) and is
+finalized with the total elapsed time when the command completes or fails.
+Terminal state is cleaned up on exit.
+
+On success the terminal renders `ExecuteCommand('...')` followed by a green
+circle and captured `stdout`; `stderr` is included only when non-empty. A
+non-zero `exitCode` renders a red circle with `exit <code>`, then `stderr`
+when present, then `stdout` when present (stdout can contain useful diagnostics
+even on failure). Empty `stdout`/`stderr` are suppressed. In no-color/non-TTY
+contexts the circle markers and ANSI colors degrade to plain text; the exit
+code and streams are still shown. A rejected call (spawn error or signal)
+renders a red circle with the error message. No `[SUCCESS]` or `[ERROR]` text
+prefix is ever emitted for a tool call.
 
 ## Error handling
 

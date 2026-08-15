@@ -8,9 +8,17 @@
 
 ## Tool-call terminal rendering
 
-- The tool-call terminal rendering lifecycle is intentionally scoped to the legacy `main2.js` executor.
-- Implementation commit: `4a39798` (`feat: render tool call lifecycle states`). Focused lifecycle-test commit: `e436294` (`test: cover tool call rendering lifecycle`).
-- Recorded verification: `npm run test:tool-rendering`, `node --check main.ts`, and `git diff --check` passed.
+- Tool-call terminal rendering is centralized in `tool-renderer.ts` (unified
+  `ToolName(args)` label plus green/red circle, stdout/stderr ordering, and
+  per-tool renderers) and `tool-timer.ts` (in-place elapsed timer with ANSI
+  line clearing).
+- `dispatchToolCall` in `main.ts` emits the pending label before argument
+  parsing, runs the safety classifier, starts the timer, and routes
+  success/failure output through the shared render helper. No
+  `[TOOL] Pending:`/`[SUCCESS]`/`[ERROR]` text prefixes are emitted for tool
+  calls.
+- The legacy `main2.js`-scoped rendering test is being migrated to the new
+  dispatch structure rather than retained against the deleted executor.
 
 ## Provider runtime migration handoff
 

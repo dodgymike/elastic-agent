@@ -57,10 +57,24 @@ Line-range mode (the two parameters must be supplied together):
   edit, available to terminal diff rendering; it is not included in
   JSON-serialized tool results for the model.
 
-On success the terminal renders a unified diff view: `---`/`+++` file headers, a
-`@@` range header, and change lines with `+` for additions, `-` for deletions,
-and neutral context lines. In no-color/non-TTY contexts the same markers render
-as plain text.
+On success the terminal renders a unified diff view; see Formatted terminal
+output below.
+
+## Formatted terminal output
+
+The runtime first announces the call as `Edit({...})`. While the edit runs, an
+in-place timer line ticks on the same terminal line (for example `⏱ 0.50s` in
+color mode, or `elapsed 0.50s` in non-TTY logs) and is finalized with the
+total elapsed time when the edit completes or fails. Terminal state is cleaned
+up on exit.
+
+On success the terminal renders an `Edit 'path'` header (with the line range
+and replacement count when applicable) followed by a unified diff view:
+`---`/`+++` file headers, an `@@` range header, and change lines with `+` for
+additions (green), `-` for deletions (red), and neutral context lines. On
+failure it renders `Edit({...})` followed by a red circle and the error
+message. In no-color/non-TTY contexts the same markers render as plain text.
+No `[SUCCESS]` or `[ERROR]` text prefix is ever emitted for a tool call.
 
 ## Error handling
 

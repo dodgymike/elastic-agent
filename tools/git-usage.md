@@ -33,20 +33,30 @@ work. Follow the runtime's commit instruction for the current step. Use
   stable `git status --porcelain=v1 --branch` output.
 - `stderr` (string): git standard error.
 
-## Formatted status output
+## Formatted terminal output
 
-For `action: "list"`, the terminal renders the porcelain output as a formatted
-status view with sections for the branch, staged changes, unstaged changes,
-and untracked files. Section headers and status codes use colors/icons in TTY
-mode and degrade to plain text otherwise. A clean working tree renders an
-explicit `working tree clean` empty-state, and a non-zero git exit is shown
-with command evidence and any stderr/stdout diagnostics.
+The runtime first announces the call as `Git('action')`. While git runs, an
+in-place timer line ticks on the same terminal line (for example `⏱ 0.50s` in
+color mode, or `elapsed 0.50s` in non-TTY logs) and is finalized with the
+total elapsed time when the command completes or fails. Terminal state is
+cleaned up on exit.
 
-For `stage` and `commit` on success, the terminal renders a green circle with
-the literal `git <args>` command followed by any non-empty stdout. On failure
-it renders a red circle with `git <args> failed (exit N)` and then any stderr
-and stdout diagnostics. In no-color/non-TTY contexts the same information is
-shown as plain text.
+For `action: "list"`, success renders a formatted status view with sections for
+the branch, staged changes, unstaged changes, and untracked files. Section
+headers and status codes use colors/icons in TTY mode and degrade to plain
+text otherwise. A clean working tree renders an explicit
+`working tree clean` empty-state. A non-zero git exit renders a red circle
+with `git status failed (exit N)` followed by any stderr then stdout
+diagnostics; a successful status command still appends any non-empty stderr
+after the status sections.
+
+For `stage` and `commit`, success renders `Git('stage')` or `Git('commit')`
+followed by a green circle and captured stdout; stderr is included only when
+non-empty. Failure renders a red circle with the error message or `exit N`,
+followed by stderr and stdout diagnostics when present. In no-color/non-TTY
+contexts the circles and colors degrade to plain text while statuses and
+streams are still shown. No `[SUCCESS]` or `[ERROR]` text prefix is ever
+emitted for a tool call.
 
 ## Error handling
 

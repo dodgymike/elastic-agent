@@ -39,19 +39,25 @@ Each usage file must include the following sections, in order:
    meaning.
 5. `## Optional parameters` — omit this section when the tool has none.
 6. `## Result` — exactly what a successful call returns.
-7. `## Error handling` — whether failures throw or are returned as values, and
+7. `## Formatted terminal output` — the circle-based terminal rendering for
+   the tool (success/error circle and result/stream ordering) and the
+   in-place elapsed timer behavior.
+8. `## Error handling` — whether failures throw or are returned as values, and
    how the caller should recover.
-8. `## Critical operating constraints` — invariants that must always be
+9. `## Critical operating constraints` — invariants that must always be
    honored (hash/overwrite rules, path requirements, secret handling,
    sequencing, non-zero exit codes, etc.).
-9. `## Safe use` — explicit guardrails with **Allowed**, **Denied**,
-   **Dangerous examples (do not run)**, and **Required permissions**.
-10. `## Examples` — one to three minimal, correct examples.
+10. `## Safe use` — explicit guardrails with **Allowed**, **Denied**,
+    **Dangerous examples (do not run)**, and **Required permissions**.
+11. `## Examples` — one to three minimal, correct examples.
 
 ## Writing rules
 
 - Describe only the contract the tool actually implements; do not invent
   parameters, flags, or guarantees.
+- Describe terminal rendering with the circle-based format (`ToolName(args)`
+  followed by a green or red circle) and mention the in-place elapsed timer;
+  do not show legacy `[SUCCESS]`/`[ERROR]`/`[TOOL] Pending:` prefixes.
 - Keep the file short enough to be read before the first call to the tool.
 - Never include credentials, secrets, or instructions to read `data.json`.
 - Use the exact parameter names and types from the tool schema.
@@ -82,6 +88,11 @@ Each usage file must include the following sections, in order:
 ## Result
 
 <what a successful call returns>
+
+## Formatted terminal output
+
+<circle-based rendering (`ToolName(args)` plus a green or red circle) and the
+in-place elapsed timer behavior>
 
 ## Error handling
 

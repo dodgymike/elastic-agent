@@ -33,6 +33,20 @@ Prefer `Edit` for small, in-place changes. When the target already exists,
 On success the promise resolves with no return value (`undefined`). The file at
 `path` then contains exactly `content` (UTF-8).
 
+## Formatted terminal output
+
+The runtime first announces the call as `Write({...})`. While the write runs,
+an in-place timer line ticks on the same terminal line (for example `⏱ 0.50s`
+in color mode, or `elapsed 0.50s` in non-TTY logs) and is finalized with the
+total elapsed time when the call completes or fails. Terminal state is cleaned
+up on exit.
+
+On completion the terminal renders `Write({...})` followed by a green circle on
+success (Write resolves with no return value), or a red circle and the error
+message on failure. In no-color/non-TTY contexts the circle degrades to plain
+text while the status is still shown. No `[SUCCESS]` or `[ERROR]` text prefix
+is ever emitted for a tool call.
+
 ## Error handling
 
 - File exists and `overwrite` is not `true`: throws `overwrite must be true`.

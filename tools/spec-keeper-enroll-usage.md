@@ -26,6 +26,21 @@ An enrollment recipe containing:
 - `region?`, `client_id?`
 - `recipe` (object with the full credential set)
 
+## Formatted terminal output
+
+The runtime first announces the call as `SpecKeeperEnroll(...)`. While the
+request runs, an in-place timer line ticks on the same terminal line (for
+example `⏱ 0.50s` in color mode, or `elapsed 0.50s` in non-TTY logs) and is
+finalized with the total elapsed time when the call completes or fails.
+Terminal state is cleaned up on exit.
+
+On completion the terminal renders the call label followed by a green circle
+on success or a red circle with the error message on failure. In
+no-color/non-TTY contexts the circle degrades to plain text while the status
+is still shown. No `[SUCCESS]` or `[ERROR]` text prefix is ever emitted for a
+tool call. The enrollment token and returned recipe remain secrets and must
+never be written to the repository, notes, or handoffs.
+
 ## Error handling
 
 - Missing or non-string `token`: `TypeError` (from `token.trim()`); the schema

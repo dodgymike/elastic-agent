@@ -23,6 +23,20 @@ An array of entries, each with:
 - `parentPath` (string): the directory that was listed.
 - `path` (string): `parentPath/name`.
 
+## Formatted terminal output
+
+The runtime first announces the call as `ListDirectory({...})`. While the call
+runs, an in-place timer line ticks on the same terminal line (for example
+`⏱ 0.50s` in color mode, or `elapsed 0.50s` in non-TTY logs) and is finalized
+with the total elapsed time when the call completes or fails. Terminal state
+is cleaned up on exit.
+
+On completion the terminal renders `ListDirectory({...})` followed by a green
+circle and a short result summary on success, or a red circle and the error
+message on failure. In no-color/non-TTY contexts the circle degrades to plain
+text while the status and summary are still shown. No `[SUCCESS]` or `[ERROR]`
+text prefix is ever emitted for a tool call.
+
 ## Error handling
 
 - Invalid `directory` value: `TypeError`.
