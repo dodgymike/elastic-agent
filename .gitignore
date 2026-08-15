@@ -26,6 +26,11 @@ test/.loop-queue-build/
 test/.loop-poll-build/
 test/.loop-replan-build/
 test/.compile-verify/
+test/.compile-verify-2/
+test/.loop-mode-build-verify/
+test/.loop-poll-build-verify/
+test/.loop-replan-build-verify/
+test/.loop-queue-build-verify/
 test/.dt-verify/
 
 # Agent execution worktrees; keep the staging copies out of the repository.

@@ -8,11 +8,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BUS_QUEUE_FILENAME } from "../loop-queue.js";
 import {
+  DEFAULT_LOOP_MAX_IDLE_POLLS,
   DEFAULT_LOOP_POLL_INTERVAL_MS,
   DEFAULT_LOOP_POLL_REQUEST_TIMEOUT_MS,
   MIN_LOOP_POLL_INTERVAL_MS,
   normalizeAgentBusMessages,
   pollLoopBusOnce,
+  pollLoopBusUntilMessage,
+  resolveLoopMaxIdlePolls,
   resolveLoopPollTiming,
   routeAgentBusMessages,
   sleepFor,
@@ -163,6 +166,90 @@ async function main(): Promise<void> {
       check("failed read yields no relevant messages", result.relevantMessages.length === 0);
       check("failed read queues nothing", result.queuedCount === 0);
       check("failed read summary says continuing", /continuing normal execution/.test(result.summary));
+    }
+
+    // ------------------------------------------------------------------
+    // 8. resolveLoopMaxIdlePolls resolves the idle-wait cap.
+    // ------------------------------------------------------------------
+    {
+      const previous = process.env.LOOP_MAX_IDLE_POLLS;
+      try {
+        process.env.LOOP_MAX_IDLE_POLLS = "7";
+        check("env idle-poll cap is honored", resolveLoopMaxIdlePolls() === 7);
+        check("explicit exceeding env wins", resolveLoopMaxIdlePolls(3) === 3);
+        check("explicit zero means unlimited", resolveLoopMaxIdlePolls(0) === 0);
+      } finally {
+        if (previous === undefined) delete process.env.LOOP_MAX_IDLE_POLLS;
+        else process.env.LOOP_MAX_IDLE_POLLS = previous;
+      }
+      check("default idle-poll cap is unlimited (0)", resolveLoopMaxIdlePolls() === DEFAULT_LOOP_MAX_IDLE_POLLS);
+      check("non-numeric idle-poll cap falls back to default", resolveLoopMaxIdlePolls(Number.NaN, "nope") === DEFAULT_LOOP_MAX_IDLE_POLLS);
+      check("negative idle-poll cap falls back to default", resolveLoopMaxIdlePolls(-1) === DEFAULT_LOOP_MAX_IDLE_POLLS);
+      check("fractional idle-poll cap falls back to default", resolveLoopMaxIdlePolls(2.5) === DEFAULT_LOOP_MAX_IDLE_POLLS);
+    }
+
+    // ------------------------------------------------------------------
+    // 9. pollLoopBusUntilMessage waits for a relevant message (idle loop).
+    // ------------------------------------------------------------------
+    {
+      // The read returns an empty feed first, then a relevant directive on the
+      // second call — the idle loop must keep polling until it arrives.
+      const bodies = [
+        { messages: [{ text: "just a status note" }] },
+        { messages: [{ text: "please replan the approach" }] },
+      ];
+      let calls = 0;
+      let queueDuringIdle = 0;
+      const result = await pollLoopBusUntilMessage({
+        read: async () => ({ body: bodies[calls++], status: 200 }),
+        path: "/api/v1/messages",
+        queueFilePath: queuePath,
+        pollIntervalMs: 1,
+        context: {},
+        onPoll: (poll) => {
+          queueDuringIdle += poll.queuedCount;
+        },
+      });
+      check("idle loop found a relevant message", result.found === true);
+      check("idle loop reported the relevant message", result.relevantMessages.length === 1);
+      check("idle loop polled more than once", result.polls >= 2);
+      // The irrelevant note arriving during the first idle poll was persisted.
+      check("irrelevant message arriving while idle was queued", queueDuringIdle === 1 && readQueued(queuePath).length >= 1);
+    }
+
+    // ------------------------------------------------------------------
+    // 10. pollLoopBusUntilMessage respects the maxIdlePolls bound.
+    // ------------------------------------------------------------------
+    {
+      const result = await pollLoopBusUntilMessage({
+        read: async () => ({ body: { messages: [{ text: "no directive at all" }] }, status: 200 }),
+        path: "/api/v1/messages",
+        queueFilePath: queuePath,
+        pollIntervalMs: 1,
+        maxIdlePolls: 2,
+        context: {},
+      });
+      check("idle loop stopped at the max idle-poll cap", result.maxIdlePollsReached === true);
+      check("idle loop found nothing before the cap", result.found === false);
+      check("idle loop performed the capped number of polls", result.polls === 2);
+    }
+
+    // ------------------------------------------------------------------
+    // 11. pollLoopBusUntilMessage stops on an aborted signal.
+    // ------------------------------------------------------------------
+    {
+      const controller = new AbortController();
+      controller.abort();
+      const result = await pollLoopBusUntilMessage({
+        read: async () => ({ body: { messages: [] }, status: 200 }),
+        path: "/api/v1/messages",
+        queueFilePath: queuePath,
+        pollIntervalMs: 1,
+        signal: controller.signal,
+        context: {},
+      });
+      check("idle loop stopped because the signal fired", result.aborted === true);
+      check("aborted idle loop found nothing", result.found === false && result.relevantMessages.length === 0);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

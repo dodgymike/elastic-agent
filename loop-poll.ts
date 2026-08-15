@@ -47,6 +47,43 @@ export const DEFAULT_LOOP_POLL_REQUEST_TIMEOUT_MS = 2_000;
 /** One millisecond used for `setTimeout` resolves in poll-loop timing. */
 const TICK_MS = 1;
 
+/**
+ * Default cap on how many consecutive idle polls a single loop-mode run may
+ * perform before giving up. `0` means "wait indefinitely" (the loop keeps
+ * polling until a relevant message arrives or the run is aborted). Bounding
+ * it to a small positive number is mainly for tests so an idle wait cannot
+ * hang the test run forever.
+ */
+export const DEFAULT_LOOP_MAX_IDLE_POLLS = 0;
+
+/** Smallest allowed positive idle-poll cap, to avoid an accidental empty wait. */
+export const MIN_LOOP_IDLE_POLLS = 1;
+
+/**
+ * Environment variable that overrides the loop-mode idle-poll cap. `0` or
+ * unset means wait indefinitely; a positive value bounds how many idle polls
+ * a run performs before stopping.
+ */
+export const LOOP_MAX_IDLE_POLLS_ENV = "LOOP_MAX_IDLE_POLLS";
+
+/**
+ * Resolve the idle-poll cap from an explicit value or the
+ * `LOOP_MAX_IDLE_POLLS` environment variable. `0` means "wait indefinitely"
+ * (the default); any positive integer is honored as a bound. Non-numeric or
+ * negative values fall back to the default rather than throwing, so a
+ * misconfigured environment never blocks loop mode.
+ */
+export function resolveLoopMaxIdlePolls(
+  explicit?: number,
+  env: string | undefined = process.env[LOOP_MAX_IDLE_POLLS_ENV],
+): number {
+  const source = explicit !== undefined ? explicit : Number(env);
+  if (Number.isInteger(source) && source >= 0) {
+    return source;
+  }
+  return DEFAULT_LOOP_MAX_IDLE_POLLS;
+}
+
 export interface ResolvedLoopPollTiming {
   readonly pollIntervalMs: number;
   readonly requestTimeoutMs: number;
@@ -276,4 +313,81 @@ export async function pollLoopBusOnce(options: PollLoopBusOnceOptions): Promise<
     summary,
     warnings,
   };
+}
+
+export interface PollLoopUntilMessageOptions extends PollLoopBusOnceOptions {
+  /** How long to wait between idle polls (defaults to the poll interval). */
+  readonly pollIntervalMs?: number;
+  /**
+   * Cap on consecutive idle polls. `0` (the default) means wait indefinitely
+   * until a relevant message arrives or `signal` is aborted; a positive value
+   * bounds the wait so tests cannot hang forever.
+   */
+  readonly maxIdlePolls?: number;
+  /** When aborted, the idle wait stops and returns `aborted: true`. */
+  readonly signal?: AbortSignal;
+  /**
+   * Optional callback invoked after each poll with its result, so the caller
+   * can surface per-poll diagnostics (for example soft bus-read failures or
+   * messages queued while idle). The callback must not throw.
+   */
+  readonly onPoll?: (result: PollLoopBusOnceResult, pollNumber: number) => void;
+}
+
+export interface PollLoopUntilMessageResult {
+  /** True when a relevant message arrived during the idle wait. */
+  readonly found: boolean;
+  /** The relevant messages, when any arrived (empty otherwise). */
+  readonly relevantMessages: readonly unknown[];
+  /** How many polls the idle wait performed before finishing. */
+  readonly polls: number;
+  /** True when the wait stopped because the positive idle-poll cap was hit. */
+  readonly maxIdlePollsReached: boolean;
+  /** True when the wait stopped because the abort signal fired. */
+  readonly aborted: boolean;
+}
+
+/**
+ * Loop on the Agent Bus feed, waiting for a *relevant* message to arrive.
+ *
+ * This is the "keep the agent alive and keep listening" half of loop mode: it
+ * repeatedly performs a single `pollLoopBusOnce` (which classifies every
+ * message and durably enqueues the irrelevant ones) and sleeps `pollIntervalMs`
+ * between polls. It returns as soon as one or more relevant messages arrive —
+ * the caller decides whether to interrupt execution and re-plan with them.
+ * Irrelevant messages arriving meanwhile are never dropped: each poll persists
+ * them to the durable queue via `pollLoopBusOnce`.
+ *
+ * The wait is bounded by `maxIdlePolls` (`0` = unlimited) and by the optional
+ * abort `signal`, so a busy run can be interrupted and a test can avoid an
+ * infinite hang. Transport/unconfiguration failures are soft (each poll treats
+ * them as a no-op and keeps waiting), so a temporarily unreachable bus does not
+ * kill loop mode — it just keeps polling.
+ */
+export async function pollLoopBusUntilMessage(
+  options: PollLoopUntilMessageOptions,
+): Promise<PollLoopUntilMessageResult> {
+  const maxIdlePolls = options.maxIdlePolls ?? DEFAULT_LOOP_MAX_IDLE_POLLS;
+  const pollIntervalMs = options.pollIntervalMs ?? options.requestTimeoutMs ?? DEFAULT_LOOP_POLL_INTERVAL_MS;
+  let polls = 0;
+
+  while (true) {
+    if (options.signal?.aborted) {
+      return { found: false, relevantMessages: [], polls, maxIdlePollsReached: false, aborted: true };
+    }
+    const result = await pollLoopBusOnce(options);
+    polls += 1;
+    try {
+      options.onPoll?.(result, polls);
+    } catch {
+      // A reporter must never break the idle loop.
+    }
+    if (result.relevantMessages.length > 0) {
+      return { found: true, relevantMessages: result.relevantMessages, polls, maxIdlePollsReached: false, aborted: false };
+    }
+    if (maxIdlePolls > 0 && polls >= maxIdlePolls) {
+      return { found: false, relevantMessages: [], polls, maxIdlePollsReached: true, aborted: false };
+    }
+    await sleepFor(pollIntervalMs);
+  }
 }

@@ -1,10 +1,13 @@
 # Loop mode (`--loop`)
 
 Loop mode lets the runtime keep running after it starts a plan and watch the
-Agent Bus between execution steps. Incoming coordination messages are
-classified at each step boundary and either interrupt the work order (a
-*relevant* message triggers a re-plan) or are persisted to a durable queue for
-later (an *irrelevant* message never disturbs the plan in flight).
+Agent Bus between execution steps **and while idle between plans**. Incoming
+coordination messages are classified at each step boundary and either interrupt
+the work order (a *relevant* message triggers a re-plan) or are persisted to a
+durable queue for later (an *irrelevant* message never disturbs the plan in
+flight). After a plan finishes, the agent does not exit: it keeps polling the
+bus waiting for new work, so it stays "listening" — exactly the behavior of a
+long-lived coordination agent.
 
 This document describes the CLI surface, the classification rule, the durable
 queue, the between-step poll loop, and the re-planning safety guard. The
@@ -114,6 +117,10 @@ re-plan.
 - `routeAgentBusMessages` classifies a batch and enqueues the irrelevant ones.
 - `pollLoopBusOnce` orchestrates one poll through an injectable `read`
   dependency so it is fully unit-testable without a network.
+- `pollLoopBusUntilMessage` *loops on the feed*, sleeping `pollIntervalMs`
+  between polls and waiting until a relevant message arrives (or the wait is
+  bounded/aborted). This is the "keep listening" primitive used while idle
+  between plans.
 
 Poll timing:
 
@@ -121,11 +128,34 @@ Poll timing:
 | ------- | ------- | ------- | ----- |
 | Poll interval | `LOOP_POLL_INTERVAL_MS` | `5000` | Minimum `100`; enforced to avoid a hot-loop. |
 | Per-poll request timeout | `LOOP_POLL_REQUEST_TIMEOUT_MS` | `2000` | One hung bus read never blocks a step boundary indefinitely. |
+| Idle-wait cap | `LOOP_MAX_IDLE_POLLS` | `0` | `0` waits indefinitely (until a relevant message or Ctrl-C); a positive integer bounds how many idle polls a run performs. |
 | Feed path | `LOOP_BUS_MESSAGES_PATH` | `/api/v1/messages` | Route read from the Agent Bus. |
 
 Soft-failure contract: a missing/malformed queue file or an unreachable bus is
 reported as a warning and loop mode fails **open** to normal execution rather
-than crashing a step boundary.
+than crashing a step boundary. During the idle wait an unreachable bus is a
+soft no-op: loop mode keeps polling instead of crashing, so a temporarily
+unavailable bus never kills the agent.
+
+---
+
+## Idle listening between plans
+
+When a plan completes with no relevant message pending, loop mode does **not**
+exit. `runAgentReplanLoop` (in `main.ts`) enters an idle-wait that keeps polling
+the Agent Bus via `pollLoopBusUntilMessage`:
+
+- Each idle poll classifies every message; irrelevant ones are queued durably
+  and never dropped.
+- When a *relevant* message arrives while idle, it becomes the pending replan
+  directive and the agent re-enters planning with it as the new work order —
+  the same replan path (budget + safety guard) used for step-boundary messages.
+- The idle wait continues until a relevant message arrives, `LOOP_MAX_IDLE_POLLS`
+  is exhausted (when set to a positive value), or the run is interrupted
+  (Ctrl-C / SIGTERM routes through the normal abort handler).
+
+This is what makes `--loop` a true long-lived listener: it keeps watching the
+bus for new work after finishing a plan instead of stopping.
 
 ---
 
@@ -163,6 +193,7 @@ finishes or aborts.
 | Classification rule | `loop-mode.ts` | `loop-poll.ts`, `main.ts` |
 | Durable queue + drain | `loop-queue.ts` | `loop-poll.ts`, `main.ts` |
 | Between-step poll | `loop-poll.ts` | `main.ts` |
+| Idle listening loop | `loop-poll.ts` | `main.ts` (`runAgentReplanLoop`) |
 | Re-plan prompt + safety | `loop-replan.ts` | `main.ts` |
 
 ## Tests
@@ -176,5 +207,7 @@ Agent Bus is mocked — no network is touched):
 - `npm run test:loop-replan`
 
 They cover classification of relevant vs. queued messages, queue save/load,
-restart draining (including the fail-safe undrained tail), and re-plan
-invocation on a relevant message.
+restart draining (including the fail-safe undrained tail), re-plan invocation
+on a relevant message, and the idle-loop primitive
+(`pollLoopBusUntilMessage`: waiting for a relevant message, respecting the
+idle-poll cap, and stopping on abort).

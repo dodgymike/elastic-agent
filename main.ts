@@ -5,6 +5,8 @@ import { defaultBusQueueFilePath } from "./loop-queue.js";
 import { messageToSearchableText } from "./loop-mode.js";
 import {
     pollLoopBusOnce,
+    pollLoopBusUntilMessage,
+    resolveLoopMaxIdlePolls,
     resolveLoopPollTiming,
     type AgentBusRead,
 } from "./loop-poll.js";
@@ -2196,7 +2198,64 @@ async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } 
         throwIfAborted(abortController.signal, "cleanup");
         const outcome = await main(options);
         const hasPending = outcome.loopReplanPending === true && pendingLoopReplanMessages.length > 0;
-        if (!hasPending) return { success: outcome.success };
+
+        if (!hasPending) {
+            // The plan completed normally (nothing relevant arrived at a step
+            // boundary). Loop mode does not exit here: it keeps the agent alive
+            // and keeps polling the Agent Bus, waiting for a relevant message
+            // that should drive the next re-plan. Irrelevant messages arriving
+            // while idle are queued durably by the poll, never dropped. The
+            // wait is bounded by LOOP_MAX_IDLE_POLLS (default: wait until a
+            // relevant message arrives or the run is aborted) so the agent
+            // truly keeps listening between plans.
+            const idlePrefix = hierarchyIndent("plan");
+            const maxIdlePolls = resolveLoopMaxIdlePolls();
+            status.success(
+                "Loop mode: plan complete. Continuing to watch the Agent Bus for new work; press Ctrl-C to stop.",
+                idlePrefix,
+            );
+            const idle = await pollLoopBusUntilMessage({
+                read: loopBusRead,
+                path: loopBusMessagesPath,
+                requestTimeoutMs: loopPollTiming.requestTimeoutMs,
+                pollIntervalMs: loopPollTiming.pollIntervalMs,
+                queueFilePath: loopQueueFilePath,
+                context: { planId: runMode.mode === "task" ? runMode.taskId : undefined },
+                maxIdlePolls,
+                signal: abortController.signal,
+                onPoll: (result) => {
+                    for (const warning of result.warnings) {
+                        if (result.readFailed) {
+                            status.warning(`loop poll: ${warning}`, idlePrefix);
+                        }
+                    }
+                    if (!result.readFailed && result.queuedCount > 0) {
+                        status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, idlePrefix);
+                    }
+                },
+            });
+
+            if (idle.aborted) {
+                // A SIGINT/SIGTERM interrupted the idle wait; route through the
+                // abort handler so cleanup and finalization run normally.
+                throwIfAborted(abortController.signal, "cleanup");
+            }
+            if (idle.maxIdlePollsReached) {
+                status.replan(
+                    `Loop mode: idle-wait ceiling of ${maxIdlePolls} poll(s) reached with no relevant message; stopping.`,
+                    idlePrefix,
+                );
+                return { success: outcome.success };
+            }
+
+            // A relevant message arrived while idle: surface it as a pending
+            // re-plan so the replan handling below re-enters planning with it.
+            pendingLoopReplanMessages = [...idle.relevantMessages];
+            for (const relevant of idle.relevantMessages) {
+                const text = truncate(messageToSearchableText(relevant as { text?: string }), 240);
+                status.replan(`Loop mode: detected a relevant bus message while idle, warranting a re-plan: ${text}`, idlePrefix);
+            }
+        }
 
         // A relevant message changed the plan: decide whether it is safe to
         // re-enter planning on top of the preserved work.
