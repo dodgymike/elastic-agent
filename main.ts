@@ -3,10 +3,20 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
-import { RunAbortError, throwIfAborted, type RunAbortKind, type RunAbortPhase } from "./llm/run-abort.js";
+import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
-import { extractJsonFromResponse, parsePlanOrAbort, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { parsePlanOrAbort, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
+import {
+    nextConsecutiveNoProgressReplans,
+    parseReplanResponse,
+    recordReplanElapsedAndAssertBudget,
+    replanRemainingKey,
+    throwIfConsecutiveNoProgressReplansReached,
+    throwIfReplanAttemptLimitReached,
+    throwIfReplanTimeBudgetExceeded,
+} from "./llm/replan-abort.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
 import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
@@ -116,7 +126,6 @@ const maxPlanParseRetries = 1;
 const maxReviewParseRetries = 2;
 const maxReviewAttempts = 3;
 const maxRevisedPlanSteps = 50;
-const abortReasonMaxLength = 400;
 // Execution worktree: plan steps stage their changes in a dedicated worktree
 // (git add --all) and never commit. The worktree is kept alive across review
 // attempts so the review step can inspect the staged changes before committing.
@@ -167,15 +176,6 @@ const status = {
 };
 
 /**
- * Bound and flatten an abort reason before it is printed or stored. Abort
- * reasons must never leak secrets or unbounded response bodies, and the
- * single-line replacement keeps the indented [ABORT] block intact.
- */
-function boundedAbortReason(reason: string): string {
-    return truncate(String(reason).replace(/\s+/g, " ").trim(), abortReasonMaxLength);
-}
-
-/**
  * Persist a `lastAbort` entry on the run config before exiting. The entry is
  * bounded and secret-safe so a later run can report what aborted without
  * leaking model or tool payloads. Uses the existing saveData behavior, which
@@ -208,28 +208,6 @@ function throwIfProviderCancelled(response: { finishReason?: string }, phase: Ru
             step === undefined ? undefined : { step },
         );
     }
-}
-
-const ABORT_STATE_LABELS: Readonly<Record<RunAbortKind, string>> = {
-    user: "Aborted by user",
-    "unable-to-complete": "LLM could not complete the request",
-    stuck: "Plan is stuck",
-};
-
-/**
- * Render the concise indented abort block defined by ABORT_SEMANTICS.md
- * section 6. The heading uses the [ABORT] label and the detail lines are
- * indented to the plan level so they align with the existing console scheme.
- */
-function abortBlockText(error: RunAbortError): string {
-    const detailIndent = hierarchyIndent("plan");
-    return [
-        ABORT_STATE_LABELS[error.kind],
-        `${detailIndent}phase: ${error.phase}`,
-        `${detailIndent}step: ${error.step ?? "-"}`,
-        `${detailIndent}reason: ${boundedAbortReason(error.message)}`,
-        `${detailIndent}exit code: ${error.exitCode}`,
-    ].join("\n");
 }
 
 /**
@@ -864,80 +842,6 @@ function actionablePlanSteps(plan) {
     return { valid: true, steps };
 }
 
-/**
- * Parse a replan response. The replan prompt now asks for JSON with either a
- * revised `steps` array or the explicit abort object. `abort: true` wins when
- * both are present, matching ABORT_SEMANTICS.md section 4.1.
- */
-function parseReplanResponse(text) {
-    let extracted;
-    try {
-        extracted = extractJsonFromResponse(text);
-    } catch (error) {
-        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
-    }
-
-    let parsed;
-    try {
-        parsed = JSON.parse(extracted);
-    } catch (error) {
-        return { valid: false, reason: `Replan response JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
-    }
-
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { valid: false, reason: "Replan response must be a JSON object." };
-    }
-
-    if (Object.prototype.hasOwnProperty.call(parsed, "abort")) {
-        if (typeof parsed.abort !== "boolean") return { valid: false, reason: "Replan response 'abort' must be a boolean." };
-        if (parsed.abort === true) {
-            const reason = typeof parsed.reason === "string" ? parsed.reason.trim() : "";
-            if (!reason) return { valid: false, reason: "An aborted replan response must provide a non-empty 'reason'." };
-            return { valid: true, abort: true, reason };
-        }
-    }
-
-    if (!Array.isArray(parsed.steps)) return { valid: false, reason: "Replan response JSON must contain a 'steps' array." };
-    if (parsed.steps.length === 0) return { valid: false, reason: "The revised plan must contain at least one step." };
-    if (parsed.steps.length > maxRevisedPlanSteps) return { valid: false, reason: `The revised plan has more than ${maxRevisedPlanSteps} steps.` };
-    const steps = parsed.steps.map((step) => typeof step === "string" ? step.trim() : "");
-    if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
-    return { valid: true, abort: false, steps };
-}
-
-/** Normalized key of the remaining plan used for duplicate/no-progress detection. */
-function replanRemainingKey(activeSteps, completedStepCount) {
-    return activeSteps.slice(completedStepCount + 1).map((step) => String(step ?? "").trim()).filter(Boolean).join("\n");
-}
-
-function throwIfReplanAttemptLimitReached(configData, step) {
-    if ((configData.replanAttemptCount ?? 0) >= maxReplanAttempts) {
-        throw new RunAbortError(
-            "stuck",
-            "replan",
-            `replan attempt limit reached (${maxReplanAttempts}/${maxReplanAttempts}) while step ${step} still requires replanning`,
-            { step },
-        );
-    }
-}
-
-function throwIfReplanTimeBudgetExceeded(configData, step) {
-    const elapsed = configData.replanElapsedMs ?? 0;
-    if (elapsed >= maxReplanDurationMs) {
-        throw new RunAbortError("stuck", "replan", `replan time budget exceeded (${maxReplanDurationMs} ms)`, { step });
-    }
-}
-
-/**
- * Add the wall-clock time spent inside the current replan attempt to the run
- * total and enforce the replan time budget. Called after an attempt returns so
- * a successful parse cannot hide an exhausted budget.
- */
-function recordReplanElapsedAndAssertBudget(configData, step, startedAt) {
-    configData.replanElapsedMs = (configData.replanElapsedMs ?? 0) + (Date.now() - startedAt);
-    throwIfReplanTimeBudgetExceeded(configData, step);
-}
-
 async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, configData) {
     const step = completedStepCount + 1;
     throwIfAborted(abortController.signal, "replan", step);
@@ -950,8 +854,8 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         return { attempted: false, applied: false, reason: "No remaining plan steps." };
     }
 
-    throwIfReplanAttemptLimitReached(configData, step);
-    throwIfReplanTimeBudgetExceeded(configData, step);
+    throwIfReplanAttemptLimitReached(configData, step, maxReplanAttempts);
+    throwIfReplanTimeBudgetExceeded(configData, step, maxReplanDurationMs);
 
     const beforeKey = replanRemainingKey(activeSteps, completedStepCount);
     const attemptStart = Date.now();
@@ -981,11 +885,10 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                 activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
                 const afterKey = replanRemainingKey(activeSteps, completedStepCount);
                 const progressed = afterKey !== beforeKey;
-                if (progressed) {
-                    configData.consecutiveNoProgressReplans = 0;
-                } else {
-                    configData.consecutiveNoProgressReplans = (configData.consecutiveNoProgressReplans ?? 0) + 1;
-                }
+                configData.consecutiveNoProgressReplans = nextConsecutiveNoProgressReplans(
+                    progressed,
+                    configData.consecutiveNoProgressReplans ?? 0,
+                );
                 configData.replanHistory.push({
                     attempt,
                     response_id: response.id,
@@ -994,10 +897,8 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                     replacementStepCount: revisedSteps.length,
                     noProgress: !progressed,
                 });
-                recordReplanElapsedAndAssertBudget(configData, step, attemptStart);
-                if ((configData.consecutiveNoProgressReplans ?? 0) >= maxConsecutiveNoProgressReplans) {
-                    throw new RunAbortError("stuck", "replan", `no progress after ${maxConsecutiveNoProgressReplans} consecutive identical replans`, { step });
-                }
+                recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
+                throwIfConsecutiveNoProgressReplansReached(configData.consecutiveNoProgressReplans ?? 0, maxConsecutiveNoProgressReplans, step);
                 status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
                 return { attempted: true, applied: true, steps: revisedSteps };
             }
@@ -1017,7 +918,7 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         throwIfAborted(abortController.signal, "replan", step);
         if (error instanceof RunAbortError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
-        recordReplanElapsedAndAssertBudget(configData, step, attemptStart);
+        recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
         configData.replanHistory.push({ attempt, reason: feedback.replanReason, applied: false, failure: reason });
         status.warning(`Replan request failed; keeping the existing remaining plan: ${reason}`, hierarchyIndent("contentInStep"));
         return { attempted: true, applied: false, reason };
