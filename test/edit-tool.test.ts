@@ -96,6 +96,83 @@ async function main(): Promise<void> {
     let badHashError = "";
     try { await Edit({ path: target, read_hash: "not-a-hash", old_string: "A", new_string: "X" }); } catch (e) { badHashError = e instanceof Error ? e.message : String(e); }
     check("malformed read_hash is rejected", badHashError.length > 0 && /64 hexadecimal/i.test(badHashError));
+
+    // 7. line_range mode replaces exactly the requested 1-based lines.
+    const rangeTarget = join(dir, "range.txt");
+    writeFileSync(rangeTarget, "one\ntwo\nthree\nfour\nfive\n");
+    const rangeRead = await readFileTool(rangeTarget);
+    assert.equal(rangeRead.error, undefined, "Read should succeed on the line-range file");
+    const rangeEdit = await Edit({
+      path: rangeTarget,
+      read_hash: rangeRead.read_hash,
+      line_range: "2-4",
+      content: "TWO\nthree-and-a-half\n",
+    });
+    check("line_range replacement returns applied=1", rangeEdit.applied === 1);
+    check("line_range replacement rewrites only the selected lines", readFileSync(rangeTarget, "utf8") === "one\nTWO\nthree-and-a-half\nfive\n");
+    check("line_range replacement returns the new content", rangeEdit.content === readFileSync(rangeTarget, "utf8"));
+    check("line_range replacement returns a fresh 64-hex hash", /^[a-f0-9]{64}$/.test(rangeEdit.read_hash));
+
+    // 8. Single-line line_range and empty-content deletion both work.
+    const singleRange = await Edit({ path: rangeTarget, read_hash: rangeEdit.read_hash, line_range: "3", content: "THIRD" });
+    check("single-line line_range replaces one line", singleRange.applied === 1 && readFileSync(rangeTarget, "utf8") === "one\nTWO\nTHIRD\nfive\n");
+    const deleteRange = await Edit({ path: rangeTarget, read_hash: singleRange.read_hash, line_range: "2-3", content: "" });
+    check("empty line_range content deletes the selected lines", deleteRange.applied === 1 && readFileSync(rangeTarget, "utf8") === "one\nfive\n");
+
+    // 9. line_range rejects invalid combinations and formats.
+    const comboTarget = join(dir, "combo.txt");
+    writeFileSync(comboTarget, "a\nb\nc\nd\n");
+    const comboRead = await readFileTool(comboTarget);
+    let comboError = "";
+    try {
+      await Edit({ path: comboTarget, read_hash: comboRead.read_hash, line_range: "1-2", old_string: "a", new_string: "A", content: "x" });
+    } catch (e) { comboError = e instanceof Error ? e.message : String(e); }
+    check("line_range combined with string edit is rejected", comboError.length > 0 && /cannot be combined/i.test(comboError));
+
+    let contentOnlyError = "";
+    try { await Edit({ path: comboTarget, read_hash: comboRead.read_hash, content: "x" } as any); } catch (e) { contentOnlyError = e instanceof Error ? e.message : String(e); }
+    check("content without line_range is rejected", contentOnlyError.length > 0 && /only valid together with line_range/i.test(contentOnlyError));
+
+    let missingContentError = "";
+    try { await Edit({ path: comboTarget, read_hash: comboRead.read_hash, line_range: "1-2" } as any); } catch (e) { missingContentError = e instanceof Error ? e.message : String(e); }
+    check("line_range without content is rejected", missingContentError.length > 0 && /content must be a string/i.test(missingContentError));
+
+    let reversedRangeError = "";
+    try { await Edit({ path: comboTarget, read_hash: comboRead.read_hash, line_range: "3-2", content: "x" }); } catch (e) { reversedRangeError = e instanceof Error ? e.message : String(e); }
+    check("reversed line_range is rejected", reversedRangeError.length > 0 && /less than or equal/i.test(reversedRangeError));
+
+    let malformedRangeError = "";
+    try { await Edit({ path: comboTarget, read_hash: comboRead.read_hash, line_range: "1-2-3", content: "x" }); } catch (e) { malformedRangeError = e instanceof Error ? e.message : String(e); }
+    check("malformed line_range is rejected", malformedRangeError.length > 0 && /line_range must be/i.test(malformedRangeError));
+
+    let nonStringRangeError = "";
+    try { await Edit({ path: comboTarget, read_hash: comboRead.read_hash, line_range: 123, content: "x" } as any); } catch (e) { nonStringRangeError = e instanceof Error ? e.message : String(e); }
+    check("non-string line_range is rejected", nonStringRangeError.length > 0 && /non-empty string/i.test(nonStringRangeError));
+
+    let beyondLinesError = "";
+    try { await Edit({ path: comboTarget, read_hash: comboRead.read_hash, line_range: "3-10", content: "x" }); } catch (e) { beyondLinesError = e instanceof Error ? e.message : String(e); }
+    check("line_range end beyond the total line count is rejected", beyondLinesError.length > 0 && /total line count 4/i.test(beyondLinesError));
+
+    // 10. A stale read_hash is rejected in line_range mode and the file stays unchanged.
+    const staleTarget = join(dir, "stale-range.txt");
+    writeFileSync(staleTarget, "r1\nr2\nr3\nr4\n");
+    const staleRead = await readFileTool(staleTarget);
+    await Edit({ path: staleTarget, read_hash: staleRead.read_hash, old_string: "r2", new_string: "R2" });
+    const staleBefore = readFileSync(staleTarget, "utf8");
+    let staleRangeError = "";
+    try {
+      await Edit({ path: staleTarget, read_hash: staleRead.read_hash, line_range: "3-4", content: "new" });
+    } catch (e) { staleRangeError = e instanceof Error ? e.message : String(e); }
+    check("stale read_hash is rejected in line_range mode", staleRangeError.length > 0 && /changed since it was read/i.test(staleRangeError));
+    check("stale line_range edit leaves the file unchanged", readFileSync(staleTarget, "utf8") === staleBefore);
+
+    // 11. A valid-format but mismatched read_hash is rejected before any write.
+    let mismatchedRangeError = "";
+    try {
+      await Edit({ path: staleTarget, read_hash: "0".repeat(64), line_range: "3-4", content: "new" });
+    } catch (e) { mismatchedRangeError = e instanceof Error ? e.message : String(e); }
+    check("mismatched read_hash is rejected in line_range mode", mismatchedRangeError.length > 0 && /changed since it was read/i.test(mismatchedRangeError));
+    check("mismatched line_range edit leaves the file unchanged", readFileSync(staleTarget, "utf8") === staleBefore);
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
   }

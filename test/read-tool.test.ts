@@ -134,6 +134,24 @@ async function main(): Promise<void> {
     const emptySize = await FileSize({ path: emptyFile });
     const emptyRange = await Read({ path: emptyFile, file_size: emptySize.size, read_offset: 0, read_length: 1, line_range: "1-1" });
     check("line_range on an empty file is rejected", emptyRange.error !== undefined && /file has no lines/.test(String(emptyRange.error)));
+
+    // 16. line_range plus only one byte-window parameter is rejected, because
+    //     read_offset and read_length must always be supplied together.
+    const offsetOnlyRange = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, line_range: "1-2" } as any);
+    check("line_range with read_offset only is rejected", offsetOnlyRange.error !== undefined && /supplied together/.test(String(offsetOnlyRange.error)));
+    const lengthOnlyRange = await Read({ path: numbered, file_size: numberedSize.size, read_length: numberedSize.size, line_range: "1-2" } as any);
+    check("line_range with read_length only is rejected", lengthOnlyRange.error !== undefined && /supplied together/.test(String(lengthOnlyRange.error)));
+
+    // 17. Optional read_hash validation returns content only when the hash matches.
+    const numberedHash = createHash("sha256").update(readFileSync(numbered)).digest("hex");
+    const matchingHashRead = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, read_hash: numberedHash });
+    check("matching read_hash returns content", matchingHashRead.error === undefined && matchingHashRead.content === numberedText);
+    const mismatchedHashRead = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, read_hash: "0".repeat(64) });
+    check("mismatched read_hash is rejected with the actual hash", mismatchedHashRead.error !== undefined && /File has changed/.test(String(mismatchedHashRead.error)) && mismatchedHashRead.read_hash === numberedHash);
+    const malformedHashRead = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, read_hash: "not-a-hash" });
+    check("malformed read_hash is rejected", malformedHashRead.error !== undefined && /File has changed/.test(String(malformedHashRead.error)));
+    const hashWithLineRange = await Read({ path: numbered, file_size: numberedSize.size, line_range: "2-4", read_hash: numberedHash } as any);
+    check("matching read_hash with line_range returns only the requested lines", hashWithLineRange.error === undefined && hashWithLineRange.content === "line2\nline3\nline4");
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
   }
