@@ -42,7 +42,7 @@ import type { TaskWorkOrder } from "./specKeeperTaskFetch.ts";
 import { claimSpecKeeperTask, describeClaimedSpecKeeperTask } from "./specKeeperTaskClaim.ts";
 import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperTaskPrompt.ts";
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
-import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
+import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
 import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
@@ -125,6 +125,11 @@ const mainCwd = process.cwd();
 let executionWorktreePath: string | null = null;
 let inExecutionPhase = false;
 let activeTaskLifecycle: any = null;
+let activeConfigData: any = null;
+let activePromptSpecKeeperState: any = null;
+let activePromptEpic: any = null;
+let activePromptSpecKeeperOptions: any = null;
+let mainCheckoutMayHavePartialWork = false;
 // Prompts are loaded from external files under /elastic-agent/prompts/
 // (relative to the process working directory, which is the repository root).
 const planningSuffix = readFileSync("prompts/planning-suffix.txt", "utf-8");
@@ -168,6 +173,24 @@ const status = {
  */
 function boundedAbortReason(reason: string): string {
     return truncate(String(reason).replace(/\s+/g, " ").trim(), abortReasonMaxLength);
+}
+
+/**
+ * Persist a `lastAbort` entry on the run config before exiting. The entry is
+ * bounded and secret-safe so a later run can report what aborted without
+ * leaking model or tool payloads. Uses the existing saveData behavior, which
+ * is best-effort and never throws.
+ */
+function recordLastAbort(configData: any, error: RunAbortError): void {
+    if (!configData) return;
+    configData.lastAbort = {
+        kind: error.kind,
+        phase: error.phase,
+        step: error.step ?? null,
+        reason: boundedAbortReason(error.message),
+        timestamp: new Date().toISOString(),
+    };
+    saveData(configData);
 }
 
 /**
@@ -645,6 +668,46 @@ async function finalizeTaskModeFailure(taskLifecycle: any, diagnostic: string): 
     const result = await failSpecKeeperTask(taskLifecycle.taskId, diagnostic, taskLifecycle.options);
     logTaskFinalizationDiagnostics(taskLifecycle.taskId, result);
     status.specKeeper(`task ${taskLifecycle.taskId} ${result.status} (note=${result.noteRecorded ? "recorded" : "failed"}, proof=${result.proofMethod}).`);
+}
+
+/**
+ * Mark the active task-mode Spec Keeper task blocked with the abort reason in
+ * the exact note form `Aborted (<kind>): <bounded reason>`. Finalization is
+ * best-effort and never throws, and a failed update must not change the abort
+ * exit code or mask the abort reason.
+ */
+async function finalizeTaskModeAbort(taskLifecycle: any, error: RunAbortError): Promise<void> {
+    if (!taskLifecycle || taskLifecycle.finalized) return;
+    taskLifecycle.finalized = true;
+    const result = await abortSpecKeeperTask(taskLifecycle.taskId, error.kind, boundedAbortReason(error.message), taskLifecycle.options);
+    logTaskFinalizationDiagnostics(taskLifecycle.taskId, result);
+    status.specKeeper(`task ${taskLifecycle.taskId} ${result.status} (note=${result.noteRecorded ? "recorded" : "failed"}, proof=${result.proofMethod}).`);
+}
+
+/**
+ * Apply the prompt-mode abort transition to any Spec Keeper artifacts created
+ * for this run: mark the epic, run task, and unfinished plan-step tasks
+ * blocked with the abort reason as the status note. Each update is best-effort
+ * through specKeeperSync, so failures are [WARNING]s and never change the
+ * abort exit code.
+ */
+async function finalizePromptSpecKeeperAbort(error: RunAbortError): Promise<void> {
+    const abortNote = `Aborted (${error.kind}): ${boundedAbortReason(error.message)}`;
+    const state = activePromptSpecKeeperState;
+    const options = state?.taskUpdateOptions ?? activePromptSpecKeeperOptions ?? {};
+    const epic = state?.epic ?? activePromptEpic;
+
+    if (epic) {
+        await specKeeperSync("epic blocked", async () => updateEpicStatus(epic, "blocked", options));
+    }
+    if (state?.runTask) {
+        await specKeeperSync("run task blocked", async () => updateTaskStatus(state.runTask, "blocked", abortNote, options));
+    }
+    for (const stepTask of state?.stepTasks ?? []) {
+        if (!stepTask) continue;
+        if (String(stepTask.status ?? "").toLowerCase() === "done") continue;
+        await specKeeperSync("plan step task blocked", async () => updateTaskStatus(stepTask, "blocked", abortNote, options));
+    }
 }
 
 /**
@@ -1211,6 +1274,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     // runs directly in the main working directory and the Git tool is allowed
     // to commit normally.
     inExecutionPhase = false;
+    if (!useReviewWorktree) mainCheckoutMayHavePartialWork = true;
     const worktree = useReviewWorktree ? ensureWorktree(executionWorktreeBranch, mainCwd) : null;
     const originalCwd = process.cwd();
     if (worktree) {
@@ -1399,6 +1463,7 @@ async function runSingleStep(
 
     const previousInExecutionPhase = inExecutionPhase;
     if (reviewMode) inExecutionPhase = true;
+    mainCheckoutMayHavePartialWork = true;
 
     try {
         status.step("Executing request directly without a plan.", hierarchyIndent("planStep"));
@@ -1487,6 +1552,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
     if (!Number.isInteger(configData.consecutiveNoProgressReplans) || configData.consecutiveNoProgressReplans < 0) configData.consecutiveNoProgressReplans = 0;
     if (!Number.isFinite(configData.replanElapsedMs) || configData.replanElapsedMs < 0) configData.replanElapsedMs = 0;
+    activeConfigData = configData;
 
     // Resolve Spec Keeper operational defaults once before any planning or
     // execution sync. This loads the local .spec-keeper file (when present) and
@@ -1500,6 +1566,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     // fetched task is the source of truth for the work order; prompt mode
     // keeps using the original command-line prompt.
     const isTaskMode = runMode.mode === "task";
+    if (!isTaskMode) activePromptSpecKeeperOptions = specKeeperClientOptions(specKeeperDefaults);
     let originalPrompt = commandLinePrompt;
     let taskWorkOrder: TaskWorkOrder | null = null;
     let taskLifecycle: any = null;
@@ -1574,6 +1641,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
         try {
             epicSync = await syncSpecKeeperEpic({ title: commandLinePrompt, description: `Execution requested for: ${commandLinePrompt}`, projectSlug: specKeeperDefaults.projectSlug });
             status.specKeeper(`${epicSync.selection}.`);
+            activePromptEpic = epicSync?.epic ?? null;
         } catch (error) {
             status.warning(`Spec Keeper epic-first sync skipped: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -1641,6 +1709,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
             stepTasks: [],
             taskUpdateOptions: skClientOptions,
         };
+        activePromptSpecKeeperState = specKeeperState;
 
         // Persist the generated plan onto the selected epic so it becomes the
         // durable home for the plan (best-effort; the run proceeds without it).
@@ -1821,13 +1890,17 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
 
 // Remove the execution worktree and its branch once the run finishes (or fails),
 // so the main repository is left clean of staged execution work.
-function cleanupExecutionWorktree() {
+function cleanupExecutionWorktree(reportAbort = false) {
     if (!executionWorktreePath) return;
     try {
         cleanupWorktree(executionWorktreeBranch, mainCwd);
         executionWorktreePath = null;
+        if (reportAbort) {
+            status.abort("removed execution worktree .worktrees/review-worktree (staged work discarded)");
+        }
     } catch (error) {
-        status.warning(`Failed to clean up execution worktree: ${error instanceof Error ? error.message : String(error)}`);
+        const reason = error instanceof Error ? error.message : String(error);
+        status.warning(`Failed to clean up execution worktree: ${boundedAbortReason(reason)}`);
     }
 }
 
@@ -1841,17 +1914,17 @@ main(options)
     .catch(async (error) => {
         if (error instanceof RunAbortError) {
             // Deliberate abort: print exactly one concise [ABORT] block, then
-            // run best-effort cleanup and Spec Keeper diagnostics. Aborts never
-            // print a stack trace, and a second SIGINT can still force-exit.
+            // run best-effort cleanup, persist the abort record, and report to
+            // Spec Keeper. Aborts never print a stack trace, and a second
+            // SIGINT can still force-exit.
             status.abort(abortBlockText(error));
-            cleanupExecutionWorktree();
-            if (activeTaskLifecycle && !activeTaskLifecycle.finalized) {
-                try {
-                    await finalizeTaskModeFailure(activeTaskLifecycle, `Aborted (${error.kind}): ${boundedAbortReason(error.message)}`);
-                } catch (finalizeError) {
-                    status.warning(`Spec Keeper task failure update skipped: ${finalizeError instanceof Error ? finalizeError.message : String(finalizeError)}`);
-                }
+            recordLastAbort(activeConfigData, error);
+            cleanupExecutionWorktree(true);
+            if (mainCheckoutMayHavePartialWork) {
+                status.abort("main-checkout changes were left as-is; no automatic rollback was performed");
             }
+            await finalizePromptSpecKeeperAbort(error);
+            await finalizeTaskModeAbort(activeTaskLifecycle, error);
             process.exitCode = error.exitCode;
             return;
         }
