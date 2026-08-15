@@ -23,6 +23,7 @@ import HttpRequest from "./tools/HttpRequest.ts";
 import Git from "./tools/Git.tsx";
 import { executeCommand as ExecuteCommand } from "./tools/ExecuteCommand.ts";
 import AgentBus from "./tools/AgentBus.ts";
+import AgentBusEnrol from "./tools/AgentBusEnrol.ts";
 import SpecKeeper from "./tools/SpecKeeper.ts";
 import SpecKeeperEnroll from "./tools/SpecKeeperEnroll.ts";
 import {
@@ -326,6 +327,21 @@ const tools = [
             }, required: ["path"],
         },
         exec_handler: (options) => AgentBus(options),
+    },
+    {
+        type: "function", name: "AgentBusEnrol",
+        usage_prompt: "tools/agent-bus-enrol-usage.md",
+        description: "Redeem an agent-bus enrollment invite through the local agent-busctl client, store the identity, and record non-secret roster metadata in .agent-bus.local.",
+        parameters: {
+            type: "object",
+            properties: {
+                inviteFile: { type: "string", description: "Path to the invite JSON file; defaults to the single agent-bus-invite-*.json match in the repo root." },
+                name: { type: "string", description: "Agent name to enrol as; defaults to the invite's embedded name." },
+                identity: { type: "string", description: "Directory where agent-busctl stores the enrolled identity credentials; defaults to <repoRoot>/.agent-bus-identity." },
+                rootDir: { type: "string", description: "Repo/workspace root used to locate agent-busctl and the .agent-bus.local store." },
+            },
+        },
+        exec_handler: (options) => AgentBusEnrol(options),
     },
     {
         type: "function", name: "SpecKeeper",
