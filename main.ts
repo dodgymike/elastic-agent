@@ -3,6 +3,7 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
+import { RunAbortError, throwIfAborted } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
@@ -86,6 +87,7 @@ const commitInstruction = options.review ? "do not commit" : "commit all of your
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
+const abortController = new AbortController();
 let client: MultiTurnLlmRuntime;
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
 const dataFilename = "/tmp/data.json";
@@ -683,11 +685,12 @@ function summarizeReview(review: { passed: boolean; reasons?: string[]; learning
 async function runReview(client, configData, reviewRequest, validationError) {
     let lastParsed;
     for (let retry = 0; retry <= 2; retry += 1) {
+        throwIfAborted(abortController.signal, "review");
         const promptToSend = retry === 0 && !validationError
             ? reviewRequest
             : `${reviewRequest}\n\nThe previous response was not valid JSON. Here's the error: ${
                 validationError ?? lastParsed?.reason ?? "unknown"}. Please return valid JSON following this exact structure.`;
-        const response = await client.create({ input: promptToSend });
+        const response = await client.create({ input: promptToSend, abortPhase: "review" });
         new CompatibleResponseWrapper(response).print();
         recordUsage(configData, response);
         lastParsed = parseReviewResult(responseText(response));
@@ -726,6 +729,7 @@ function actionablePlanSteps(plan) {
     return { valid: true, steps };
 }
 async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, configData) {
+    throwIfAborted(abortController.signal, "replan");
     const remainingStart = completedStepCount + 1;
     const remainingSteps = activeSteps.slice(remainingStart);
     const feedback = feedbackEntry?.feedback;
@@ -746,7 +750,7 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
     const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps });
     try {
-        const response = await client.create({ input: request });
+        const response = await client.create({ input: request, abortPhase: "replan" });
         new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
         recordUsage(configData, response);
         const validation = actionablePlanSteps(responseText(response));
@@ -765,6 +769,8 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
         return { attempted: true, applied: true, steps: revisedSteps };
     } catch (error) {
+        throwIfAborted(abortController.signal, "replan");
+        if (error instanceof RunAbortError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
         configData.replanHistory.push({ attempt, reason: feedback.replanReason, applied: false, failure: reason });
         status.warning(`Replan request failed; keeping the existing remaining plan: ${reason}`, hierarchyIndent("contentInStep"));
@@ -861,6 +867,7 @@ function functionCallOutput(toolCall, resultOrError) {
  * command and success/failure output routes through the shared render helper.
  */
 async function dispatchToolCall(output) {
+    throwIfAborted(abortController.signal, "execution");
     renderToolCallPending(output);
     const tool = tools.find((candidate) => candidate.name === output.name);
     let toolArguments;
@@ -908,6 +915,8 @@ async function dispatchToolCall(output) {
             logger: createToolSafetyLogger(toolChildIndent),
         });
     } catch (error) {
+        throwIfAborted(abortController.signal, "execution");
+        if (error instanceof RunAbortError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
         const risk = toolRiskLevel(output.name);
         if (risk !== "readonly") {
@@ -948,7 +957,8 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
     let previousResponseId;
     let toolOutputs: any[] = [];
     while (true) {
-        const request = { tools } as any;
+        throwIfAborted(abortController.signal, "execution", index + 1);
+        const request = { tools, abortPhase: "execution" } as any;
         if (previousResponseId) {
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
@@ -978,7 +988,8 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
                 status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`, hierarchyIndent("contentInStep"));
-                const retryResponse = await client.create({ input: configData.retryPrompt });
+                throwIfAborted(abortController.signal, "execution", index + 1);
+                const retryResponse = await client.create({ input: configData.retryPrompt, abortPhase: "execution" });
                 new CompatibleResponseWrapper(retryResponse).print(toolChildIndent);
                 recordUsage(configData, retryResponse);
                 saveData(configData);
@@ -1022,6 +1033,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     }
     try {
         for (let index = 0; index < activeSteps.length; index += 1) {
+            throwIfAborted(abortController.signal, "execution", index + 1);
             const executedStep = activeSteps[index];
             if (specKeeperState?.stepTasks?.[index]) {
                 await specKeeperSync(
@@ -1088,6 +1100,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
 }
 
 async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, originalPrompt = commandLinePrompt) {
+    throwIfAborted(abortController.signal, "review-plan");
     // The review phase starts with a plan step: ask the model to plan how to
     // conduct the review of the executed work against the four review criteria.
     status.planning("Creating a review plan...");
@@ -1095,12 +1108,13 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, orig
         "Plan how to conduct a review of the just-executed work. Assess the original prompt request, " +
         "the end-result quality, SDLC.md compliance, and record any learnings. Return a concise step-by-step plan.";
     const reviewPlanPrompt = `${reviewPlanGoal}\n\n${planningSuffix}`;
-    const reviewPlanResponse = await client.create({ input: reviewPlanPrompt });
+    const reviewPlanResponse = await client.create({ input: reviewPlanPrompt, abortPhase: "review-plan" });
     new CompatibleResponseWrapper(reviewPlanResponse).print();
     recordUsage(configData, reviewPlanResponse);
     const reviewPlan = responseText(reviewPlanResponse);
     saveData(configData);
 
+    throwIfAborted(abortController.signal, "review");
     status.planning(`Reviewing the completed work (attempt ${reviewAttempt}/${maxReviewAttempts})...`);
     const executedSteps = formatExecutedSteps(configData.completedSteps);
     const learnings = formatLearnings(configData.reviewLearnings ?? []);
@@ -1203,7 +1217,8 @@ async function runSingleStep(
         let previousResponseId;
         let toolOutputs: any[] = [];
         while (true) {
-            const request = { tools } as any;
+            throwIfAborted(abortController.signal, "execution");
+            const request = { tools, abortPhase: "execution" } as any;
             if (previousResponseId) {
                 request.previous_response_id = previousResponseId;
                 request.input = toolOutputs;
@@ -1267,7 +1282,11 @@ async function runSingleStep(
 }
 
 async function main(options: { review?: boolean } = {}): Promise<{ success: boolean }> {
-    client = new MultiTurnLlmRuntime(await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }), modelConfiguration.model);
+    client = new MultiTurnLlmRuntime(
+        await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
+        modelConfiguration.model,
+        abortController.signal,
+    );
     let configData = readData();
     if (!configData) configData = { responseIds: [] };
     if (!Array.isArray(configData.requestResponses)) configData.requestResponses = [];
@@ -1294,6 +1313,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     let taskWorkOrder: TaskWorkOrder | null = null;
     let taskLifecycle: any = null;
     if (isTaskMode) {
+        throwIfAborted(abortController.signal, "task-mode-setup");
         const taskModeOptions = specKeeperClientOptions(specKeeperDefaults);
         try {
             taskWorkOrder = await fetchSpecKeeperTask(runMode.taskId!, taskModeOptions);
@@ -1329,7 +1349,8 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     // runExecutionPhase/executePlanStep is ever invoked. Invalid or missing
     // classifier output falls back to requiresPlanning=true so the safer plan
     // flow runs.
-    const planningNecessity = await determinePlanningNecessity(originalPrompt, client);
+    throwIfAborted(abortController.signal, "planning-necessity");
+    const planningNecessity = await determinePlanningNecessity(originalPrompt, client, abortController.signal);
     const selectedMode = selectExecutionMode(planningNecessity);
     status.classification(`requiresPlanning=${planningNecessity.requiresPlanning} (${planningNecessity.reason}); mode: ${selectedMode}`, hierarchyIndent("plan"));
     if (!planningNecessity.requiresPlanning) {
@@ -1368,11 +1389,12 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
         epicContext = buildEpicPlanContext(epicSync);
     }
 
+    throwIfAborted(abortController.signal, "planning");
     status.planning("Creating an execution plan...");
 
     const planningPrompt = `${prompt}\n\n${planningSuffix}${epicContext}`;
 
-    const planningResponse = await client.create({ input: planningPrompt });
+    const planningResponse = await client.create({ input: planningPrompt, abortPhase: "planning" });
     new CompatibleResponseWrapper(planningResponse).print();
     recordUsage(configData, planningResponse);
     const plan = responseText(planningResponse);
@@ -1487,6 +1509,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
 
     if (options.review) {
         while (true) {
+            throwIfAborted(abortController.signal, "review");
             await runExecutionPhase(activeSteps, plan, configData, executionContext, true, specKeeperState, taskLifecycle);
             reviewAttempt += 1;
             const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt, originalPrompt);
@@ -1559,6 +1582,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
             break;
         }
     } else {
+        throwIfAborted(abortController.signal, "execution");
         await runExecutionPhase(activeSteps, plan, configData, executionContext, false, specKeeperState, taskLifecycle);
         if (specKeeperState?.runTask) {
             await specKeeperSync("run task done", async () => updateTaskStatus(

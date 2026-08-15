@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
+import { RunAbortError } from "./llm/run-abort.js";
 
 /**
  * Lightweight tool-call safety classifier.
@@ -787,6 +788,7 @@ async function llmClassification(
     try {
       response = await runtime.create({ input: prompt });
     } catch (error) {
+      if (error instanceof RunAbortError) throw error;
       lastFailure = error instanceof Error ? error.message : String(error);
       logger("error", `[TOOL SAFETY] LLM classification request failed for ${toolName}: ${lastFailure}`);
       break;
