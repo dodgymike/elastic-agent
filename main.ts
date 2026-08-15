@@ -3,9 +3,20 @@ import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
+import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
-import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { parsePlanOrAbort, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
+import {
+    nextConsecutiveNoProgressReplans,
+    parseReplanResponse,
+    recordReplanElapsedAndAssertBudget,
+    replanRemainingKey,
+    throwIfConsecutiveNoProgressReplansReached,
+    throwIfReplanAttemptLimitReached,
+    throwIfReplanTimeBudgetExceeded,
+} from "./llm/replan-abort.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
 import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
@@ -43,7 +54,7 @@ import type { TaskWorkOrder } from "./specKeeperTaskFetch.ts";
 import { claimSpecKeeperTask, describeClaimedSpecKeeperTask } from "./specKeeperTaskClaim.ts";
 import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperTaskPrompt.ts";
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
-import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
+import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
 import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
@@ -89,12 +100,33 @@ const commitInstruction = options.review ? "do not commit" : "commit all of your
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
+const abortController = new AbortController();
+// SIGINT/SIGTERM are user-triggered aborts. The handlers only abort the
+// controller; the single top-level abort handler prints the [ABORT] block and
+// assigns the exit code. A second SIGINT is the emergency escape hatch.
+let sigintAbortObserved = false;
+process.on("SIGINT", () => {
+    if (sigintAbortObserved) {
+        // Escape hatch: a wedged cleanup must not trap the user.
+        process.exit(130);
+    }
+    sigintAbortObserved = true;
+    abortController.abort("SIGINT");
+});
+process.on("SIGTERM", () => {
+    abortController.abort("SIGTERM");
+});
 let client: MultiTurnLlmRuntime;
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
 const dataFilename = "/tmp/data.json";
 const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
 const historyLimit = 10;
 const maxReplanAttempts = 3;
+const maxConsecutiveNoProgressReplans = 2;
+const maxReplanDurationMs = 120000;
+const maxReplanParseRetries = 2;
+const maxPlanParseRetries = 1;
+const maxReviewParseRetries = 2;
 const maxReviewAttempts = 3;
 const maxRevisedPlanSteps = 50;
 // Execution worktree: plan steps stage their changes in a dedicated worktree
@@ -113,6 +145,11 @@ const workspaceInit: WorkspaceInit = resolveWorkspaceInit(mainCwd);
 let executionWorktreePath: string | null = null;
 let inExecutionPhase = false;
 let activeTaskLifecycle: any = null;
+let activeConfigData: any = null;
+let activePromptSpecKeeperState: any = null;
+let activePromptEpic: any = null;
+let activePromptSpecKeeperOptions: any = null;
+let mainCheckoutMayHavePartialWork = false;
 // Prompts are loaded from external files under /elastic-agent/prompts/
 // (relative to the process working directory, which is the repository root).
 const planningSuffix = readFileSync("prompts/planning-suffix.txt", "utf-8");
@@ -146,7 +183,43 @@ const status = {
     error: (message: string, prefix = "") => printStatusLine((line) => console.error(line), chalk.red.bold("[ERROR]"), message, prefix),
     classification: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLANNING NECESSITY]"), message, prefix),
     specKeeper: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[SPEC KEEPER]"), message, prefix),
+    abort: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.red.bold("[ABORT]"), message, prefix),
 };
+
+/**
+ * Persist a `lastAbort` entry on the run config before exiting. The entry is
+ * bounded and secret-safe so a later run can report what aborted without
+ * leaking model or tool payloads. Uses the existing saveData behavior, which
+ * is best-effort and never throws.
+ */
+function recordLastAbort(configData: any, error: RunAbortError): void {
+    if (!configData) return;
+    configData.lastAbort = {
+        kind: error.kind,
+        phase: error.phase,
+        step: error.step ?? null,
+        reason: boundedAbortReason(error.message),
+        timestamp: new Date().toISOString(),
+    };
+    saveData(configData);
+}
+
+/**
+ * Detect provider-side cancellation that was not requested by our own signal.
+ * Per ABORT_SEMANTICS.md section 4.3, a generation that ends with
+ * finishReason "cancelled" while our AbortSignal is still un-aborted is an
+ * unable-to-complete abort, not a user-triggered one.
+ */
+function throwIfProviderCancelled(response: { finishReason?: string }, phase: RunAbortPhase, step?: number): void {
+    if (response.finishReason === "cancelled" && !abortController.signal.aborted) {
+        throw new RunAbortError(
+            "unable-to-complete",
+            phase,
+            "provider cancelled generation",
+            step === undefined ? undefined : { step },
+        );
+    }
+}
 
 /**
  * Console hierarchy levels shared by the agent loop and plan-printer.ts.
@@ -602,6 +675,46 @@ async function finalizeTaskModeFailure(taskLifecycle: any, diagnostic: string): 
 }
 
 /**
+ * Mark the active task-mode Spec Keeper task blocked with the abort reason in
+ * the exact note form `Aborted (<kind>): <bounded reason>`. Finalization is
+ * best-effort and never throws, and a failed update must not change the abort
+ * exit code or mask the abort reason.
+ */
+async function finalizeTaskModeAbort(taskLifecycle: any, error: RunAbortError): Promise<void> {
+    if (!taskLifecycle || taskLifecycle.finalized) return;
+    taskLifecycle.finalized = true;
+    const result = await abortSpecKeeperTask(taskLifecycle.taskId, error.kind, boundedAbortReason(error.message), taskLifecycle.options);
+    logTaskFinalizationDiagnostics(taskLifecycle.taskId, result);
+    status.specKeeper(`task ${taskLifecycle.taskId} ${result.status} (note=${result.noteRecorded ? "recorded" : "failed"}, proof=${result.proofMethod}).`);
+}
+
+/**
+ * Apply the prompt-mode abort transition to any Spec Keeper artifacts created
+ * for this run: mark the epic, run task, and unfinished plan-step tasks
+ * blocked with the abort reason as the status note. Each update is best-effort
+ * through specKeeperSync, so failures are [WARNING]s and never change the
+ * abort exit code.
+ */
+async function finalizePromptSpecKeeperAbort(error: RunAbortError): Promise<void> {
+    const abortNote = `Aborted (${error.kind}): ${boundedAbortReason(error.message)}`;
+    const state = activePromptSpecKeeperState;
+    const options = state?.taskUpdateOptions ?? activePromptSpecKeeperOptions ?? {};
+    const epic = state?.epic ?? activePromptEpic;
+
+    if (epic) {
+        await specKeeperSync("epic blocked", async () => updateEpicStatus(epic, "blocked", options));
+    }
+    if (state?.runTask) {
+        await specKeeperSync("run task blocked", async () => updateTaskStatus(state.runTask, "blocked", abortNote, options));
+    }
+    for (const stepTask of state?.stepTasks ?? []) {
+        if (!stepTask) continue;
+        if (String(stepTask.status ?? "").toLowerCase() === "done") continue;
+        await specKeeperSync("plan step task blocked", async () => updateTaskStatus(stepTask, "blocked", abortNote, options));
+    }
+}
+
+/**
  * Render the epic-first Spec Keeper context (selected epic + its tasks) into a
  * short prompt block so the plan generated by the LLM can incorporate the
  * epic's existing tasks. Returns an empty string when no context is available.
@@ -708,19 +821,22 @@ function summarizeReview(review: { passed: boolean; reasons?: string[]; learning
  */
 async function runReview(client, configData, reviewRequest, validationError) {
     let lastParsed;
-    for (let retry = 0; retry <= 2; retry += 1) {
+    for (let retry = 0; retry <= maxReviewParseRetries; retry += 1) {
+        throwIfAborted(abortController.signal, "review");
         const promptToSend = retry === 0 && !validationError
             ? reviewRequest
             : `${reviewRequest}\n\nThe previous response was not valid JSON. Here's the error: ${
                 validationError ?? lastParsed?.reason ?? "unknown"}. Please return valid JSON following this exact structure.`;
-        const response = await client.create({ input: promptToSend });
+        const response = await client.create({ input: promptToSend, abortPhase: "review" });
         new CompatibleResponseWrapper(response).print();
         recordUsage(configData, response);
+        throwIfProviderCancelled(response, "review");
         lastParsed = parseReviewResult(responseText(response));
         if (lastParsed.valid) return lastParsed.review as NonNullable<typeof lastParsed.review>;
     }
-    status.error(`Review response was not valid JSON after retries: ${lastParsed?.reason ?? "unknown"}`);
-    return { passed: false, reasons: [`Review response could not be parsed as JSON: ${lastParsed?.reason ?? "unknown"}`], learnings: [] };
+    const reason = `Review response was not valid JSON after ${maxReviewParseRetries} retries: ${lastParsed?.reason ?? "unknown"}`;
+    status.error(reason);
+    throw new RunAbortError("unable-to-complete", "review", reason);
 }
 
 function captureExecutionFeedback(configData, response, stepIndex) {
@@ -751,7 +867,10 @@ function actionablePlanSteps(plan) {
     if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
     return { valid: true, steps };
 }
+
 async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, configData) {
+    const step = completedStepCount + 1;
+    throwIfAborted(abortController.signal, "replan", step);
     const remainingStart = completedStepCount + 1;
     const remainingSteps = activeSteps.slice(remainingStart);
     const feedback = feedbackEntry?.feedback;
@@ -760,38 +879,72 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         status.warning("Replan request skipped because there are no remaining steps to replace.", hierarchyIndent("contentInStep"));
         return { attempted: false, applied: false, reason: "No remaining plan steps." };
     }
-    if (configData.replanAttemptCount >= maxReplanAttempts) {
-        status.warning(`Replan request skipped: the limit of ${maxReplanAttempts} attempts has been reached. Keeping the existing remaining plan.`, hierarchyIndent("contentInStep"));
-        return { attempted: false, applied: false, reason: "Replan attempt limit reached." };
-    }
 
+    throwIfReplanAttemptLimitReached(configData, step, maxReplanAttempts);
+    throwIfReplanTimeBudgetExceeded(configData, step, maxReplanDurationMs);
+
+    const beforeKey = replanRemainingKey(activeSteps, completedStepCount);
+    const attemptStart = Date.now();
     configData.replanAttemptCount += 1;
     const attempt = configData.replanAttemptCount;
     status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`, hierarchyIndent("contentInStep"));
     const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
     const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps });
+    let lastFailure = "unknown";
     try {
-        const response = await client.create({ input: request });
-        new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
-        recordUsage(configData, response);
-        const validation = actionablePlanSteps(responseText(response));
-        const historyEntry: any = { attempt, response_id: response.id, reason: feedback.replanReason, applied: false };
-        if (!validation.valid) {
-            historyEntry.failure = validation.reason;
-            configData.replanHistory.push(historyEntry);
-            status.warning(`Rejected revised plan; keeping the existing remaining plan: ${validation.reason}`, hierarchyIndent("contentInStep"));
-            return { attempted: true, applied: false, reason: validation.reason };
+        for (let parseAttempt = 0; parseAttempt <= maxReplanParseRetries; parseAttempt += 1) {
+            throwIfAborted(abortController.signal, "replan", step);
+            const promptToSend = parseAttempt === 0
+                ? request
+                : `${request}\n\nThe previous revised plan response was not valid JSON. Here's the error: ${lastFailure}. Please return valid JSON following the requested structure.`;
+            const response = await client.create({ input: promptToSend, abortPhase: "replan" });
+            new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
+            recordUsage(configData, response);
+            throwIfProviderCancelled(response, "replan", step);
+            const validation = parseReplanResponse(responseText(response));
+            if (validation.valid && validation.abort) {
+                throw new RunAbortError("unable-to-complete", "replan", validation.reason, { step });
+            }
+            if (validation.valid) {
+                const revisedSteps: string[] = validation.steps as string[];
+                activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
+                const afterKey = replanRemainingKey(activeSteps, completedStepCount);
+                const progressed = afterKey !== beforeKey;
+                configData.consecutiveNoProgressReplans = nextConsecutiveNoProgressReplans(
+                    progressed,
+                    configData.consecutiveNoProgressReplans ?? 0,
+                );
+                configData.replanHistory.push({
+                    attempt,
+                    response_id: response.id,
+                    reason: feedback.replanReason,
+                    applied: true,
+                    replacementStepCount: revisedSteps.length,
+                    noProgress: !progressed,
+                });
+                recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
+                throwIfConsecutiveNoProgressReplansReached(configData.consecutiveNoProgressReplans ?? 0, maxConsecutiveNoProgressReplans, step);
+                status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
+                return { attempted: true, applied: true, steps: revisedSteps };
+            }
+            lastFailure = validation.reason;
+            configData.replanHistory.push({ attempt, response_id: response.id, reason: feedback.replanReason, applied: false, failure: lastFailure });
+            if (parseAttempt < maxReplanParseRetries) {
+                status.warning(`Replan response was not valid JSON; sending a retry request with the parsing error appended: ${lastFailure}`, hierarchyIndent("contentInStep"));
+            }
         }
-        const revisedSteps: string[] = validation.steps as string[];
-        activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
-        historyEntry.applied = true;
-        historyEntry.replacementStepCount = revisedSteps.length;
-        configData.replanHistory.push(historyEntry);
-        status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
-        return { attempted: true, applied: true, steps: revisedSteps };
+
+        // Parse-retry exhaustion is unable-to-complete. Record elapsed time
+        // without throwing the stuck budget error so unable-to-complete keeps
+        // its documented precedence over stuck when both would fire at once.
+        configData.replanElapsedMs = (configData.replanElapsedMs ?? 0) + (Date.now() - attemptStart);
+        throw new RunAbortError("unable-to-complete", "replan", `Revised plan response was not valid after ${maxReplanParseRetries} parse retries: ${lastFailure}`, { step });
     } catch (error) {
+        throwIfAborted(abortController.signal, "replan", step);
+        if (error instanceof RunAbortError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
+        recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
         configData.replanHistory.push({ attempt, reason: feedback.replanReason, applied: false, failure: reason });
         status.warning(`Replan request failed; keeping the existing remaining plan: ${reason}`, hierarchyIndent("contentInStep"));
         return { attempted: true, applied: false, reason };
@@ -911,6 +1064,7 @@ function persistDenialTracker(configData, tracker) {
  * runSingleStep, so a fresh approach is not mistaken for fighting.
  */
 async function dispatchToolCall(output, configData, goalKey) {
+    throwIfAborted(abortController.signal, "execution");
     renderToolCallPending(output);
     const tool = tools.find((candidate) => candidate.name === output.name);
     let toolArguments;
@@ -963,6 +1117,8 @@ async function dispatchToolCall(output, configData, goalKey) {
             logger: createToolSafetyLogger(toolChildIndent),
         });
     } catch (error) {
+        throwIfAborted(abortController.signal, "execution");
+        if (error instanceof RunAbortError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
         const risk = toolRiskLevel(output.name);
         if (risk !== "readonly") {
@@ -1023,7 +1179,8 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
     let previousResponseId;
     let toolOutputs: any[] = [];
     while (true) {
-        const request = { tools } as any;
+        throwIfAborted(abortController.signal, "execution", index + 1);
+        const request = { tools, abortPhase: "execution" } as any;
         if (previousResponseId) {
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
@@ -1033,6 +1190,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print(toolChildIndent);
         recordUsage(configData, response);
+        throwIfProviderCancelled(response, "execution", index + 1);
         previousResponseId = response.id;
         toolOutputs = [];
         for (const output of response.output ?? []) {
@@ -1053,9 +1211,11 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
                 status.replan(`Step ${index + 1} response was not valid JSON; sending a retry request with the parsing error appended.`, hierarchyIndent("contentInStep"));
-                const retryResponse = await client.create({ input: configData.retryPrompt });
+                throwIfAborted(abortController.signal, "execution", index + 1);
+                const retryResponse = await client.create({ input: configData.retryPrompt, abortPhase: "execution" });
                 new CompatibleResponseWrapper(retryResponse).print(toolChildIndent);
                 recordUsage(configData, retryResponse);
+                throwIfProviderCancelled(retryResponse, "execution", index + 1);
                 saveData(configData);
                 if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
                 const retryEntry = captureExecutionFeedback(configData, retryResponse, index);
@@ -1073,6 +1233,8 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     configData.completedSteps = [];
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
+    configData.consecutiveNoProgressReplans = 0;
+    configData.replanElapsedMs = 0;
     configData.activePlanSteps = [...activeSteps];
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
@@ -1091,6 +1253,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     // runs directly in the main working directory and the Git tool is allowed
     // to commit normally.
     inExecutionPhase = false;
+    if (!useReviewWorktree) mainCheckoutMayHavePartialWork = true;
     const worktree = useReviewWorktree ? ensureWorktree(executionWorktreeBranch, mainCwd) : null;
     const originalCwd = process.cwd();
     if (worktree) {
@@ -1100,6 +1263,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     }
     try {
         for (let index = 0; index < activeSteps.length; index += 1) {
+            throwIfAborted(abortController.signal, "execution", index + 1);
             const executedStep = activeSteps[index];
             if (specKeeperState?.stepTasks?.[index]) {
                 await specKeeperSync(
@@ -1166,6 +1330,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
 }
 
 async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, originalPrompt = commandLinePrompt) {
+    throwIfAborted(abortController.signal, "review-plan");
     // The review phase starts with a plan step: ask the model to plan how to
     // conduct the review of the executed work against the four review criteria.
     status.planning("Creating a review plan...");
@@ -1173,12 +1338,14 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, orig
         "Plan how to conduct a review of the just-executed work. Assess the original prompt request, " +
         "the end-result quality, SDLC.md compliance, and record any learnings. Return a concise step-by-step plan.";
     const reviewPlanPrompt = `${reviewPlanGoal}\n\n${planningSuffix}`;
-    const reviewPlanResponse = await client.create({ input: reviewPlanPrompt });
+    const reviewPlanResponse = await client.create({ input: reviewPlanPrompt, abortPhase: "review-plan" });
     new CompatibleResponseWrapper(reviewPlanResponse).print();
     recordUsage(configData, reviewPlanResponse);
+    throwIfProviderCancelled(reviewPlanResponse, "review-plan");
     const reviewPlan = responseText(reviewPlanResponse);
     saveData(configData);
 
+    throwIfAborted(abortController.signal, "review");
     status.planning(`Reviewing the completed work (attempt ${reviewAttempt}/${maxReviewAttempts})...`);
     const executedSteps = formatExecutedSteps(configData.completedSteps);
     const learnings = formatLearnings(configData.reviewLearnings ?? []);
@@ -1277,13 +1444,15 @@ async function runSingleStep(
 
     const previousInExecutionPhase = inExecutionPhase;
     if (reviewMode) inExecutionPhase = true;
+    mainCheckoutMayHavePartialWork = true;
 
     try {
         status.step("Executing request directly without a plan.", hierarchyIndent("planStep"));
         let previousResponseId;
         let toolOutputs: any[] = [];
         while (true) {
-            const request = { tools } as any;
+            throwIfAborted(abortController.signal, "execution");
+            const request = { tools, abortPhase: "execution" } as any;
             if (previousResponseId) {
                 request.previous_response_id = previousResponseId;
                 request.input = toolOutputs;
@@ -1293,6 +1462,7 @@ async function runSingleStep(
             const response = await client.create(request);
             new CompatibleResponseWrapper(response).print(toolChildIndent);
             recordUsage(configData, response);
+            throwIfProviderCancelled(response, "execution");
             previousResponseId = response.id;
             toolOutputs = [];
             for (const output of response.output ?? []) {
@@ -1347,7 +1517,11 @@ async function runSingleStep(
 }
 
 async function main(options: { review?: boolean } = {}): Promise<{ success: boolean }> {
-    client = new MultiTurnLlmRuntime(await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }), modelConfiguration.model);
+    client = new MultiTurnLlmRuntime(
+        await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
+        modelConfiguration.model,
+        abortController.signal,
+    );
     let configData = readData();
     if (!configData) configData = { responseIds: [] };
     if (!Array.isArray(configData.requestResponses)) configData.requestResponses = [];
@@ -1357,6 +1531,9 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     if (!Array.isArray(configData.toolCallTldrs)) configData.toolCallTldrs = [];
     if (!Array.isArray(configData.replanHistory)) configData.replanHistory = [];
     if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
+    if (!Number.isInteger(configData.consecutiveNoProgressReplans) || configData.consecutiveNoProgressReplans < 0) configData.consecutiveNoProgressReplans = 0;
+    if (!Number.isFinite(configData.replanElapsedMs) || configData.replanElapsedMs < 0) configData.replanElapsedMs = 0;
+    activeConfigData = configData;
 
     // System initialisation result is persisted into configData so later steps
     // (CLAUDE.md starting-directory injection and the tool-classifier trusted
@@ -1390,10 +1567,12 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     // fetched task is the source of truth for the work order; prompt mode
     // keeps using the original command-line prompt.
     const isTaskMode = runMode.mode === "task";
+    if (!isTaskMode) activePromptSpecKeeperOptions = specKeeperClientOptions(specKeeperDefaults);
     let originalPrompt = commandLinePrompt;
     let taskWorkOrder: TaskWorkOrder | null = null;
     let taskLifecycle: any = null;
     if (isTaskMode) {
+        throwIfAborted(abortController.signal, "task-mode-setup");
         const taskModeOptions = specKeeperClientOptions(specKeeperDefaults);
         try {
             taskWorkOrder = await fetchSpecKeeperTask(runMode.taskId!, taskModeOptions);
@@ -1429,7 +1608,8 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     // runExecutionPhase/executePlanStep is ever invoked. Invalid or missing
     // classifier output falls back to requiresPlanning=true so the safer plan
     // flow runs.
-    const planningNecessity = await determinePlanningNecessity(originalPrompt, client);
+    throwIfAborted(abortController.signal, "planning-necessity");
+    const planningNecessity = await determinePlanningNecessity(originalPrompt, client, abortController.signal);
     const selectedMode = selectExecutionMode(planningNecessity);
     status.classification(`requiresPlanning=${planningNecessity.requiresPlanning} (${planningNecessity.reason}); mode: ${selectedMode}`, hierarchyIndent("plan"));
     if (!planningNecessity.requiresPlanning) {
@@ -1462,40 +1642,52 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
         try {
             epicSync = await syncSpecKeeperEpic({ title: commandLinePrompt, description: `Execution requested for: ${commandLinePrompt}`, projectSlug: specKeeperDefaults.projectSlug });
             status.specKeeper(`${epicSync.selection}.`);
+            activePromptEpic = epicSync?.epic ?? null;
         } catch (error) {
             status.warning(`Spec Keeper epic-first sync skipped: ${error instanceof Error ? error.message : String(error)}`);
         }
         epicContext = buildEpicPlanContext(epicSync);
     }
 
+    throwIfAborted(abortController.signal, "planning");
     status.planning("Creating an execution plan...");
 
     const planningPrompt = `${prompt}\n\n${planningSuffix}${epicContext}`;
 
-    const planningResponse = await client.create({ input: planningPrompt });
-    new CompatibleResponseWrapper(planningResponse).print();
-    recordUsage(configData, planningResponse);
-    const plan = responseText(planningResponse);
-    // Extract the plan JSON from the planning prompt response and use that
-    // object as the plan. The parsed JSON's step array becomes the active
-    // execution plan, replacing the previous text-based parsing. The
-    // planSteps() flow remains only as a fallback for responses that are not
-    // valid plan JSON.
-    const parsedPlan = extractPlanJson(plan);
-    let activeSteps;
-    if (parsedPlan.valid) {
-        printPlan(parsedPlan.plan);
-        activeSteps = planStepsFromObject(parsedPlan.plan);
-        if (activeSteps.length === 0) {
-            status.warning("Planning response JSON had steps without usable text; falling back to text parsing.");
-            activeSteps = planSteps(plan);
+    let planParseFailure: string | null = null;
+    let parsedPlanningResponse: ReturnType<typeof parsePlanOrAbort> = { valid: false, reason: "Planning did not produce a response." };
+    for (let attempt = 0; attempt <= maxPlanParseRetries; attempt += 1) {
+        throwIfAborted(abortController.signal, "planning");
+        const promptToSend = attempt === 0
+            ? planningPrompt
+            : `${planningPrompt}\n\nThe previous response was not valid plan JSON. Here's the error: ${planParseFailure}. Please return either a valid plan JSON object or an abort object.`;
+        const planningResponse = await client.create({ input: promptToSend, abortPhase: "planning" });
+        new CompatibleResponseWrapper(planningResponse).print();
+        recordUsage(configData, planningResponse);
+        throwIfProviderCancelled(planningResponse, "planning");
+        parsedPlanningResponse = parsePlanOrAbort(responseText(planningResponse));
+        if (parsedPlanningResponse.valid) break;
+        planParseFailure = parsedPlanningResponse.reason;
+        if (attempt < maxPlanParseRetries) {
+            status.warning("Planning response was not valid plan JSON; sending a retry request with the parsing error appended.", hierarchyIndent("plan"));
         }
-    } else {
-        status.warning(`Planning response was not parseable as plan JSON (${parsedPlan.reason}); falling back to text parsing.`);
-        activeSteps = planSteps(plan);
     }
+    if (!parsedPlanningResponse.valid) {
+        throw new RunAbortError("unable-to-complete", "planning", `Planning response was not valid after ${maxPlanParseRetries} parse retries: ${parsedPlanningResponse.reason}`);
+    }
+    if (parsedPlanningResponse.result.kind === "abort") {
+        throw new RunAbortError("unable-to-complete", "planning", parsedPlanningResponse.result.reason);
+    }
+    printPlan(parsedPlanningResponse.result.plan);
+    const activeSteps = planStepsFromObject(parsedPlanningResponse.result.plan);
+    if (activeSteps.length === 0) {
+        throw new RunAbortError("unable-to-complete", "planning", "Planning response JSON had steps without usable text.");
+    }
+    const plan = formatPlan(activeSteps);
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
+    configData.consecutiveNoProgressReplans = 0;
+    configData.replanElapsedMs = 0;
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
     saveData(configData);
@@ -1518,6 +1710,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
             stepTasks: [],
             taskUpdateOptions: skClientOptions,
         };
+        activePromptSpecKeeperState = specKeeperState;
 
         // Persist the generated plan onto the selected epic so it becomes the
         // durable home for the plan (best-effort; the run proceeds without it).
@@ -1587,6 +1780,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
 
     if (options.review) {
         while (true) {
+            throwIfAborted(abortController.signal, "review");
             await runExecutionPhase(activeSteps, plan, configData, executionContext, true, specKeeperState, taskLifecycle);
             reviewAttempt += 1;
             const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt, originalPrompt);
@@ -1659,6 +1853,7 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
             break;
         }
     } else {
+        throwIfAborted(abortController.signal, "execution");
         await runExecutionPhase(activeSteps, plan, configData, executionContext, false, specKeeperState, taskLifecycle);
         if (specKeeperState?.runTask) {
             await specKeeperSync("run task done", async () => updateTaskStatus(
@@ -1696,13 +1891,17 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
 
 // Remove the execution worktree and its branch once the run finishes (or fails),
 // so the main repository is left clean of staged execution work.
-function cleanupExecutionWorktree() {
+function cleanupExecutionWorktree(reportAbort = false) {
     if (!executionWorktreePath) return;
     try {
         cleanupWorktree(executionWorktreeBranch, mainCwd);
         executionWorktreePath = null;
+        if (reportAbort) {
+            status.abort("removed execution worktree .worktrees/review-worktree (staged work discarded)");
+        }
     } catch (error) {
-        status.warning(`Failed to clean up execution worktree: ${error instanceof Error ? error.message : String(error)}`);
+        const reason = error instanceof Error ? error.message : String(error);
+        status.warning(`Failed to clean up execution worktree: ${boundedAbortReason(reason)}`);
     }
 }
 
@@ -1714,6 +1913,23 @@ main(options)
         }
     })
     .catch(async (error) => {
+        if (error instanceof RunAbortError) {
+            // Deliberate abort: print exactly one concise [ABORT] block, then
+            // run best-effort cleanup, persist the abort record, and report to
+            // Spec Keeper. Aborts never print a stack trace, and a second
+            // SIGINT can still force-exit.
+            status.abort(abortBlockText(error));
+            recordLastAbort(activeConfigData, error);
+            cleanupExecutionWorktree(true);
+            if (mainCheckoutMayHavePartialWork) {
+                status.abort("main-checkout changes were left as-is; no automatic rollback was performed");
+            }
+            await finalizePromptSpecKeeperAbort(error);
+            await finalizeTaskModeAbort(activeTaskLifecycle, error);
+            process.exitCode = error.exitCode;
+            return;
+        }
+
         cleanupExecutionWorktree();
         const message = error instanceof Error ? error.message : String(error);
         status.error(error instanceof Error ? error.stack ?? message : message);

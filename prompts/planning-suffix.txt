@@ -14,3 +14,9 @@ EXAMPLE RESPONSE:
   "expected_outcome": ""
 }
 
+If you cannot honestly produce a usable plan, do NOT invent one. Instead return exactly:
+{
+  "abort": true,
+  "reason": "why no usable plan could be produced"
+}
+When "abort" is true, "reason" must be a non-empty string. If both a plan and "abort": true are present, "abort": true wins.

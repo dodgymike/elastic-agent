@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
+import { RunAbortError } from "./llm/run-abort.js";
 import { normalizeToolParameters, parseToolSafetyClassification } from "./tool-safety-classifier.js";
 
 /**
@@ -212,6 +213,7 @@ async function llmRoutingDecision(
     try {
       response = await runtime.create({ input: prompt });
     } catch (error) {
+      if (error instanceof RunAbortError) throw error;
       lastFailure = error instanceof Error ? error.message : String(error);
       logger("error", `[GIT ROUTER] LLM routing request failed: ${lastFailure}`);
       break;

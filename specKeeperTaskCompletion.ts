@@ -171,3 +171,51 @@ export async function failSpecKeeperTask(
     diagnostics,
   };
 }
+
+/**
+ * Mark a claimed task blocked with an abort note in the exact form
+ * `Aborted (<kind>): <bounded reason>` for the status note, task note, and
+ * proof diagnostic. Aborts are always `blocked` (never `failed`) and the
+ * update sequence matches `failSpecKeeperTask`: status, note, then proof.
+ */
+export async function abortSpecKeeperTask(
+  taskId: string,
+  kind: string,
+  reason: string,
+  options: SpecKeeperTaskCompletionOptions = {},
+  client: (opts: SpecKeeperOptions) => Promise<SpecKeeperResult> = specKeeperDefault,
+): Promise<SpecKeeperTaskCompletionResult> {
+  const {
+    failureStatus: _failureStatus,
+    maxDiagnosticLength = DEFAULT_MAX_DIAGNOSTIC_LENGTH,
+    ...lifecycleOptions
+  } = options;
+  const safeKind = String(kind ?? "unknown").trim() || "unknown";
+  const note = `Aborted (${safeKind}): ${diagnosticText(reason, maxDiagnosticLength)}`;
+  const diagnostics: string[] = [];
+
+  const statusUpdated = await attempt(
+    () => updateSpecKeeperTaskStatus(taskId, "blocked", note, lifecycleOptions, client),
+    diagnostics,
+  );
+  const noteRecorded = await attempt(
+    () => postSpecKeeperTaskNote(taskId, note, lifecycleOptions, client),
+    diagnostics,
+  );
+
+  const proof: SpecKeeperTaskProof = { outcome: "blocked", diagnostic: note };
+  const proofResult = await attachSpecKeeperTaskProof(taskId, proof, lifecycleOptions, client);
+  if (!proofResult.attached) {
+    diagnostics.push(`proof not attached: ${proofResult.error ?? "unknown error"}`);
+  }
+
+  return {
+    taskId,
+    status: "blocked",
+    statusUpdated,
+    noteRecorded,
+    proofAttached: proofResult.attached,
+    proofMethod: proofResult.method,
+    diagnostics,
+  };
+}

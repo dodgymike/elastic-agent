@@ -183,6 +183,68 @@ export function extractPlanJson(text: string): ExtractResult {
     }
 }
 
+/** A parsed planning response: either a usable plan or an explicit abort. */
+export type ParsedPlanOrAbort =
+    | { readonly kind: "plan"; readonly plan: ParsedPlan }
+    | { readonly kind: "abort"; readonly reason: string };
+
+/** Non-throwing parse result for a planning response that may be a plan or an abort. */
+export type PlanOrAbortResult =
+    | { readonly valid: true; readonly result: ParsedPlanOrAbort }
+    | { readonly valid: false; readonly reason: string };
+
+/**
+ * Parse a planning response that may contain either a valid plan object or the
+ * explicit abort object defined by ABORT_SEMANTICS.md section 4.1:
+ *
+ *   { "abort": true, "reason": "why no plan could be produced" }
+ *
+ * Rules:
+ * - `abort` must be a boolean. When absent or `false`, normal plan parsing
+ *   continues unchanged.
+ * - When `abort` is `true`, `reason` must be a non-empty string after
+ *   trimming, and `abort` wins even if plan steps are also present.
+ */
+export function parsePlanOrAbort(text: string): PlanOrAbortResult {
+    let extracted: string;
+    try {
+        extracted = extractJsonFromResponse(text);
+    } catch (error) {
+        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(extracted);
+    } catch (error) {
+        return { valid: false, reason: `Planning response JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { valid: false, reason: "Planning response JSON is not an object." };
+    }
+
+    const record = parsed as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(record, "abort")) {
+        if (typeof record.abort !== "boolean") {
+            return { valid: false, reason: "Planning response 'abort' must be a boolean." };
+        }
+        if (record.abort === true) {
+            const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+            if (!reason) {
+                return { valid: false, reason: "An aborted planning response must provide a non-empty 'reason'." };
+            }
+            return { valid: true, result: { kind: "abort", reason } };
+        }
+    }
+
+    try {
+        return { valid: true, result: { kind: "plan", plan: parsePlanJson(extracted) } };
+    } catch (error) {
+        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+}
+
 /** Coerce a value to a non-empty single-line string, or return fallback. */
 function text(value: unknown, fallback = "(not provided)"): string {
     if (value === undefined || value === null) return fallback;

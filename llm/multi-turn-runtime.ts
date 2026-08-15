@@ -1,6 +1,7 @@
 import {
   type AssistantMessage,
   type ConversationMessage,
+  type FinishReason,
   type GenerateResponse,
   type JsonObject,
   type JsonValue,
@@ -9,6 +10,7 @@ import {
   type ToolDefinition,
   type ToolResultMessage,
 } from "./adapter-contract.js";
+import { type RunAbortPhase, throwIfAborted } from "./run-abort.js";
 import {
   appendLlmLog,
   formatPrompt,
@@ -24,6 +26,8 @@ export interface CompatibleResponse {
   readonly id: string;
   readonly output: readonly CompatibleOutput[];
   readonly usage?: CompatibleUsage;
+  /** Provider-normalized finish reason, exposed for unable-to-complete detection. */
+  readonly finishReason?: FinishReason;
 }
 export type CompatibleOutput = CompatibleMessageOutput | CompatibleFunctionCallOutput;
 export interface CompatibleMessageOutput {
@@ -47,6 +51,10 @@ export interface CompatibleCreateRequest {
   readonly input: string | readonly CompatibleToolResult[];
   readonly tools?: readonly ToolDefinition[];
   readonly previous_response_id?: string;
+  /** Abort signal for this generation; falls back to the runtime-level signal. */
+  readonly signal?: AbortSignal;
+  /** Phase used when an aborted generation is reported as RunAbortError. */
+  readonly abortPhase?: RunAbortPhase;
 }
 export interface CompatibleToolResult {
   readonly type: "function_call_output";
@@ -95,9 +103,16 @@ function outputOf(message: AssistantMessage): readonly CompatibleOutput[] {
 export class MultiTurnLlmRuntime {
   private nextResponseId = 0;
   private readonly responseStates = new Map<string, ResponseState>();
-  constructor(private readonly adapter: LlmAdapter, private readonly model: string) {}
+  constructor(
+    private readonly adapter: LlmAdapter,
+    private readonly model: string,
+    readonly signal?: AbortSignal,
+  ) {}
 
   async create(request: CompatibleCreateRequest): Promise<CompatibleResponse> {
+    const signal = request.signal ?? this.signal;
+    const abortPhase = request.abortPhase ?? "execution";
+    throwIfAborted(signal, abortPhase);
     const prior = request.previous_response_id === undefined ? undefined : this.responseStates.get(request.previous_response_id);
     if (request.previous_response_id !== undefined && !prior) throw new Error(`LLM response continuation error: unknown previous_response_id '${request.previous_response_id}'.`);
     if (prior && typeof request.input === "string") throw new Error("LLM response continuation error: tool outputs are required after previous_response_id.");
@@ -111,8 +126,12 @@ export class MultiTurnLlmRuntime {
     const requestType = prior ? REQUEST_TYPE_TOOL_CONTINUATION : REQUEST_TYPE_INITIAL;
     let generated: GenerateResponse;
     try {
-      generated = await this.adapter.generate({ model: this.model, messages, tools: request.tools });
+      generated = await this.adapter.generate({ model: this.model, messages, tools: request.tools, signal });
     } catch (error) {
+      // A user abort takes precedence over any provider error produced by an
+      // in-flight request cancellation, so the top-level handler can report the
+      // correct abort phase and exit code instead of a provider failure.
+      throwIfAborted(signal, abortPhase);
       if (error instanceof LlmAdapterError) {
         console.error(
           `[LLM ADAPTER ERROR] Prompt that caused the ${error.provider} adapter error (${error.code}):\n` +
@@ -133,6 +152,6 @@ export class MultiTurnLlmRuntime {
       responseId: id,
     };
     appendLlmLog(record);
-    return { id, output: outputOf(generated.message), usage: usageOf(generated) };
+    return { id, output: outputOf(generated.message), usage: usageOf(generated), finishReason: generated.finishReason };
   }
 }

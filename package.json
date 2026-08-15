@@ -36,7 +36,8 @@
     "test:response-format": "rm -rf test/.response-format-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.response-format-build response-format.ts test/response-format.test.ts && node test/.response-format-build/test/response-format.test.js; status=$?; rm -rf test/.response-format-build; exit $status",
     "test:agent-bus-enrol": "rm -rf test/.agent-bus-enrol-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.agent-bus-enrol-build tools/AgentBusEnrol.ts test/agent-bus-enrol.test.ts && node test/.agent-bus-enrol-build/test/agent-bus-enrol.test.js; status=$?; rm -rf test/.agent-bus-enrol-build; exit $status",
     "test:agent-bus": "rm -rf test/.agent-bus-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.agent-bus-build tools/AgentBus.ts test/agent-bus.test.ts && node test/.agent-bus-build/test/agent-bus.test.js; status=$?; rm -rf test/.agent-bus-build; exit $status",
-    "test:agent-bus-mode": "npm run test:agent-bus-enrol && npm run test:agent-bus"
+    "test:agent-bus-mode": "npm run test:agent-bus-enrol && npm run test:agent-bus",
+    "test:abort-paths": "rm -rf test/.abort-paths-build && tsc --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node --outDir test/.abort-paths-build llm/run-abort.ts llm/adapter-contract.ts llm/multi-turn-runtime.ts llm/llm-log.ts llm/abort-report.ts llm/replan-abort.ts plan-printer.ts tool-renderer.ts worktree.ts test/abort-paths.test.ts && node test/.abort-paths-build/test/abort-paths.test.js; status=$?; rm -rf test/.abort-paths-build; exit $status"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1107.0",

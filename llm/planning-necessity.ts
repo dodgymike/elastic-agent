@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { MultiTurnLlmRuntime, type CompatibleResponse } from "./multi-turn-runtime.js";
+import { RunAbortError, throwIfAborted } from "./run-abort.js";
 
 /**
  * Classification boundary for the no-plan fast path. Before the legacy
@@ -101,6 +102,7 @@ function parsePlanningNecessity(text: string): ParsedPlanningNecessity {
 export async function determinePlanningNecessity(
   userPrompt: string,
   runtime: MultiTurnLlmRuntime,
+  signal?: AbortSignal,
 ): Promise<PlanningNecessityResult> {
   let promptTemplate: string;
   try {
@@ -113,16 +115,20 @@ export async function determinePlanningNecessity(
 
   const basePrompt = `${promptTemplate}${userPrompt}`;
   let lastFailure: string | null = null;
+  const effectiveSignal = signal ?? runtime.signal;
 
   for (let attempt = 1; attempt <= MAX_PLANNING_NECESSITY_ATTEMPTS; attempt += 1) {
+    throwIfAborted(effectiveSignal, "planning-necessity");
     const prompt = attempt === 1
       ? basePrompt
       : `${basePrompt}\n\nThe previous response was not valid JSON. Here's the error: ${lastFailure}. Please return valid JSON following this exact structure.`;
 
     let response: CompatibleResponse;
     try {
-      response = await runtime.create({ input: prompt });
+      response = await runtime.create({ input: prompt, signal: effectiveSignal, abortPhase: "planning-necessity" });
     } catch (error) {
+      throwIfAborted(effectiveSignal, "planning-necessity");
+      if (error instanceof RunAbortError) throw error;
       lastFailure = error instanceof Error ? error.message : String(error);
       console.error(`[PLANNING NECESSITY] LLM classification request failed: ${lastFailure}; falling back to planning.`);
       break;
