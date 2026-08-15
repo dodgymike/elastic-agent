@@ -954,6 +954,11 @@ async function dispatchToolCall(output, configData, goalKey) {
         classification = await classifyToolCall(output.name, toolArguments, {
             runtime: client,
             workspaceRoot: process.cwd(),
+            // The starting-directory init provides both the logical cwd (pwd)
+            // and the canonical (symlink-resolved) path as trusted "local"
+            // roots. Both are handed to the classifier as allowed directories
+            // so legitimate calls that stay within either form are accepted.
+            allowedDirectories: workspaceInit.allowedDirectories,
             promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
             logger: createToolSafetyLogger(toolChildIndent),
         });

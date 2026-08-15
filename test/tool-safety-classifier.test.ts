@@ -55,6 +55,11 @@ function staticVerdict(toolName: string, parameters: unknown) {
   return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE });
 }
 
+/** Like staticVerdict but with additional trusted roots (allowedDirectories). */
+function staticVerdictWithRoots(toolName: string, parameters: unknown, allowedDirectories: readonly string[]) {
+  return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE, allowedDirectories });
+}
+
 function parseAs(text: string): { valid: true; safe: boolean; reason: string } | null {
   const result = parseToolSafetyClassification(text);
   return result.valid ? result : null;
@@ -265,6 +270,56 @@ async function main(): Promise<void> {
     check(
       "ExecuteCommand reading outside the workspace is blocked",
       staticVerdict("ExecuteCommand", { command: "cat /etc/passwd" }).decision === "unsafe",
+    );
+
+    // ------------------------------------------------------------------
+    // 5b. Allowed directories (pwd + canonical starting-directory path) are
+    //     treated as trusted "local" roots so legitimate calls that resolve
+    //     into the canonical workspace are not blocked when it differs from
+    //     the logical cwd (for example under a symlink).
+    // ------------------------------------------------------------------
+    const CANONICAL = "/real/workspace-target";
+    check(
+      "path under the canonical root is blocked without allowedDirectories",
+      staticVerdict("Read", { path: `${CANONICAL}/package.json` }).decision === "unsafe",
+    );
+    check(
+      "path under the canonical root is allowed when it is an allowed directory",
+      staticVerdictWithRoots("Read", { path: `${CANONICAL}/package.json` }, [CANONICAL]).decision === "safe",
+    );
+    check(
+      "relative path still resolves against the primary workspace root with allowedDirectories",
+      staticVerdictWithRoots("Read", { path: "package.json" }, [CANONICAL]).decision === "safe",
+    );
+    check(
+      "Write under the canonical root is allowed when it is an allowed directory",
+      staticVerdictWithRoots("Write", { path: `${CANONICAL}/notes.md`, content: "hello" }, [CANONICAL]).decision === "safe",
+    );
+    check(
+      "Git cwd under the canonical root is allowed when it is an allowed directory",
+      staticVerdictWithRoots("Git", { action: "list", cwd: `${CANONICAL}` }, [CANONICAL]).decision === "safe",
+    );
+    check(
+      "path outside every trusted root stays unsafe despite allowed directories",
+      staticVerdictWithRoots("Read", { path: "/etc/passwd" }, [CANONICAL]).decision === "unsafe",
+    );
+    check(
+      "path traversal stays unsafe despite allowed directories",
+      staticVerdictWithRoots("Read", { path: "../outside" }, [CANONICAL]).decision === "unsafe",
+    );
+    check(
+      "data.json stays blocked even when its directory is an allowed root",
+      staticVerdictWithRoots("Read", { path: `${CANONICAL}/data.json` }, [CANONICAL]).decision === "unsafe",
+    );
+    // The full async classifier flows the allowed directories through too.
+    const fullAllowed = await classifyToolCall("Read", { path: `${CANONICAL}/package.json` }, {
+      workspaceRoot: WORKSPACE,
+      allowedDirectories: [CANONICAL],
+      logger: silentLogger,
+    });
+    check(
+      "classifyToolCall allows a path in an allowed directory (canonical local root)",
+      fullAllowed.safe === true && fullAllowed.source === "static",
     );
 
     // ------------------------------------------------------------------

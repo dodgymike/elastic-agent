@@ -87,6 +87,15 @@ export interface ToolSafetyClassifierOptions {
   readonly runtime?: MultiTurnLlmRuntime;
   /** Repository/workspace root used for path checks. Defaults to process.cwd(). */
   readonly workspaceRoot?: string;
+  /**
+   * Additional trusted roots (absolute paths) that the classifier treats as
+   * "local"/inside the workspace, in addition to `workspaceRoot`. For example
+   * the canonical (symlink-resolved) path of the starting directory as
+   * resolved by workspace-init, so both the logical cwd (pwd) and its real
+   * target are accepted. A target is only considered "outside the workspace"
+   * when it escapes *every* trusted root.
+   */
+  readonly allowedDirectories?: readonly string[];
   /** Override for the classifier prompt path (default prompts/tool-safety-classifier.md). */
   readonly promptPath?: string;
   /** Optional logger so tests can silence the default console output. */
@@ -196,11 +205,53 @@ function hasPathTraversal(target: string): boolean {
   return normalizedSegments(target).includes("..");
 }
 
-function resolvesOutsideWorkspace(target: string, workspaceRoot: string): boolean {
-  const root = resolve(workspaceRoot);
-  const absolute = isAbsolute(target) ? resolve(target) : resolve(root, target);
+/** True when `absolute` (an absolute path) resolves outside a single root. */
+function resolvesOutsideSingleRoot(absolute: string, root: string): boolean {
   const rel = relative(root, absolute);
   return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+/**
+ * Build the de-duplicated, absolute set of trusted roots for path checks:
+ * `workspaceRoot` always first, then any additional `allowedDirectories` (the
+ * canonical/real starting-directory path from workspace-init). The list is
+ * never empty; an empty `allowedDirectories` simply degrades to the workspace
+ * root alone, preserving the legacy single-root behavior.
+ */
+function trustedRoots(workspaceRoot: string, allowedDirectories: readonly string[] | undefined): string[] {
+  const roots: string[] = [resolve(workspaceRoot)];
+  if (allowedDirectories && allowedDirectories.length > 0) {
+    for (const dir of allowedDirectories) {
+      if (typeof dir === "string" && dir.trim() !== "") {
+        roots.push(resolve(workspaceRoot, dir));
+      }
+    }
+  }
+  return Array.from(new Set(roots));
+}
+
+/**
+ * True when `target` escapes *every* trusted root. `target` may be relative
+ * (then resolved against each root in turn) or absolute. A target counts as
+ * inside the workspace when it stays within at least one trusted root, so the
+ * canonical starting-directory path is accepted as "local" even when it
+ * differs from `workspaceRoot` (for example under a symlink).
+ */
+function resolvesOutsideAllTrustedRoots(target: string, roots: readonly string[]): boolean {
+  if (roots.length === 0) return true;
+  const absolute = isAbsolute(target) ? resolve(target) : (() => {
+    // For a relative target it is only inside if it stays under at least one
+    // root; resolve against each root and keep the first result that is inside.
+    for (const root of roots) {
+      const candidate = resolve(root, target);
+      if (!resolvesOutsideSingleRoot(candidate, root)) return candidate;
+    }
+    return resolve(roots[0], target);
+  })();
+  for (const root of roots) {
+    if (!resolvesOutsideSingleRoot(absolute, root)) return false;
+  }
+  return true;
 }
 
 function secretTextReason(text: string): string | null {
@@ -299,7 +350,7 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
   }
 }
 
-function classifyFileTool(toolName: string, parameters: Record<string, unknown>, workspaceRoot: string): StaticToolSafetyVerdict {
+function classifyFileTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
   const pathKey = toolName === "ListDirectory" ? "directory" : "path";
   const target = stringValue(parameters[pathKey]);
   if (target === null || target.trim() === "") {
@@ -315,7 +366,7 @@ function classifyFileTool(toolName: string, parameters: Record<string, unknown>,
   if (hasPathTraversal(target)) {
     return unsafe(`${toolName} path '${target}' contains '..' path traversal.`);
   }
-  if (resolvesOutsideWorkspace(target, workspaceRoot)) {
+  if (resolvesOutsideAllTrustedRoots(target, roots)) {
     return unsafe(`${toolName} path '${target}' resolves outside the workspace.`);
   }
 
@@ -350,7 +401,7 @@ function classifyFileTool(toolName: string, parameters: Record<string, unknown>,
   return safe(`${toolName} target '${target}' stays within the workspace and is not a protected file.`);
 }
 
-function classifyExecuteCommand(parameters: Record<string, unknown>, workspaceRoot: string): StaticToolSafetyVerdict {
+function classifyExecuteCommand(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
   const command = stringValue(parameters.command);
   if (command === null || command.trim() === "") {
     return ambiguous("ExecuteCommand has no non-empty command; the tool itself will reject the call.");
@@ -378,7 +429,7 @@ function classifyExecuteCommand(parameters: Record<string, unknown>, workspaceRo
     return unsafe("ExecuteCommand accesses a protected credential file.");
   }
 
-  const destructiveCheck = destructiveCommandCheck(command, workspaceRoot);
+  const destructiveCheck = destructiveCommandCheck(command, roots);
   if (destructiveCheck?.severity === "unsafe") return unsafe(`ExecuteCommand is destructive: ${destructiveCheck.reason}`);
   if (destructiveCheck?.severity === "ambiguous") return ambiguous(`ExecuteCommand may delete data: ${destructiveCheck.reason}`);
 
@@ -392,7 +443,7 @@ function classifyExecuteCommand(parameters: Record<string, unknown>, workspaceRo
     return unsafe("ExecuteCommand nests another shell interpreter, which is a command-injection vector.");
   }
 
-  const outsideReason = absolutePathEscapeReason(command, workspaceRoot);
+  const outsideReason = absolutePathEscapeReason(command, roots);
   if (outsideReason) return unsafe(`ExecuteCommand accesses a path outside the workspace: ${outsideReason}`);
 
   if (isHarmlessNoOp(command)) {
@@ -416,7 +467,7 @@ interface DestructiveCommandCheck {
   readonly reason: string;
 }
 
-function destructiveCommandCheck(command: string, workspaceRoot: string): DestructiveCommandCheck | null {
+function destructiveCommandCheck(command: string, roots: readonly string[]): DestructiveCommandCheck | null {
   const lower = command.toLowerCase();
 
   if (/\bmkfs(\.[a-z]+)?\b/.test(lower)) return { severity: "unsafe", reason: "mkfs creates a filesystem and destroys existing data." };
@@ -439,7 +490,7 @@ function destructiveCommandCheck(command: string, workspaceRoot: string): Destru
         return { severity: "unsafe", reason: `rm -rf target '${target}' would delete the filesystem root, home, or the workspace itself.` };
       }
       if (/^[A-Za-z]:[\\/]/.test(target)) return { severity: "unsafe", reason: `rm -rf target '${target}' is an absolute Windows path.` };
-      if (hasPathTraversal(target) || resolvesOutsideWorkspace(target, workspaceRoot)) {
+      if (hasPathTraversal(target) || resolvesOutsideAllTrustedRoots(target, roots)) {
         return { severity: "unsafe", reason: `rm -rf target '${target}' resolves outside the workspace.` };
       }
     }
@@ -496,14 +547,14 @@ function exfiltrationCommandReason(command: string): string | null {
   return null;
 }
 
-function absolutePathEscapeReason(command: string, workspaceRoot: string): string | null {
+function absolutePathEscapeReason(command: string, roots: readonly string[]): string | null {
   const fileAccess = /\b(cat|head|tail|grep|rg|sed|awk|less|more|wc|ls|find|file|stat|cp|mv|rm|touch|mkdir|node|python3?|open|source)\b/i.test(command);
   if (!fileAccess) return null;
   const absolutePaths = command.match(/(?<![\w./-])\/[A-Za-z0-9._-][^\s"'`;|&<>]*/g) ?? [];
   for (const candidate of absolutePaths) {
     const cleaned = candidate.replace(/[,;)]+$/, "");
     if (!cleaned) continue;
-    if (resolvesOutsideWorkspace(cleaned, workspaceRoot)) return cleaned;
+    if (resolvesOutsideAllTrustedRoots(cleaned, roots)) return cleaned;
   }
   return null;
 }
@@ -595,10 +646,10 @@ function classifyHttpRequest(parameters: Record<string, unknown>): StaticToolSaf
   return safe("HttpRequest performs a read-only GET with no secret-bearing headers or body.");
 }
 
-function classifyGit(parameters: Record<string, unknown>, workspaceRoot: string): StaticToolSafetyVerdict {
+function classifyGit(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
   const cwd = stringValue(parameters.cwd);
   if (cwd !== null && cwd.trim() !== "") {
-    if (hasPathTraversal(cwd) || resolvesOutsideWorkspace(cwd, workspaceRoot)) {
+    if (hasPathTraversal(cwd) || resolvesOutsideAllTrustedRoots(cwd, roots)) {
       return unsafe(`Git cwd '${cwd}' resolves outside the workspace.`);
     }
   }
@@ -618,7 +669,7 @@ function classifyGit(parameters: Record<string, unknown>, workspaceRoot: string)
       if (dataJson) return unsafe(dataJson);
       const protectedReason = protectedPathReason(path);
       if (protectedReason) return unsafe(`Git stage targets a protected file: ${protectedReason}`);
-      if (hasPathTraversal(path) || resolvesOutsideWorkspace(path, workspaceRoot)) {
+      if (hasPathTraversal(path) || resolvesOutsideAllTrustedRoots(path, roots)) {
         return unsafe(`Git stage path '${path}' resolves outside the workspace.`);
       }
     }
@@ -672,7 +723,7 @@ function classifyIntegrationTool(toolName: string, parameters: Record<string, un
 export function classifyToolCallStatically(
   toolName: string,
   parameters: unknown,
-  options: { readonly workspaceRoot?: string } = {},
+  options: { readonly workspaceRoot?: string; readonly allowedDirectories?: readonly string[] } = {},
 ): StaticToolSafetyVerdict {
   if (typeof toolName !== "string" || toolName.trim() === "") {
     return unsafe("Tool name is missing or invalid; refusing to execute an unknown tool call.");
@@ -680,7 +731,7 @@ export function classifyToolCallStatically(
   const record = parameters && typeof parameters === "object" && !Array.isArray(parameters)
     ? (parameters as Record<string, unknown>)
     : {};
-  const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
+  const roots = trustedRoots(options.workspaceRoot ?? process.cwd(), options.allowedDirectories);
 
   switch (toolName) {
     case "Read":
@@ -688,15 +739,15 @@ export function classifyToolCallStatically(
     case "Edit":
     case "FileSize":
     case "ListDirectory":
-      return classifyFileTool(toolName, record, workspaceRoot);
+      return classifyFileTool(toolName, record, roots);
     case "ExecuteCommand":
-      return classifyExecuteCommand(record, workspaceRoot);
+      return classifyExecuteCommand(record, roots);
     case "Http":
       return classifyHttp(record);
     case "HttpRequest":
       return classifyHttpRequest(record);
     case "Git":
-      return classifyGit(record, workspaceRoot);
+      return classifyGit(record, roots);
     case "AgentBus":
     case "SpecKeeper":
     case "SpecKeeperEnroll":
@@ -815,7 +866,7 @@ export async function classifyToolCall(
 ): Promise<ToolSafetyClassification> {
   const logger = options.logger ?? defaultLogger;
   const promptPath = options.promptPath ?? TOOL_SAFETY_PROMPT_PATH;
-  const staticVerdict = classifyToolCallStatically(toolName, parameters, { workspaceRoot: options.workspaceRoot });
+  const staticVerdict = classifyToolCallStatically(toolName, parameters, { workspaceRoot: options.workspaceRoot, allowedDirectories: options.allowedDirectories });
 
   if (staticVerdict.decision === "safe") {
     const classification: ToolSafetyClassification = { safe: true, reason: staticVerdict.reason, source: "static" };
