@@ -24,3 +24,6 @@ spec-server-setup.md
 
 # Generated runtime LLM prompt/response log; keep out of the repository.
 llm.log
+
+# Local agent-busctl client build; keep out of the repository.
+agent-busctl
