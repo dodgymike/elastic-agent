@@ -31,6 +31,8 @@ export interface ToolSafetyConfig {
   readonly agentSourceDir: string;
   /** Absolute path of the starting directory (the runtime working directory). */
   readonly startDir: string;
+  /** True when --start-dir was explicitly provided (not the runtime-cwd default). */
+  readonly startDirConfigured: boolean;
   /** True when edit-capable tools are allowed to modify files under the configured directories. */
   readonly allowAgentSourceModifications: boolean;
 }
@@ -97,6 +99,23 @@ export function resolveToolSafetyConfig(
     enabled: options.disableClassifier !== true,
     agentSourceDir,
     startDir,
+    startDirConfigured: options.startDir !== undefined,
     allowAgentSourceModifications: options.allowAgentSourceModifications === true,
   };
+}
+
+/**
+ * Build the model-facing path warning injected into tool-executing prompts.
+ *
+ * When `--start-dir` was explicitly configured, model tool calls must use
+ * paths that are absolute or relative to the normalized start directory. The
+ * returned value is the exact warning line with a leading blank-line separator
+ * so callers can append it to a prompt. When `--start-dir` was not provided
+ * (the runtime-cwd default), an empty string is returned so the prompt stays
+ * unchanged.
+ */
+export function startDirPathWarning(config: Pick<ToolSafetyConfig, "startDir" | "startDirConfigured">): string {
+  return config.startDirConfigured
+    ? `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${config.startDir}.`
+    : "";
 }

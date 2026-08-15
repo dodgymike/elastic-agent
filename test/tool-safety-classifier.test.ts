@@ -64,6 +64,7 @@ type TestToolSafetyConfig = {
   enabled: boolean;
   agentSourceDir: string;
   startDir: string;
+  startDirConfigured: boolean;
   allowAgentSourceModifications: boolean;
 };
 
@@ -395,18 +396,21 @@ async function main(): Promise<void> {
       enabled: true,
       agentSourceDir,
       startDir,
+      startDirConfigured: true,
       allowAgentSourceModifications: false,
     };
     const allowEditsConfig: TestToolSafetyConfig = {
       enabled: true,
       agentSourceDir,
       startDir,
+      startDirConfigured: true,
       allowAgentSourceModifications: true,
     };
     const disabledConfig: TestToolSafetyConfig = {
       enabled: false,
       agentSourceDir,
       startDir,
+      startDirConfigured: true,
       allowAgentSourceModifications: false,
     };
     const privateKeyBlock = ["-----BEGIN ", "RSA PRIVATE KEY-----"].join("");

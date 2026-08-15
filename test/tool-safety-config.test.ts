@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { resolveToolSafetyConfig } from "../tool-safety-config.js";
+import { resolveToolSafetyConfig, startDirPathWarning } from "../tool-safety-config.js";
 
 const sandbox = mkdtempSync(join(tmpdir(), "tool-safety-config-"));
 
@@ -69,6 +69,28 @@ try {
   assert.throws(
     () => resolveToolSafetyConfig({ agentSourceDir: "   " }, sandbox),
     /--agent-source-dir requires a non-empty directory path/,
+  );
+
+  // startDirPathWarning injects the exact required path line (with a blank-line
+  // separator) only when --start-dir was explicitly configured.
+  assert.equal(
+    startDirPathWarning({ startDir: "/abs/start-dir", startDirConfigured: true }),
+    "\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO /abs/start-dir.",
+  );
+
+  // The line is omitted entirely when the flag is absent (runtime-cwd default).
+  assert.equal(
+    startDirPathWarning({ startDir: resolve(sandbox), startDirConfigured: false }),
+    "",
+  );
+
+  // Resolution + warning together: a relative --start-dir resolves to an
+  // absolute path before the warning is rendered.
+  const childConfig = resolveToolSafetyConfig({ startDir: "child" }, sandbox);
+  assert.equal(childConfig.startDirConfigured, true);
+  assert.equal(
+    startDirPathWarning(childConfig),
+    `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${resolve(sandbox, "child")}.`,
   );
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
