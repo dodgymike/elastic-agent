@@ -44,6 +44,7 @@ import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTas
 import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
 import { classifyToolCall, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
+import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 
 const terminalColor = terminalColorEnabled(process.stdout);
 if (!terminalColor) chalk.level = 0;
@@ -877,6 +878,24 @@ async function dispatchToolCall(output) {
         const message = `No exec_handler found for tool: ${output.name}`;
         renderToolCallFailed(output, { error: message });
         return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+    }
+
+    // ExecuteCommand preflight: keep supported git commands on the dedicated
+    // Git tool. Clear mappings (status/log/diff/ls-files/add/commit) are
+    // refused with an actionable Git tool suggestion before the general safety
+    // classifier runs; unclear mappings are sent to the git-command router LLM
+    // and its refusal is respected here.
+    if (output.name === "ExecuteCommand") {
+        const routing = await routeGitExecuteCommand(toolArguments.command, {
+            runtime: client,
+            promptPath: isAbsolute(GIT_COMMAND_ROUTER_PROMPT_PATH)
+                ? GIT_COMMAND_ROUTER_PROMPT_PATH
+                : join(mainCwd, GIT_COMMAND_ROUTER_PROMPT_PATH),
+        });
+        if (routing.action === "refuse") {
+            renderToolCallFailed(output, { error: routing.reason });
+            return { output, toolArguments, toolResponse: { error: routing.reason }, errorMessage: routing.reason };
+        }
     }
 
     let classification;
