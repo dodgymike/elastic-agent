@@ -223,6 +223,38 @@ function main(): void {
     );
     check("non-string inviteFile is rejected", /inviteFile must be a string/i.test(errNonStringInvite));
 
+    // ---- workspace boundary & protected-store protections -------------------
+    // An explicit inviteFile must resolve inside the workspace root and must
+    // never name the runtime's protected data store or the roster itself.
+    const outsideRoot = mkdtempSync(join(tmpdir(), "agent-bus-outside-"));
+    const outsideInvite = join(outsideRoot, "agent-bus-invite-x.json");
+    writeInvite(outsideInvite);
+    const errOutside = captureError(() =>
+      agentBusEnrol({ rootDir: root, inviteFile: outsideInvite }),
+    );
+    check(
+      "an invite path outside the workspace root is refused",
+      /outside the workspace root/i.test(errOutside),
+    );
+
+    const dataJson = join(root, "data.json");
+    const errDataJson = captureError(() =>
+      agentBusEnrol({ rootDir: root, inviteFile: dataJson }),
+    );
+    check(
+      "data.json is never read as an invite file",
+      /protected data store/i.test(errDataJson) && !/not valid JSON/i.test(errDataJson),
+    );
+
+    const rosterFile = join(root, ".agent-bus.local");
+    const errRoster = captureError(() =>
+      agentBusEnrol({ rootDir: root, inviteFile: rosterFile }),
+    );
+    check(
+      ".agent-bus.local is never read as an invite file",
+      /protected data store/i.test(errRoster),
+    );
+
     // ---- store not exposed to the repository --------------------------------
     // The roster file is git-ignored so enrollment metadata can never be
     // accidentally committed, and the docs never embed any of the test values.

@@ -68,6 +68,11 @@ is ever emitted for a tool call.
 - Invalid or missing arguments: `TypeError`.
 - Invite file unreadable or not valid JSON: `Error` naming the file and the
   parse problem.
+- Invite path resolving outside the workspace root: `Error` — the invite file
+  must live inside the workspace; an explicit `inviteFile` cannot point outside
+  the repo root.
+- Invite path naming `data.json` or `.agent-bus.local`: `Error` — these are the
+  runtime's protected data store / roster and are never read as invites.
 - Missing required invite fields (bus URL, fingerprint, or bearer
   credential): `Error` stating which are absent (never echoing secret values).
 - Invalid fingerprint (not 64 lowercase hex): `Error`.
@@ -102,6 +107,9 @@ is ever emitted for a tool call.
   secrets in output, `.agent-bus.local`, commit messages, or handoffs.
 - Passing an invite path; name, or identity store path containing control
   characters.
+- Passing an invite path that resolves outside the workspace root or that names
+  the runtime's protected data store (`data.json`) or the roster
+  (`.agent-bus.local`); the tool refuses these.
 - Guessing among multiple invite files; the tool refuses instead.
 
 **Dangerous examples (do not run)**

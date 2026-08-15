@@ -7,7 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 /**
  * Redeem an agent-bus enrollment invite through the local `agent-busctl`
@@ -266,6 +266,23 @@ export default function agentBusEnrol(options: AgentBusEnrolOptions = {}): Agent
   const invitePath = options.inviteFile
     ? resolve(root, options.inviteFile)
     : discoverInviteFile(root);
+
+  // SECURITY: the invite file must stay within the workspace and must never be
+  // the runtime's protected data store (`data.json`) or a secret store. We
+  // refuse rather than read anything outside the repo root so an explicit
+  // inviteFile cannot be abused to exfiltrate arbitrary files.
+  const rootAbs = resolve(root);
+  if (invitePath !== rootAbs && !invitePath.startsWith(`${rootAbs}${sep}`)) {
+    throw new Error(
+      `Invite file '${invitePath}' resolves outside the workspace root '${rootAbs}'. Move the invite inside the workspace or pass an in-workspace path.`,
+    );
+  }
+  const basename = invitePath.slice(invitePath.lastIndexOf(sep) + 1);
+  if (basename === "data.json" || basename === ".agent-bus.local") {
+    throw new Error(
+      `Refusing to read '${basename}' as an invite file: that is the runtime's protected data store. Use an '${INVITE_GLOB}' invite instead.`,
+    );
+  }
 
   const invite = loadAndValidateInvite(invitePath);
   const name = options.name ? options.name.trim() : invite.name ?? "";
