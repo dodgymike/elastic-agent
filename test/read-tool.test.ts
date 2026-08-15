@@ -87,6 +87,53 @@ async function main(): Promise<void> {
     // 8. read_offset beyond EOF is rejected rather than returning garbage.
     const beyond = await Read({ path: small, file_size: smallSize.size, read_offset: smallSize.size + 1, read_length: 10 });
     check("read_offset beyond EOF is rejected", beyond.error !== undefined && /beyond/.test(String(beyond.error)));
+
+    // 9. line_range reads only the requested lines and returns the full-file hash.
+    const numbered = join(dir, "numbered.txt");
+    const numberedText = Array.from({ length: 10 }, (_, index) => `line${index + 1}`).join("\n") + "\n";
+    writeFileSync(numbered, numberedText);
+    const numberedSize = await FileSize({ path: numbered });
+    const numberedRange = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "3-5" });
+    check("line_range 3-5 returns only those lines", numberedRange.error === undefined && numberedRange.content === "line3\nline4\nline5");
+    const numberedExpectedHash = createHash("sha256").update(readFileSync(numbered)).digest("hex");
+    check("line_range returns the full-file hash", numberedRange.read_hash === numberedExpectedHash);
+
+    // 10. A single-line line_range is accepted.
+    const singleLine = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "7" });
+    check("single-line line_range returns that line", singleLine.error === undefined && singleLine.content === "line7");
+
+    // 11. Invalid line_range values are rejected with actionable messages.
+    const zeroRange = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "0-3" });
+    check("line_range 0-3 is rejected as non-positive", zeroRange.error !== undefined && /positive integers/.test(String(zeroRange.error)));
+    const reversedRange = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "5-3" });
+    check("line_range 5-3 is rejected as reversed", reversedRange.error !== undefined && /less than or equal/.test(String(reversedRange.error)));
+    const malformedRange = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "3-4-5" });
+    check("malformed line_range is rejected", malformedRange.error !== undefined && /line_range must be/.test(String(malformedRange.error)));
+    const blankRange = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "   " });
+    check("blank line_range is rejected", blankRange.error !== undefined && /non-empty/.test(String(blankRange.error)));
+    const nonStringRange = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: 123 } as any);
+    check("non-string line_range is rejected", nonStringRange.error !== undefined && /must be a string/.test(String(nonStringRange.error)));
+
+    // 12. line_range end beyond the file's total line count is rejected.
+    const tooManyLines = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "9-11" });
+    check("line_range end beyond the total line count is rejected", tooManyLines.error !== undefined && /total line count 10/.test(String(tooManyLines.error)));
+
+    // 13. line_range works when byte-window parameters are omitted (direct API).
+    const rangeWithoutWindow = await Read({ path: numbered, file_size: numberedSize.size, line_range: "2-3" } as any);
+    check("line_range works without read_offset/read_length", rangeWithoutWindow.error === undefined && rangeWithoutWindow.content === "line2\nline3");
+
+    // 14. An inconsistent byte window is rejected rather than returning partial lines.
+    const inconsistentWindow = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: 1, line_range: "1-1" });
+    check("inconsistent line_range/byte window is rejected", inconsistentWindow.error !== undefined && /not fully contained/.test(String(inconsistentWindow.error)));
+    const consistentWindow = await Read({ path: numbered, file_size: numberedSize.size, read_offset: 0, read_length: numberedSize.size, line_range: "8-10" });
+    check("full-file byte window is consistent with line_range", consistentWindow.error === undefined && consistentWindow.content === "line8\nline9\nline10");
+
+    // 15. line_range on an empty file is rejected with a clear message.
+    const emptyFile = join(dir, "empty-lines.txt");
+    writeFileSync(emptyFile, "");
+    const emptySize = await FileSize({ path: emptyFile });
+    const emptyRange = await Read({ path: emptyFile, file_size: emptySize.size, read_offset: 0, read_length: 1, line_range: "1-1" });
+    check("line_range on an empty file is rejected", emptyRange.error !== undefined && /file has no lines/.test(String(emptyRange.error)));
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
   }

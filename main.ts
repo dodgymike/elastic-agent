@@ -192,7 +192,7 @@ const tools = [
     {
         type: "function", name: "Read",
         usage_prompt: "tools/read-usage.md",
-        description: "Read a page of a UTF-8 file after first obtaining its size with FileSize. Requires path, file_size, read_length, and read_offset. Refuses files larger than 500k.",
+        description: "Read a UTF-8 file after first obtaining its size with FileSize. Use read_offset and read_length to read a byte window, or pass an optional inclusive 1-based line_range such as '100-200' to read only those lines. Refuses files larger than 500k.",
         parameters: {
             type: "object",
             properties: {
@@ -200,10 +200,11 @@ const tools = [
                 file_size: { type: "number", description: "Size of the file in bytes. Obtain this from the FileSize tool before calling Read." },
                 read_length: { type: "number", description: "Maximum number of bytes to return in this page." },
                 read_offset: { type: "number", description: "Zero-based byte offset at which to start reading." },
+                line_range: { type: "string", description: "Optional inclusive 1-based line range such as '100-200' (or '100' for a single line). Alternative to byte paging: Read returns only those lines. When supplied, pass read_offset 0 and read_length file_size so the byte window covers the requested lines." },
             },
             required: ["path", "file_size", "read_length", "read_offset"],
         },
-        exec_handler: ({ path, file_size, read_length, read_offset }) => Read({ path, file_size, read_length, read_offset }),
+        exec_handler: ({ path, file_size, read_length, read_offset, line_range }) => Read({ path, file_size, read_length, read_offset, line_range }),
     },
     {
         type: "function", name: "FileSize",
