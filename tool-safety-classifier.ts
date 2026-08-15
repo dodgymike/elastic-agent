@@ -840,8 +840,23 @@ function classifyGit(parameters: Record<string, unknown>, roots: readonly string
     }
   }
 
-  const action = parameters.action;
+  // Normalize Git's read-only `mode` values into the read-only action space.
+  // `mode: "status" | "log" | "diff" | "ls-files"` selects a read-only git
+  // subcommand, and `action: "list"` remains the legacy read-only status alias.
+  // The Git tool has no `command` parameter, so only `mode` is available as a
+  // fallback when `action` is missing. Empty strings count as missing so a
+  // malformed selector still falls back deterministically.
+  const requestedAction = stringValue(parameters.action);
+  const requestedMode = stringValue(parameters.mode);
+  const action = requestedAction !== null && requestedAction.trim() !== ""
+    ? requestedAction
+    : requestedMode !== null && requestedMode.trim() !== ""
+      ? requestedMode
+      : null;
   if (action === "list") return safe("Git list is a read-only status operation.");
+  if (action === "status" || action === "log" || action === "diff" || action === "ls-files") {
+    return safe(`Git ${action} is a read-only operation.`);
+  }
   if (action === "stage") {
     const all = parameters.all === true;
     const paths = Array.isArray(parameters.paths) ? parameters.paths : [];
@@ -868,7 +883,10 @@ function classifyGit(parameters: Record<string, unknown>, roots: readonly string
     if (secret) return unsafe(`Git commit message is unsafe: ${secret}`);
     return safe("Git commit carries a non-sensitive message.");
   }
-  return ambiguous(`Git action '${String(action)}' is not recognized; the tool itself will reject the call.`);
+  if (action === null) {
+    return unsafe("Git call has neither a recognized action nor a recognized mode; the tool itself will reject the call.");
+  }
+  return unsafe(`Git selector '${action}' is not a recognized action or mode; the tool itself will reject the call.`);
 }
 
 function classifyIntegrationTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
