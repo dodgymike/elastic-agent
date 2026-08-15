@@ -333,7 +333,7 @@ const tools = [
         parameters: {
             type: "object",
             properties: {
-                path: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }, body: {}, baseUrl: { type: "string" }, accessToken: { type: "string" }, userAgent: { type: "string" },
+                path: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }, body: {}, baseUrl: { type: "string" }, accessToken: { type: "string" }, identity: { type: "string", description: "Agent identity; defaults to AGENT_BUS_AGENT_ID or the enrolled agentId in .agent-bus.local." }, store: { type: "string", description: "Path to the .agent-bus.local roster; defaults to AGENT_BUS_STORE or <cwd>/.agent-bus.local." }, userAgent: { type: "string" },
             }, required: ["path"],
         },
         exec_handler: (options) => AgentBus(options),

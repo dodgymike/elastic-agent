@@ -21,8 +21,14 @@ state; use `SpecKeeper` for that.
 
 - `method` (string): `GET` | `POST` | `PUT` | `PATCH` | `DELETE` (default `GET`).
 - `body` (unknown): JSON payload for the request.
-- `baseUrl` (string): deployment endpoint; defaults to `AGENT_BUS_BASE_URL`.
-- `accessToken` (string): Bearer token; defaults to `AGENT_BUS_ACCESS_TOKEN`.
+- `baseUrl` (string): deployment endpoint; defaults to `AGENT_BUS_BASE_URL`, then the
+  enrolled `busUrl` in `.agent-bus.local`.
+- `accessToken` (string): Bearer token; defaults to `AGENT_BUS_ACCESS_TOKEN`. Never stored
+  in `.agent-bus.local`.
+- `identity` (string): agent identity (for example the enrolled agent id). Defaults to
+  `AGENT_BUS_AGENT_ID`, then the enrolled `agentId` in `.agent-bus.local`.
+- `store` (string): path to the `.agent-bus.local` roster. Defaults to `AGENT_BUS_STORE`,
+  then `<cwd>/.agent-bus.local`.
 - `userAgent` (string): defaults to `elastic-agent-agent-bus/1.0`.
 
 ## Result
@@ -31,6 +37,38 @@ state; use `SpecKeeper` for that.
 - `statusText` (string): HTTP status text.
 - `headers` (object): response headers.
 - `body` (unknown): parsed JSON when possible, otherwise response text.
+- `identity` (string): resolved agent identity used for the call, when one was configured.
+- `baseUrlSource` (string): source of the resolved base URL — `option`, `environment`,
+  or `store`.
+
+## Local secrets store
+
+`AgentBus` can read default configuration from the local, **non-secret** roster file
+`.agent-bus.local` written by `AgentBusEnrol`. This lets an enrolled agent call the bus
+without repeating its base URL or agent id on every call.
+
+**How credentials are loaded (precedence, highest first):**
+
+1. Explicit per-call options (`baseUrl`, `accessToken`, `identity`, `store`).
+2. Environment variables (`AGENT_BUS_BASE_URL`, `AGENT_BUS_ACCESS_TOKEN`,
+   `AGENT_BUS_AGENT_ID`, `AGENT_BUS_STORE`).
+3. The local roster `.agent-bus.local`: `busUrl` and `agentId` only.
+
+So an operator's secret manager (environment or per-call option) always overrides the
+enrolled defaults.
+
+**How the store is used:**
+
+- Looked up at `options.store`, else `AGENT_BUS_STORE`, else `<cwd>/.agent-bus.local`.
+- Read with `loadAgentBusLocalConfig`: a missing or malformed store is treated as "no
+  defaults" rather than failing the call, so the client stays usable when everything is
+  configured via the environment.
+- Only the non-secret `busUrl` and `agentId` keys are read; secrets are never read from or
+  written to this file.
+
+**Never commit `.agent-bus.local`.** It is added to `.gitignore`; keep it out of the
+repository, commit messages, docs, and handoffs. It never contains secret material, but it
+reveals enrollment layout and should stay local and mode 0600.
 
 ## Formatted terminal output
 

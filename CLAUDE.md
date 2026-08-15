@@ -41,3 +41,14 @@ console.
   never when answering questions; read `tools/spec-keeper-usage.md` first.
 - Follow `SDLC.md` (plan → execute → review → finish/retry) and the tool
   error-handling contract in `ERROR_HANDLING.md`.
+
+<!-- WORKSPACE-START-DIRECTORY (system-injected; do not remove) -->
+
+# Starting directory
+
+The runtime started in the canonical directory `/mnt/sdb4/mike/mike/source/elastic-agent`
+(initial working directory `/mnt/sdb4/mike/mike/source/elastic-agent`).
+
+Prefix every relative path in your tool calls and reasoning with the
+starting directory name `elastic-agent/` (for example `elastic-agent/main.ts`)
+so file references are unambiguous and stay within the trusted workspace root.
