@@ -7,8 +7,21 @@
  *   2. task mode: `elastic-agent --task-id <task-id>` (claim and execute an
  *      existing Spec Keeper task).
  *
- * This module owns the argument classification and the task-ID well-formedness
- * rule so the rules can be unit-tested without booting the agent loop.
+ * Loop mode (`--loop`) is a mode *modifier*, not a third exclusive mode: it
+ * may be combined with either prompt mode or task mode. When `--loop` is set,
+ * the runtime keeps running and watches the Agent Bus between execution steps
+ * so incoming coordination messages can be classified and either handled
+ * (relevant messages trigger a re-plan) or queued for later. See loop-mode.ts
+ * for the classification rule and main.ts for the poll loop.
+ *
+ * Mode rules:
+ *   - prompt mode and task mode are mutually exclusive (at least one required).
+ *   - --loop is additive: it may be combined with either mode and never selects
+ *     a mode by itself.
+ *
+ * This module owns the argument classification, the task-ID well-formedness
+ * rule, and the loop flag, so the rules can be unit-tested without booting the
+ * agent loop.
  */
 
 export type CliRunMode = "prompt" | "task";
@@ -19,6 +32,8 @@ export interface ResolvedCliRunMode {
   readonly taskId?: string;
   /** Original prompt text when mode is "prompt". */
   readonly prompt?: string;
+  /** Whether loop mode is enabled (--loop). Additive to either base mode. */
+  readonly loop: boolean;
 }
 
 /**
@@ -52,10 +67,13 @@ export function normalizeTaskId(value: string | undefined): string {
 /**
  * Resolve the CLI run mode from the parsed positional prompt and --task-id.
  * The two modes are mutually exclusive and at least one must be supplied.
+ * `loop` is an additive modifier: it never selects a mode by itself and may be
+ * combined with either prompt mode or task mode.
  */
 export function resolveCliRunMode(
   taskId: string | undefined,
   prompt: string | undefined,
+  loop = false,
 ): ResolvedCliRunMode {
   const hasPrompt = typeof prompt === "string" && prompt.trim().length > 0;
   const hasTaskId = taskId !== undefined;
@@ -67,7 +85,7 @@ export function resolveCliRunMode(
         "Usage: <prompt> and --task-id cannot be used together. Use either prompt mode or task mode, not both.",
       );
     }
-    return { mode: "task", taskId: normalizedTaskId };
+    return { mode: "task", taskId: normalizedTaskId, loop };
   }
 
   if (!hasPrompt) {
@@ -76,5 +94,5 @@ export function resolveCliRunMode(
     );
   }
 
-  return { mode: "prompt", prompt: prompt as string };
+  return { mode: "prompt", prompt: prompt as string, loop };
 }

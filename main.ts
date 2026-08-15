@@ -1,6 +1,20 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
+import { defaultBusQueueFilePath } from "./loop-queue.js";
+import { messageToSearchableText } from "./loop-mode.js";
+import {
+    pollLoopBusOnce,
+    resolveLoopPollTiming,
+    type AgentBusRead,
+} from "./loop-poll.js";
+import {
+    consumeReplanBudget,
+    decideSafeReplan,
+    extractReplanPrompt,
+    initialLoopReplanBudget,
+    type LoopReplanBudget,
+} from "./loop-replan.js";
 import { resolveToolSafetyConfig } from "./tool-safety-config.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
@@ -18,7 +32,8 @@ import {
     throwIfReplanAttemptLimitReached,
     throwIfReplanTimeBudgetExceeded,
 } from "./llm/replan-abort.js";
-import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
+import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence, listWorktrees } from "./worktree.js";
+import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
 import { startToolTimer } from "./tool-timer.js";
@@ -71,6 +86,7 @@ program
     .description("Plan and execute a prompt with the selected LLM provider.")
     .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
+    .option("--loop", "keep running in loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--review", "Run the review stage after execution (default: false)", false)
     .option("--disable-classifier", "Bypass the tool safety classifier", false)
@@ -91,10 +107,13 @@ Credentials must be supplied through the runtime environment or secret manager, 
 `);
 program.parse(process.argv);
 const options = program.opts();
-const commandLinePrompt = program.args[0];
+// The prompt is mutable so loop mode can re-enter planning with a relevant
+// Agent Bus message as the new work order (see runAgentReplanLoop / step 5 of
+// the loop-mode plan). The first execution uses the CLI positional prompt.
+let commandLinePrompt = program.args[0];
 let runMode: ReturnType<typeof resolveCliRunMode>;
 try {
-    runMode = resolveCliRunMode(options.taskId, commandLinePrompt);
+    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.loop === true);
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -179,6 +198,121 @@ const buildPromptTemplate = readFileSync("prompts/build-prompt-skeleton.txt", "u
 const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.txt", "utf-8");
 const replanPromptTemplate = readFileSync("prompts/replan-prompt.txt", "utf-8");
 const reviewPromptTemplate = readFileSync("prompts/review-prompt.txt", "utf-8");
+
+// ---------------------------------------------------------------------------
+// Loop mode (`--loop`) between-step Agent Bus polling.
+//
+// When loop mode is enabled the runtime keeps running and, at each execution
+// step boundary, polls the Agent Bus feed for new coordination messages. Every
+// message is classified (see loop-mode.ts): a *relevant* message (one that
+// references the current plan/task ID or carries a plan-change directive) is
+// surfaced as a re-plan candidate; any other message is queued durably with
+// loop-queue.ts so unrelated coordination never disturbs the plan in flight.
+//
+// The poll runs on an injectable interval (`LOOP_POLL_INTERVAL_MS`, default
+// DEFAULT_LOOP_POLL_INTERVAL_MS) and each individual request is bounded by a
+// configurable timeout (`LOOP_POLL_REQUEST_TIMEOUT_MS`) so a hung or
+// unconfigured bus never blocks a step boundary indefinitely. Missing queue
+// files, a malformed queue, and an unreachable bus are all soft failures: loop
+// mode fails open to normal execution rather than crashing the run.
+// ---------------------------------------------------------------------------
+let pendingLoopReplanMessages: unknown[] = [];
+
+/**
+ * The bus poll timing (poll interval + per-request timeout), resolved once at
+ * module load from `LOOP_POLL_INTERVAL_MS`/`LOOP_POLL_REQUEST_TIMEOUT_MS` (or
+ * the documented defaults). Only relevant when loop mode is active.
+ */
+const loopPollTiming = resolveLoopPollTiming();
+
+/**
+ * The durable queue file path used by loop mode to persist queued (irrelevant)
+ * bus messages. It lives in the project root as `bus-queue.json` (see
+ * loop-queue.ts) and is drained on a later restart.
+ */
+const loopQueueFilePath = defaultBusQueueFilePath(mainCwd);
+
+/**
+ * Feed path read from the Agent Bus during loop mode. The default is the
+ * deployment's messages route; operators may override it via
+ * `LOOP_BUS_MESSAGES_PATH`.
+ */
+const loopBusMessagesPath = process.env.LOOP_BUS_MESSAGES_PATH ?? "/api/v1/messages";
+
+/**
+ * Wrap the real AgentBus client so it satisfies the `AgentBusRead` contract
+ * used by pollLoopBusOnce: a bounded single GET of the messages route that
+ * normalizes success/transport failure into a non-throwing result (the bus
+ * client itself may throw when unconfigured — we capture that as a soft
+ * "read failed" outcome instead of letting it propagate into the step loop).
+ */
+const loopBusRead: AgentBusRead = async ({ path, timeoutMs }) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const result = await AgentBus({ path, method: "GET" });
+        return { body: result.body, status: result.status };
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return { body: null, status: 0, error: reason };
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
+/**
+ * Surface relevant loop-mode bus messages captured in an earlier between-step
+ * poll. Step 5 (replanning for relevant messages) consumes this; until then it
+ * holds the messages that warrant a re-plan so no relevant directive is lost.
+ */
+function pendingLoopReplanText(): string {
+    return messageToSearchableText(
+        (pendingLoopReplanMessages[0] ?? { text: "" }) as { text?: string },
+    );
+}
+
+/**
+ * Perform one between-steps bus poll and route the result:
+ *   - relevant messages (plan-change directives / plan-ID references) are
+ *     recorded as pending re-plan candidates and reported;
+ *   - irrelevant messages are enqueued durably (loop-queue.ts).
+ *
+ * Returns true when a relevant message was found (the caller should break out
+ * of its current step loop and re-enter planning with the message as the new
+ * prompt). Transport/unconfiguration failures are soft: they log a warning and
+ * return false so the step loop continues normally.
+ */
+async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): Promise<boolean> {
+    if (!options.loop) return false;
+    const planId = runMode.mode === "task" ? runMode.taskId : undefined;
+    const result = await pollLoopBusOnce({
+        read: loopBusRead,
+        path: loopBusMessagesPath,
+        requestTimeoutMs: loopPollTiming.requestTimeoutMs,
+        queueFilePath: loopQueueFilePath,
+        context: { planId },
+        report: (message) => status.warning(message, reportPrefix),
+    });
+    if (result.warnings.length > 0) {
+        for (const warning of result.warnings) {
+            if (result.readFailed) {
+                status.warning(`loop poll: ${warning}`, reportPrefix);
+            }
+        }
+    }
+    if (result.relevantMessages.length > 0) {
+        pendingLoopReplanMessages = [...result.relevantMessages];
+        for (const relevant of result.relevantMessages) {
+            const text = truncate(messageToSearchableText(relevant as { text?: string }), 240);
+            status.replan(`loop mode detected a relevant bus message warranting re-plan: ${text}`, reportPrefix);
+        }
+        return true;
+    }
+    if (result.queuedCount > 0) {
+        status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, reportPrefix);
+    }
+    return false;
+}
 
 /**
  * Print one status line through `write`, applying `prefix` before the chalk
@@ -1537,7 +1671,7 @@ async function runSingleStep(
     }
 }
 
-async function main(options: { review?: boolean } = {}): Promise<{ success: boolean }> {
+async function main(options: { review?: boolean; loop?: boolean } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
     client = new MultiTurnLlmRuntime(
         await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
         modelConfiguration.model,
@@ -1644,8 +1778,17 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
             await specKeeperTaskNote(taskLifecycle, "note (execution started)", "Task-mode direct execution started.");
         }
         await runSingleStep(directPrompt, configData, options.review === true, specKeeperDefaults, isTaskMode, originalPrompt, taskLifecycle);
+        // Between-step poll: even the no-plan path honors loop mode by checking
+        // the bus after the direct execution step completed. A relevant message
+        // is surfaced as a re-plan candidate; the outer replan loop (step 5)
+        // re-enters planning with that message.
+        const noPlanLoopReplan = await pollLoopBusBetweenSteps(hierarchyIndent("contentInStep"));
         const totals = totalUsage(configData.tokenUsage);
         status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+        if (noPlanLoopReplan) {
+            status.replan("Loop mode: relevant bus message received after direct execution; deferring completion so the plan can be re-planning with the message as the new work order.", hierarchyIndent("plan"));
+            return { success: true, loopReplanPending: true };
+        }
         status.success(isTaskMode ? "Task-mode direct execution complete. Stopping." : "Direct execution complete. Stopping.");
         return { success: true };
     }
@@ -1789,6 +1932,11 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     let reviewAttempt = 0;
     let reviewOutcome: "passed" | "failed" | null = null;
     let executionContext = "(none)";
+    // Set when loop mode interrupted the review/execution loop because a
+    // relevant Agent Bus message was received between steps. When set, the
+    // execution worktree is intentionally left in place (uncommitted) so the
+    // re-planning logic in step 5 can re-enter planning without losing work.
+    let loopReplanInterrupted = false;
 
     if (taskLifecycle) {
         await specKeeperTaskNote(
@@ -1803,7 +1951,24 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
             throwIfAborted(abortController.signal, "review");
             await runExecutionPhase(activeSteps, plan, configData, executionContext, true, specKeeperState, taskLifecycle);
             reviewAttempt += 1;
+            // Between-step poll (execute -> review): if a relevant Agent Bus
+            // message arrived while the plan was being executed, stop the
+            // review loop so the work is left uncommitted for re-planning
+            // rather than committing work the coordinator just redirected.
+            if (await pollLoopBusBetweenSteps(hierarchyIndent("plan"))) {
+                loopReplanInterrupted = true;
+                status.replan("Loop mode: relevant bus message received after execution; deferring the review so the plan can be re-planned.", hierarchyIndent("plan"));
+                break;
+            }
             const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt, originalPrompt);
+            // Between-step poll (review -> commit / next execution): a relevant
+            // message here also defers any commit/re-review so a passing review
+            // does not commit work the coordinator has redirected.
+            if (await pollLoopBusBetweenSteps(hierarchyIndent("plan"))) {
+                loopReplanInterrupted = true;
+                status.replan("Loop mode: relevant bus message received after review; deferring commit so the plan can be re-planned.", hierarchyIndent("plan"));
+                break;
+            }
             if (review.passed) {
                 status.success(`Review passed on attempt ${reviewAttempt}.`);
                 // The review step is happy: commit the staged execution work.
@@ -1875,6 +2040,14 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     } else {
         throwIfAborted(abortController.signal, "execution");
         await runExecutionPhase(activeSteps, plan, configData, executionContext, false, specKeeperState, taskLifecycle);
+        // Between-step poll (no-review path): after the plan finished executing,
+        // check the bus once for a relevant coordination message. When found,
+        // defer the run's completion so the plan can be re-planned (the pending
+        // replan message is retained for step 5's replan loop).
+        if (await pollLoopBusBetweenSteps(hierarchyIndent("plan"))) {
+            loopReplanInterrupted = true;
+            status.replan("Loop mode: relevant bus message received after execution; deferring completion so the plan can be re-planned.", hierarchyIndent("plan"));
+        }
         if (specKeeperState?.runTask) {
             await specKeeperSync("run task done", async () => updateTaskStatus(
                 specKeeperState.runTask,
@@ -1902,6 +2075,24 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
         return { success: false };
     }
 
+    // Loop mode interruption: a relevant Agent Bus message was received
+    // between steps. The execution worktree is intentionally left in place
+    // (uncommitted) so the re-planning logic in step 5 can re-enter planning
+    // on top of the preserved work rather than losing it. The run still
+    // completes normally here; the pending replan message is surfaced so the
+    // outer loop (step 5) can re-plan with it as the new prompt.
+    if (loopReplanInterrupted) {
+        const replanText = truncate(pendingLoopReplanText() || "a plan-change directive", 240);
+        status.replan(`Loop mode: execution interrupted for re-planning. Pending replan message: ${replanText}. The execution worktree was preserved for the replan.`, hierarchyIndent("plan"));
+        // Do NOT call cleanupExecutionWorktree() here; the preserved worktree is
+        // needed by the replan loop (step 5) that follows. Signal the outer
+        // replan controller so it re-enters planning with the message as the new
+        // work order instead of treating this as a normal completed run.
+        const totals = totalUsage(configData.tokenUsage);
+        status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+        return { success: true, loopReplanPending: true };
+    }
+
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     status.success(isTaskMode ? "Task-mode plan execution complete. Stopping." : "Plan complete. Stopping.");
@@ -1925,7 +2116,128 @@ function cleanupExecutionWorktree(reportAbort = false) {
     }
 }
 
-main(options)
+// ---------------------------------------------------------------------------
+// Loop-mode replanning (step 5 of the loop-mode plan).
+//
+// When a relevant Agent Bus message interrupts execution, main() returns with
+// `loopReplanPending: true` and the execution worktree intentionally preserved
+// (uncommitted). `gitStatusPorcelain(cwd)` and the safety predicates below let
+// the replan loop decide whether re-entering planning is safe, and
+// `runAgentReplanLoop` re-drives the plan-then-execute flow with the relevant
+// message as the new prompt, up to a bounded replan budget.
+//
+// The worktree lifecycle is coordinated safely across replans: the preserved
+// worktree is NOT cleaned up between replan iterations (main() returns with it
+// intact, and `ensureWorktree` reuses the same worktree for the new execution),
+// and cleanup runs only once the whole replan loop finishes (or aborts).
+// ---------------------------------------------------------------------------
+
+/** Run `git status --porcelain` in a checkout; null when git cannot be run. */
+function gitStatusPorcelain(cwd: string): string | null {
+    try {
+        const result = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf-8" });
+        if (result.error || result.status !== 0) return null;
+        return (result.stdout ?? "").trim();
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Build the safety-check predicates the replan guard consumes. These wire the
+ * real worktree/main-checkout state into decideSafeReplan (see loop-replan.ts)
+ * so re-planning is allowed only when it will not corrupt uncommitted work.
+ */
+function loopReplanSafetyChecks(): {
+    worktreeHasWork: () => boolean | null;
+    mainCheckoutIsDirty: () => boolean | null;
+    worktreeExists: () => boolean | null;
+} {
+    const worktreeExists = (): boolean =>
+        executionWorktreePath !== null || listWorktrees(mainCwd).has(executionWorktreeBranch);
+    const worktreeHasWork = (): boolean | null => {
+        const path = executionWorktreePath ?? listWorktrees(mainCwd).get(executionWorktreeBranch) ?? null;
+        if (!path) return null;
+        const status = gitStatusPorcelain(path);
+        return status === null ? null : status.length > 0;
+    };
+    const mainCheckoutIsDirty = (): boolean | null => {
+        const status = gitStatusPorcelain(mainCwd);
+        return status === null ? null : status.length > 0;
+    };
+    return { worktreeHasWork, mainCheckoutIsDirty, worktreeExists };
+}
+
+/**
+ * Loop-mode replan controller. Runs main() once or more:
+ *   - On the first iteration the CLI prompt is used.
+ *   - If a run returns with `loopReplanPending: true`, the pending relevant bus
+ *     message becomes the next work order and main() is re-entered (planning
+ *     runs again with that message as the new prompt) — but only if the replan
+ *     budget remains AND the repository is in a safe state to carry the new
+ *     plan (the safety guard blocks replanning over dirty main-checkout work).
+ *
+ * The preserved execution worktree stays in place across replan iterations so
+ * staged work is carried forward rather than lost; it is cleaned up only after
+ * the loop finishes or when an abort/failure handler runs.
+ */
+async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } = {}): Promise<{ success: boolean }> {
+    // Only loop mode ever interrupts for a replan; without --loop we run once.
+    if (!options.loop) {
+        return main(options);
+    }
+
+    let replanBudget: LoopReplanBudget = initialLoopReplanBudget();
+    let iteration = 0;
+    while (true) {
+        // The replan loop is top-level orchestration; report an interrupt here
+        // under the cleanup phase so a SIGINT mid-replan is handled as a
+        // deliberate abort like any other cleanup-time interrupt.
+        throwIfAborted(abortController.signal, "cleanup");
+        const outcome = await main(options);
+        const hasPending = outcome.loopReplanPending === true && pendingLoopReplanMessages.length > 0;
+        if (!hasPending) return { success: outcome.success };
+
+        // A relevant message changed the plan: decide whether it is safe to
+        // re-enter planning on top of the preserved work.
+        const safety = decideSafeReplan(loopReplanSafetyChecks());
+        if (!safety.safe) {
+            status.replan(
+                `Loop mode: a relevant message requested re-planning, but it is not safe to proceed: ${safety.reason}`,
+                hierarchyIndent("plan"),
+            );
+            return { success: outcome.success };
+        }
+
+        if (replanBudget.remaining <= 0) {
+            status.replan(
+                `Loop mode: reached the loop-driven replan cap (${replanBudget.maxIterations}); stopping. Pending message retained for the next run.`,
+                hierarchyIndent("plan"),
+            );
+            return { success: outcome.success };
+        }
+
+        // Re-enter planning with the relevant message as the new work order.
+        const newPrompt = extractReplanPrompt(pendingLoopReplanMessages);
+        if (!newPrompt.trim()) {
+            status.replan(
+                "Loop mode: a relevant message was found but carried no usable text to re-plan with; stopping.",
+                hierarchyIndent("plan"),
+            );
+            return { success: outcome.success };
+        }
+        replanBudget = consumeReplanBudget(replanBudget);
+        iteration += 1;
+        commandLinePrompt = newPrompt;
+        pendingLoopReplanMessages = [];
+        status.replan(
+            `Re-planning with the loop message (iteration ${iteration}); ${replanBudget.remaining} loop replan(s) left in budget. The execution worktree is preserved and will be reused.`,
+            hierarchyIndent("plan"),
+        );
+    }
+}
+
+runAgentReplanLoop(options)
     .then((outcome) => {
         cleanupExecutionWorktree();
         if (outcome && outcome.success === false) {

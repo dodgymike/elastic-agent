@@ -71,6 +71,19 @@ assert.equal(promptMode.mode, "prompt");
 assert.equal(promptMode.prompt, "summarize this");
 assert.equal(promptMode.taskId, undefined);
 
+// Loop mode is additive: it does not change which base mode is selected and is
+// explicitly carried on the resolved mode for both prompt and task modes.
+const promptLoop = resolveCliRunMode(undefined, "summarize this", true);
+assert.equal(promptLoop.mode, "prompt");
+assert.equal(promptLoop.loop, true);
+const taskLoop = resolveCliRunMode("TASK-9", undefined, true);
+assert.equal(taskLoop.mode, "task");
+assert.equal(taskLoop.loop, true);
+assert.equal(taskLoop.taskId, "TASK-9");
+// Loop defaults to false when not supplied.
+assert.equal(resolveCliRunMode("TASK-9", undefined).loop, false);
+assert.equal(resolveCliRunMode(undefined, "hi").loop, false);
+
 // TASK_ID_PATTERN stays aligned with the normalization rule.
 assert.ok(TASK_ID_PATTERN.test("TASK-1"));
 assert.ok(!TASK_ID_PATTERN.test("bad id"));
