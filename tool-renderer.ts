@@ -274,47 +274,22 @@ function executeCommandText(argumentsText: unknown): string {
     }
 }
 
-/** Convert captured stdout/stderr into non-empty display lines. */
-function executeCommandOutputLines(text: unknown): string[] {
-    if (typeof text !== "string") return [];
-    if (text.trim() === "") return [];
-    return text.split(/\r?\n/).filter((line) => line.length > 0);
-}
-
-interface ExecuteCommandResultLike {
-    exitCode?: unknown;
-    stdout?: unknown;
-    stderr?: unknown;
-}
-
 function renderExecuteCommandPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
     return [toolCommandLabel(toolCall)];
 }
 
-function renderExecuteCommandSucceeded(_toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
-    if (!result || typeof result !== "object") return undefined;
-    const { exitCode, stdout, stderr } = result as ExecuteCommandResultLike;
-    if (typeof exitCode !== "number") return undefined;
-
-    const green = ansiHelpers(options.color).green;
-    const red = ansiHelpers(options.color).red;
-
-    if (exitCode === 0) {
-        const stdoutLines = executeCommandOutputLines(stdout);
-        if (stdoutLines.length === 0) return [green("●")];
-        return [`${green("●")} ${stdoutLines[0]}`, ...stdoutLines.slice(1)];
-    }
-
-    const lines = [`${red("●")} exit ${exitCode}`];
-    lines.push(...executeCommandOutputLines(stderr));
-    lines.push(...executeCommandOutputLines(stdout));
-    return lines;
+/**
+ * ExecuteCommand results are command-shaped, so both phases delegate to the
+ * shared tool-command helper. This keeps stdout/stderr ordering identical to
+ * the central dispatch path: success prints stdout then any non-empty stderr;
+ * failure prints stderr then any non-empty stdout.
+ */
+function renderExecuteCommandSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
+    return renderToolCommand(toolCall, result, options);
 }
 
-function renderExecuteCommandFailed(_toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
-    const red = ansiHelpers(options.color).red;
-    const message = String(error).trim();
-    return message ? [`${red("●")} ${message}`] : [red("●")];
+function renderExecuteCommandFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] | undefined {
+    return renderToolCommand(toolCall, error, options);
 }
 
 /** Maximum diff lines rendered per Edit result. Keeps terminal output bounded. */
@@ -632,7 +607,7 @@ function gitCommandArgs(result: GitResultLike): string[] {
 
 /** Convert captured git stdout/stderr into non-empty display lines. */
 function gitOutputLines(text: unknown): string[] {
-    return executeCommandOutputLines(text);
+    return toolCommandOutputLines(text);
 }
 
 /**
@@ -706,16 +681,16 @@ function renderGitPending(toolCall: ToolCallDescriptor, _options: ToolRendererOp
     return [toolCommandLabel(toolCall)];
 }
 
-function renderGitSucceeded(_toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
+function renderGitSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
     if (!result || typeof result !== "object") return undefined;
     const gitResult = result as GitResultLike;
     const a = ansiHelpers(options.color);
 
     // Some runtime guards return a serialized `{ error }` object rather than
-    // throwing. Surface it as an error line even when the call was dispatched
-    // through the succeeded phase.
+    // throwing. Route it through the shared helper so it renders as a unified
+    // `Git('action') ● message` error line.
     if (typeof gitResult.error === "string" && gitResult.error.trim() !== "") {
-        return [`${a.red("●")} ${gitResult.error.trim()}`];
+        return renderToolCommand(toolCall, result, options);
     }
     if (typeof gitResult.exitCode !== "number") return undefined;
 
@@ -726,22 +701,21 @@ function renderGitSucceeded(_toolCall: ToolCallDescriptor, result: unknown, opti
         if (gitResult.exitCode !== 0) {
             return renderGitCommandFailure(args, gitResult.exitCode, gitResult, a);
         }
-        return renderGitStatus(typeof gitResult.stdout === "string" ? gitResult.stdout : "", options);
+        const statusLines = renderGitStatus(typeof gitResult.stdout === "string" ? gitResult.stdout : "", options);
+        // A successful status command can still emit stderr; include it when
+        // present rather than silently dropping the diagnostic.
+        statusLines.push(...gitOutputLines(gitResult.stderr));
+        return statusLines;
     }
 
-    if (gitResult.exitCode === 0) {
-        const command = `git ${args.join(" ")}`;
-        const stdoutLines = gitOutputLines(gitResult.stdout);
-        return [`${a.green("●")} ${command}`, ...stdoutLines];
-    }
-
-    return renderGitCommandFailure(args, gitResult.exitCode, gitResult, a);
+    // Stage/commit results are command-shaped. Delegate to the shared helper so
+    // their stdout/stderr ordering matches ExecuteCommand and the central
+    // dispatch path exactly.
+    return renderToolCommand(toolCall, result, options);
 }
 
-function renderGitFailed(_toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
-    const a = ansiHelpers(options.color);
-    const message = String(error).trim();
-    return message ? [`${a.red("●")} ${message}`] : [a.red("●")];
+function renderGitFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] | undefined {
+    return renderToolCommand(toolCall, error, options);
 }
 
 /**
