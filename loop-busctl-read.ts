@@ -2,6 +2,16 @@
  * loop-busctl-read.ts — loop-mode Agent Bus reads through the `agent-busctl`
  * CLI instead of a raw authenticated HTTP client.
  *
+ * CURSOR RESUME: `agent-busctl watch` is a long-lived NDJSON stream that the
+ * bus treats as at-least-once. Each received message carries a stable position
+ * identifier (`message_id` in the form `<bus-id>-<seq>`, or `seq` alone).
+ * `loop-busctl-read` captures that cursor id from each parsed message, keeps
+ * it in-process via `getLastCursorId()`, and persists it to a loop-mode state
+ * file (default `bus-cursor.json`, git-ignored, alongside `bus-queue.json`)
+ * through the `saveCursor` / `loadCursor` helpers so a later poll can resume
+ * from the saved position. None of this touches secrets or `data.json` — the
+ * cursor is an opaque non-secret position token only.
+ *
  * WHY: the loop-mode poll (`loopBusRead` in main.ts) previously went through
  * `tools/AgentBus.ts`, which required a bearer credential
  * (`options.accessToken` or `AGENT_BUS_ACCESS_TOKEN`) and threw
@@ -30,8 +40,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { AgentBusMessageReadResult } from "./loop-poll.js";
 
 /** Default roster filename written by AgentBusEnrol (.agent-bus.local). */
@@ -196,6 +206,145 @@ export function parseAgentBusCtlWatchOutput(
   return { messages, empty };
 }
 
+/** Default loop-mode cursor state file, resolved against the project root. */
+export const BUS_CURSOR_FILENAME = "bus-cursor.json";
+
+/**
+ * In-process cursor id of the most recently received/parsed message. This is
+ * module-scoped so successive polls within a single loop-mode run can resume
+ * without re-reading the state file every time. It is never logged and never
+ * contains secret material — only the non-secret position id.
+ */
+let lastCursorId: string | undefined;
+
+/**
+ * Build the default cursor state file path: `bus-cursor.json` in the project
+ * root, alongside the existing (git-ignored) `bus-queue.json`. Keeping it with
+ * the repo it coordinates makes it easy to relocate via a custom path while
+ * remaining out of git.
+ */
+export function defaultBusCursorFilePath(projectRoot: string): string {
+  return join(projectRoot, BUS_CURSOR_FILENAME);
+}
+
+/**
+ * Extract the cursor (position) id from a single parsed message record.
+ * `agent-busctl watch` records carry a stable `message_id` in the form
+ * `<bus-id>-<seq>`; when that is absent we fall back to the numeric `seq`.
+ * Returns `undefined` when the record carries neither, so a caller can decide
+ * not to advance the stored cursor for that record.
+ */
+export function extractCursorId(record: AgentBusCtlWatchRecord): string | undefined {
+  if (typeof record.message_id === "string" && record.message_id.trim()) {
+    return record.message_id.trim();
+  }
+  if (record.seq !== undefined && record.seq !== null) {
+    return String(record.seq);
+  }
+  return undefined;
+}
+
+/**
+ * Capture the cursor id of the last message in a parsed batch, update the
+ * in-process cursor, and optionally persist it to a loop-mode state file so a
+ * later poll (or a restarted run) can resume from this position. Fully
+ * fail-soft: a state file that cannot be written is surfaced as a diagnostic
+ * string (never thrown) and only halts cursor persistence, not the read.
+ *
+ * @param messages  Parsed message records, in arrival order.
+ * @param cursorFilePath  Optional state file to persist to (must be outside git).
+ * @returns A non-fatal diagnostic string, or undefined when everything worked.
+ */
+export function captureAndPersistCursor(
+  messages: readonly AgentBusCtlWatchRecord[],
+  cursorFilePath?: string,
+): string | undefined {
+  // Advance to the last message's cursor id (arrival order = sequence order).
+  let captured: string | undefined;
+  for (const message of messages) {
+    const id = extractCursorId(message);
+    if (id !== undefined) captured = id;
+  }
+  if (captured === undefined) return undefined;
+  lastCursorId = captured;
+  if (!cursorFilePath) return undefined;
+  return saveCursor(cursorFilePath, captured);
+}
+
+/** Return the in-process cursor id captured from the most recent message. */
+export function getLastCursorId(): string | undefined {
+  return lastCursorId;
+}
+
+/**
+ * Persist a cursor id to a loop-mode state file (git-ignored, never a secrets
+ * store and never `data.json`). The write goes to a sibling temp file and is
+ * renamed into place so a crash mid-write never leaves a truncated cursor.
+ * Fail-soft: any I/O problem is returned as a diagnostic string rather than
+ * thrown, so a read-only workspace degrades to in-memory-only cursor tracking.
+ */
+export function saveCursor(filePath: string, cursorId: string): string | undefined {
+  if (!cursorId.trim()) return undefined;
+  const tmpPath = `${filePath}.tmp`;
+  const parent = dirname(filePath);
+  try {
+    if (parent && parent !== ".") {
+      mkdirSync(parent, { recursive: true });
+    }
+    writeFileSync(tmpPath, JSON.stringify({ cursor: cursorId }, null, 2), "utf-8");
+    renameSync(tmpPath, filePath);
+    return undefined;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return `could not persist bus cursor to '${filePath}' (${reason}); continuing with in-memory cursor only`;
+  }
+}
+
+/**
+ * Load a previously persisted cursor id from a loop-mode state file. A missing
+ * file yields no cursor (a normal first run); a malformed/illegible file yields
+ * no cursor plus a warning so the caller can surface it. Never throws.
+ */
+export function loadCursor(
+  filePath: string,
+): { cursor: string | undefined; warnings: readonly string[] } {
+  const warnings: string[] = [];
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf-8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") {
+      return { cursor: undefined, warnings };
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    warnings.push(`could not read bus cursor '${filePath}': ${reason}; starting from the beginning`);
+    return { cursor: undefined, warnings };
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    warnings.push(
+      `bus cursor '${filePath}' is not valid JSON (${reason}); starting from the beginning`,
+    );
+    return { cursor: undefined, warnings };
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    warnings.push(`bus cursor '${filePath}' is not an object; starting from the beginning`);
+    return { cursor: undefined, warnings };
+  }
+  const cursor = (payload as { cursor?: unknown }).cursor;
+  if (typeof cursor !== "string" || !cursor.trim()) {
+    warnings.push(`bus cursor '${filePath}' has no usable cursor; starting from the beginning`);
+    return { cursor: undefined, warnings };
+  }
+  return { cursor: cursor.trim(), warnings };
+}
+
 /**
  * Invoke `agent-busctl watch` once and reduce its NDJSON stream to an
  * `AgentBusMessageReadResult` in the loop-poll `read` contract shape (body =
@@ -218,6 +367,12 @@ export async function watchAgentBusOnce(options: {
   watchWindowMs?: number;
   root?: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Loop-mode state file (git-ignored) to persist the latest cursor id to.
+   * When set, each poll that receives messages records the last message's
+   * cursor id there so a subsequent poll (or restart) can resume from it.
+   */
+  cursorFilePath?: string;
 }): Promise<AgentBusMessageReadResult> {
   const root = options.root ?? process.cwd();
   const watchWindowMs = options.watchWindowMs ?? DEFAULT_WATCH_WINDOW_MS;
@@ -292,7 +447,12 @@ export async function watchAgentBusOnce(options: {
       settled = true;
       const { messages, empty } = parseAgentBusCtlWatchOutput(stdout);
       if (messages.length > 0) {
-        // Real messages arrived: surface them as the read body.
+        // Real messages arrived: capture the cursor id of the last message
+        // (kept in memory and persisted when a cursorFilePath was supplied) so
+        // a subsequent poll or restarted run can resume from this position.
+        // A persistence failure is non-fatal and must not fail the poll.
+        captureAndPersistCursor(messages, options.cursorFilePath);
+        // Surface them as the read body.
         resolveResult({ body: messages as unknown as unknown[], status: 0 });
         return;
       }

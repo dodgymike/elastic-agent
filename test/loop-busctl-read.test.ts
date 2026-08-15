@@ -13,9 +13,15 @@
  * Compiled and executed standalone by the `test:loop-busctl-read` npm script.
  */
 import {
+    captureAndPersistCursor,
+    defaultBusCursorFilePath,
+    extractCursorId,
+    getLastCursorId,
     loadAgentBusRoster,
+    loadCursor,
     parseAgentBusCtlWatchOutput,
     resolveAgentBusCtlBinary,
+    saveCursor,
     watchAgentBusOnce,
     type AgentBusCtlWatchRecord,
 } from "../loop-busctl-read.js";
@@ -70,6 +76,80 @@ async function main(): Promise<void> {
     // 2. A non-empty watch flags empty=false.
     const nonEmpty = parseAgentBusCtlWatchOutput(JSON.stringify({ message_id: "bus-9", text: "x" }));
     check("a non-empty watch flags empty=false", nonEmpty.empty === false && nonEmpty.messages.length === 1);
+
+    // 2a. Cursor extraction: a message's cursor id is its message_id (the stable
+    //     <bus-id>-<seq> position); it falls back to `seq`, and yields nothing
+    //     when neither is present.
+    check("cursor id is extracted from message_id", extractCursorId({ message_id: "bus-1", seq: 1 }) === "bus-1");
+    check("cursor id falls back to seq", extractCursorId({ seq: 42 }) === "42");
+    check("no cursor id when neither field is present", extractCursorId({ text: "x" } as any) === undefined);
+
+    // 2b. Cursor capture advances to the LAST message in a batch and updates the
+    //     in-process cursor.
+    const cursorCapture = captureAndPersistCursor([
+        { message_id: "bus-1" },
+        { message_id: "bus-2" },
+        { seq: 99 },
+    ] as AgentBusCtlWatchRecord[]);
+    check("capturing a batch advances to the last message's cursor", getLastCursorId() === "99");
+
+    // 2c. Cursor persistence: saveCursor writes to a state file (atomic
+    //     temp+rename) and loadCursor reads it back; a missing file yields no
+    //     cursor and a malformed file yields a warning, never a throw.
+    const cursorFile = join(dir, "bus-cursor.json");
+    check("defaultBusCursorFilePath resolves beside the repo root", defaultBusCursorFilePath(dir) === cursorFile);
+    check("saveCursor persists without diagnostic", saveCursor(cursorFile, "bus-77") === undefined);
+    const loaded = loadCursor(cursorFile);
+    check("loadCursor reads back the persisted cursor", loaded.cursor === "bus-77" && loaded.warnings.length === 0);
+    check("loadCursor on a missing file yields no cursor", loadCursor(join(dir, "nope-cursor.json")).cursor === undefined);
+    const malformedCursor = join(dir, "bad-cursor.json");
+    writeFileSync(malformedCursor, "{ not json", "utf-8");
+    const badLoad = loadCursor(malformedCursor);
+    check(
+        "loadCursor on a malformed file yields a warning, not a throw",
+        badLoad.cursor === undefined && badLoad.warnings.length === 1 && /not valid JSON/.test(badLoad.warnings[0]),
+    );
+
+    // 2d. captureAndPersistCursor with a cursorFilePath both updates the
+    //     in-process cursor AND persists it; persistence failures are surfaced
+    //     as a diagnostic string, never thrown (in-memory tracking still works).
+    const captureFile = join(dir, "persist-cursor.json");
+    const persistDiag = captureAndPersistCursor([{ message_id: "bus-5" }] as AgentBusCtlWatchRecord[], captureFile);
+    check("capture+p: no diagnostic on success", persistDiag === undefined);
+    check("capture+p: persisted cursor is readable", loadCursor(captureFile).cursor === "bus-5");
+    check("capture+p: in-memory cursor matches", getLastCursorId() === "bus-5");
+    // A parent that is an existing FILE makes the recursive mkdir fail
+    // (ENOTDIR), driving the fail-soft diagnostic path.
+    const fileAsDir = join(dir, "not-a-dir");
+    writeFileSync(fileAsDir, "x", "utf-8");
+    const unwritable = join(fileAsDir, "cursor.json");
+    const unwritableDiag = saveCursor(unwritable, "bus-6");
+    check(
+        "saveCursor surfaces an unwritable path as a diagnostic, not a throw",
+        typeof unwritableDiag === "string" && /could not persist bus cursor/.test(unwritableDiag),
+    );
+
+    // 2e. A real watch pass that receives messages persists the cursor id when a
+    //     cursorFilePath is supplied (the close handler wires cursor capture).
+    const stubCursor = writeStubCtl(
+        "ctl-cursor",
+        [JSON.stringify({ message_id: "bus-1" }), JSON.stringify({ message_id: "bus-2" })].join("\n"),
+        0,
+    );
+    const cursorWatchFile = join(dir, "watch-cursor.json");
+    const cursorWatchResult = await watchAgentBusOnce({
+        binary: stubCursor,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+        cursorFilePath: cursorWatchFile,
+    });
+    check(
+        "a watch that receives messages persists the last message's cursor",
+        !cursorWatchResult.error &&
+            Array.isArray(cursorWatchResult.body) &&
+            (cursorWatchResult.body as AgentBusCtlWatchRecord[]).length === 2 &&
+            loadCursor(cursorWatchFile).cursor === "bus-2",
+    );
 
     // 3. Roster loading reads non-secret busUrl/identityStore and tolerates
     //    camelCase and snake_case keys.

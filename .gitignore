@@ -43,6 +43,10 @@ test/.dt-verify/
 # Loop-mode Agent Bus queue persistence; transient runtime state.
 bus-queue.json
 bus-queue.json.tmp
+
+# Loop-mode Agent Bus cursor resume state; transient runtime position (non-secret).
+bus-cursor.json
+bus-cursor.json.tmp
 .history_tmp_mike
 .history_tmp_mike_2
 .history-2026-08-15-001.log
