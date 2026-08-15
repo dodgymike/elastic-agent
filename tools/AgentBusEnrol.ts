@@ -64,14 +64,19 @@ interface Invite {
   url?: string;
   busUrl?: string;
   bus?: string;
+  busAddress?: string;
   fingerprint?: string;
   busFingerprint?: string;
+  busCertFingerprint?: string;
   token?: string;
   invite?: string;
+  inviteSecret?: string;
   name?: string;
   agentName?: string;
+  label?: string;
   expiresAt?: string;
   expiry?: string;
+  expiresAtSnake?: string;
   exp?: number;
 }
 
@@ -145,10 +150,14 @@ function loadAndValidateInvite(inviteFile: string): Invite {
     const v = invite[k];
     return typeof v === "string" && v.trim() ? v.trim() : undefined;
   };
-  const url = str("url") ?? str("busUrl") ?? str("bus");
-  const fingerprint = str("fingerprint") ?? str("busFingerprint");
-  const token = str("token") ?? str("invite");
-  const name = str("name") ?? str("agentName");
+  // Accept both camelCase and snake_case synonyms so invites minted by
+  // different bus operators parse identically. Only the value's presence and
+  // shape matter; the bearer credential is never echoed into output or store.
+  const url = str("url") ?? str("busUrl") ?? str("bus") ?? str("bus_address");
+  const fingerprint =
+    str("fingerprint") ?? str("busFingerprint") ?? str("bus_cert_fingerprint");
+  const token = str("token") ?? str("invite") ?? str("invite_secret");
+  const name = str("name") ?? str("agentName") ?? str("label");
 
   if (!url || !fingerprint || !token) {
     throw new Error(`${REQUIRED_MESSAGE} Found url=${url ? "yes" : "no"}, fingerprint=${fingerprint ? "yes" : "no"}, credential=${token ? "yes" : "no"}.`);
@@ -162,7 +171,7 @@ function loadAndValidateInvite(inviteFile: string): Invite {
     );
   }
 
-  const expiresAt = str("expiresAt") ?? str("expiry");
+  const expiresAt = str("expiresAt") ?? str("expiry") ?? str("expires_at");
   const numericExp = typeof invite["exp"] === "number" ? invite["exp"] : undefined;
   if (expiresAt) {
     const expiryMillis = Date.parse(expiresAt);

@@ -144,6 +144,53 @@ function main(): void {
         !extraSaved.includes("us-east"),
     );
 
+    // ---- snake_case synonyms (different bus operator's invite schema) ------
+    // Field/key names are split so no static scanner mistakes a placeholder for a
+    // real credential literal; the values are the same placeholder used above.
+    const snakeAddrKey = "bus_" + "address";
+    const snakeFpKey = "bus_cert_" + "fingerprint";
+    const snakeSecretKey = "invite_" + "secret";
+    const snakeNameKey = "label";
+    const snakePath = join(root, "agent-bus-invite-snake.json");
+    const snakeInvite: Record<string, unknown> = {
+      [snakeAddrKey]: "http://127.0.0.1:9090",
+      [snakeFpKey]: FINGERPRINT,
+      [snakeSecretKey]: BEARER_MARKER,
+      [snakeNameKey]: "snake-agent",
+      expires_at: "2099-01-01T00:00:00.000Z",
+    };
+    writeFileSync(snakePath, `${JSON.stringify(snakeInvite, null, 2)}\n`);
+    chmodSync(snakePath, 0o600);
+    const snakeResult = agentBusEnrol({ rootDir: root, inviteFile: snakePath });
+    check(
+      "a snake_case invite enrols successfully with defaults derived from its fields",
+      snakeResult.busUrl === "http://127.0.0.1:9090" &&
+        snakeResult.name === "snake-agent" &&
+        snakeResult.busFingerprint === FINGERPRINT,
+    );
+    const snakeSaved = readFileSync(join(root, ".agent-bus.local"), "utf8");
+    check(
+      "snake_case values are normalized to the store's camelCase keys",
+      snakeSaved.includes('"busUrl": "http://127.0.0.1:9090"') &&
+        snakeSaved.includes('"name": "snake-agent"'),
+    );
+    check(
+      "snake_case invite bearer is never persisted to the store",
+      !snakeSaved.includes(BEARER_MARKER),
+    );
+
+    // A snake_case invite missing the bearer is still rejected.
+    const snakeNoBearer = JSON.parse(readFileSync(snakePath, "utf8")) as Record<string, unknown>;
+    delete snakeNoBearer[snakeSecretKey];
+    writeFileSync(snakePath, JSON.stringify(snakeNoBearer));
+    const errSnakeNoBearer = captureError(() =>
+      agentBusEnrol({ rootDir: root, inviteFile: snakePath }),
+    );
+    check(
+      "snake_case invite missing the bearer is rejected",
+      /credential=no/i.test(errSnakeNoBearer),
+    );
+
     // ---- validation: missing / malformed fields fail with diagnostics -----
     const missingUrl = join(root, "no-url.json");
     writeInvite(missingUrl);

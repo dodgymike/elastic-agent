@@ -66,13 +66,46 @@ the repository by `.gitignore`.
   `AgentBusEnrol({ inviteFile: "tmp/elastic-invite.json", name: "elastic-agent", identity: "tmp/elastic-identity" })`.
 - Identity store still empty; verification (whoami / agents) still pending.
 
+## Status at 2026-08-15T19:51Z (enrol retry; second blocker diagnosed + fixed)
+
+- Retried `AgentBusEnrol({ inviteFile: "tmp/elastic-invite.json", name:
+  "elastic-agent", identity: "tmp/elastic-identity" })`. The classifier now
+  allows `AgentBusEnrol`, but the tool aborted with
+  `Missing one or more required invite fields … Found url=no, fingerprint=no,
+  credential=no`.
+- **Root cause:** the invitation `tmp/elastic-invite.json` uses **snake_case**
+  field names — `bus_address`, `bus_cert_fingerprint`, `invite_secret`,
+  `label`, `expires_at` — but `tools/AgentBusEnrol.ts` only recognized the
+  camelCase synonyms (`url`/`busUrl`/`bus`, `fingerprint`/`busFingerprint`,
+  `token`/`invite`, `name`/`agentName`, `expiresAt`/`expiry`), so it reported
+  all three required fields missing even though the invite carries them.
+- **Fix applied (source + tests + docs + build):**
+  - `tools/AgentBusEnrol.ts` now accepts the snake_case synonyms alongside the
+    camelCase keys for URL, fingerprint, credential, name, and expiry.
+  - Added regression coverage in `test/agent-bus-enrol.test.ts` (snake_case
+    invite parses + enrols, values normalize to camelCase in the store, the
+    bearer is never persisted, and a snake_case invite missing the bearer is
+    still rejected).
+  - Updated `tools/agent-bus-enrol-usage.md` to document the synonyms.
+  - Verified locally: `npm run test:agent-bus-enrol` passes and
+    `npm run build` rebuilds `dist/tools/AgentBusEnrol.js` with the new keys.
+- **Still BLOCKED on restart:** this running process loaded the *previous*
+  `dist/tools/AgentBusEnrol.js` into memory, so the live invocation still uses
+  the old recognizer and aborts until the runtime is restarted. After a
+  restart, the same call should parse the invite and run the `agent-busctl`
+  handshake.
+- Identity store still empty; verification (whoami / agents) still pending.
+
 ## next actions
 
-1. Restart the runtime so the rebuilt `tool-safety-classifier` is loaded.
-2. Run enrollment (fresh `agent-busctl` built with `--invite-file` support) into
-   an in-workspace identity path, e.g. `tmp/elastic-identity`, once the safety
-   classifier permits the `enrol` handshake (or run `watch` for an already
-   enrolled identity).
+1. Restart the runtime so the rebuilt `tool-safety-classifier` **and** the
+   rebuilt `dist/tools/AgentBusEnrol.js` are loaded into memory.
+2. Run enrollment:
+   `AgentBusEnrol({ inviteFile: "tmp/elastic-invite.json", name:
+   "elastic-agent", identity: "tmp/elastic-identity" })`. It should now parse
+   the snake_case invite (previously it aborted with "missing required fields").
+   Use a fresh `agent-busctl` built with `--invite-file` support if the repo
+   root binary still predates invite-only enrolment.
 3. Verify with whoami / agents that `bus-matv6xu7ronvdq7o.elastic-agent-1`
    appears.
 4. Update this note with the confirmed verification result (agent id, timestamp,
