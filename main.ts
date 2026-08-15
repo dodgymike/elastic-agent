@@ -91,6 +91,7 @@ program
     .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
     .option("--loop", "keep running in loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
+    .option("--respond-all", "loop-mode no-filter: treat every Agent Bus message as relevant so the agent responds to all of them instead of filtering irrelevant ones; only meaningful together with --loop", false)
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--review", "Run the review stage after execution (default: false)", false)
     .option("--disable-classifier", "Bypass the tool safety classifier", false)
@@ -117,7 +118,7 @@ const options = program.opts();
 let commandLinePrompt = program.args[0];
 let runMode: ReturnType<typeof resolveCliRunMode>;
 try {
-    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.loop === true);
+    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.loop === true, options.respondAll === true);
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -319,7 +320,7 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
         path: loopBusMessagesPath,
         requestTimeoutMs: loopPollTiming.requestTimeoutMs,
         queueFilePath: loopQueueFilePath,
-        context: { planId },
+        context: { planId, respondAll: runMode.respondAll },
         report: (message) => status.warning(message, reportPrefix),
     });
     if (result.warnings.length > 0) {
@@ -337,7 +338,12 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
         }
         return true;
     }
-    if (result.queuedCount > 0) {
+    // In no-filter / respond-to-everything mode every message is classified as
+    // relevant and processed immediately, so there are never irrelevant
+    // (queued) messages to report. The count is always 0 in that mode; guard on
+    // it explicitly so a future change to classification cannot surface a
+    // misleading "queued" log for a mode that processes everything.
+    if (!runMode.respondAll && result.queuedCount > 0) {
         status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, reportPrefix);
     }
     return false;
@@ -345,8 +351,8 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
 
 /**
  * Perform a single non-blocking Agent Bus poll *before planning starts* and
- * return the first relevant message as a `{ text?: string }` object, or
- * `undefined` when there is none.
+ * return every relevant message received in that one bounded read (as an
+ * `{ text?: string }` array), or `undefined` when there are none.
  *
  * This reuses the same bounded, fail-open read path as `pollLoopBusBetweenSteps`
  * (`loopBusRead` -> `normalizeAgentBusMessages` -> relevant filtering) so a
@@ -356,7 +362,13 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
  * one bounded read, so startup never blocks when the bus is idle, unconfigured,
  * or unreachable (transport failures are soft and yield `undefined`). It is a
  * distinct helper from `pollLoopBusBetweenSteps` (which only returns a boolean)
- * because the caller needs the message object itself to seed the prompt.
+ * because the caller needs the message objects themselves to seed the prompt.
+ *
+ * ALL relevant messages are returned (not just the first) so that no-filter /
+ * respond-to-everything mode (`runMode.respondAll`, see loop-mode.ts) seeds the
+ * new work order with every received message via `extractReplanPrompt` — the
+ * caller concatenates their text so nothing is dropped, exactly as the between-
+ * step replan loop does with `pendingLoopReplanMessages`.
  *
  * No bearer-token gate: this poll goes through `loopBusRead`, which shells out
  * to the `agent-busctl` CLI (see loop-busctl-read.ts). Authentication is
@@ -365,7 +377,7 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
  * is unavailable or the bus is unreachable the read fails soft (yields
  * `undefined`) exactly like an idle or unreachable bus.
  */
-async function pollAgentBus(): Promise<{ text?: string } | undefined> {
+async function pollAgentBus(): Promise<{ text?: string }[] | undefined> {
     if (!options.loop) return undefined;
 
     const planId = runMode.mode === "task" ? runMode.taskId : undefined;
@@ -374,11 +386,11 @@ async function pollAgentBus(): Promise<{ text?: string } | undefined> {
         path: loopBusMessagesPath,
         requestTimeoutMs: loopPollTiming.requestTimeoutMs,
         queueFilePath: loopQueueFilePath,
-        context: { planId },
+        context: { planId, respondAll: runMode.respondAll },
         report: (message) => status.warning(message, hierarchyIndent("plan")),
     });
     if (result.relevantMessages.length === 0) return undefined;
-    return result.relevantMessages[0] as { text?: string };
+    return result.relevantMessages as { text?: string }[];
 }
 
 /**
@@ -407,7 +419,7 @@ async function pollAgentBus(): Promise<{ text?: string } | undefined> {
  */
 async function drainLoopQueueAtRestart(reportPrefix = hierarchyIndent("plan")): Promise<void> {
     const planId = runMode.mode === "task" ? runMode.taskId : undefined;
-    const context = { planId };
+    const context = { planId, respondAll: runMode.respondAll };
 
     let warnings: string[] = [];
     let promotedCount = 0;
@@ -1875,15 +1887,20 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
     // the plan's work order rather than being queued and picked up only at a
     // step boundary. This is a single non-blocking bounded read (see
     // pollAgentBus), so startup never blocks when the bus is idle or
-    // unreachable. When a relevant message is found its searchable text seeds
-    // the prompt exactly the way the step-5 replan loop does.
-    const busMessage = await pollAgentBus();
-    if (busMessage) {
-        commandLinePrompt = extractReplanPrompt([busMessage]);
-        status.replan(
-            `Loop mode: using a relevant bus message received before planning as the work order: ${truncate(messageToSearchableText(busMessage), 240)}`,
-            hierarchyIndent("plan"),
-        );
+    // unreachable. When relevant message(s) are found, `extractReplanPrompt`
+    // concatenates their searchable text into the new work order exactly the
+    // way the step-5 replan loop does — so in no-filter / respond-to-everything
+    // mode every message received before planning becomes part of the prompt,
+    // not just the original command-line prompt and not just the first message.
+    const busMessages = await pollAgentBus();
+    if (busMessages) {
+        commandLinePrompt = extractReplanPrompt(busMessages);
+        for (const busMessage of busMessages) {
+            status.replan(
+                `Loop mode: using a relevant bus message received before planning as the work order: ${truncate(messageToSearchableText(busMessage), 240)}`,
+                hierarchyIndent("plan"),
+            );
+        }
     }
 
     let originalPrompt = commandLinePrompt;
@@ -2388,7 +2405,7 @@ async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } 
                 requestTimeoutMs: loopPollTiming.requestTimeoutMs,
                 pollIntervalMs: loopPollTiming.pollIntervalMs,
                 queueFilePath: loopQueueFilePath,
-                context: { planId: runMode.mode === "task" ? runMode.taskId : undefined },
+                context: { planId: runMode.mode === "task" ? runMode.taskId : undefined, respondAll: runMode.respondAll },
                 maxIdlePolls,
                 signal: abortController.signal,
                 onPoll: (result) => {
@@ -2397,7 +2414,11 @@ async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } 
                             status.warning(`loop poll: ${warning}`, idlePrefix);
                         }
                     }
-                    if (!result.readFailed && result.queuedCount > 0) {
+                    // In no-filter / respond-to-everything mode every message is
+                    // classified as relevant and processed immediately, so there
+                    // are never irrelevant (queued) messages to report. Suppress
+                    // the misleading "queued" log for that mode.
+                    if (!runMode.respondAll && !result.readFailed && result.queuedCount > 0) {
                         status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, idlePrefix);
                     }
                 },

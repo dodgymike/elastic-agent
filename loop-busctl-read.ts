@@ -265,20 +265,65 @@ export function defaultBusCursorFilePath(projectRoot: string): string {
 }
 
 /**
- * Extract the cursor (position) id from a single parsed message record.
- * `agent-busctl watch` records carry a stable `message_id` in the form
- * `<bus-id>-<seq>`; when that is absent we fall back to the numeric `seq`.
- * Returns `undefined` when the record carries neither, so a caller can decide
- * not to advance the stored cursor for that record.
+ * Build the base64-encoded resume cursor for `agent-busctl watch --cursor`.
+ *
+ * The CLI's `--cursor` expects an opaque base64 token of the form
+ * `v2|<bus-id>|<seq>` (UTF-8 encoded, then base64). Building it from the bus id
+ * and sequence keeps the cursor self-describing and stable across restarts,
+ * independent of the raw message format.
+ *
+ * Returns `undefined` when either part is missing or blank, so callers never
+ * persist a malformed cursor.
+ */
+export function buildResumeCursor(
+  busId: string | undefined,
+  seq: number | string | undefined,
+): string | undefined {
+  const b = busId?.trim();
+  if (!b) return undefined;
+  if (seq === undefined || seq === null) return undefined;
+  const seqStr = String(seq).trim();
+  if (!seqStr) return undefined;
+  return Buffer.from(`v2|${b}|${seqStr}`, "utf8").toString("base64");
+}
+
+/**
+ * Extract the resume cursor (position) token from a single parsed message
+ * record. `agent-busctl watch` records carry a stable `message_id` in the form
+ * `<bus-id>-<seq>`, plus a `seq` field; the bus id is read from `bus_path`
+ * (when present) or derived from `message_id` by stripping the trailing
+ * `-<seq>`.
+ *
+ * The returned value is the base64-encoded `v2|<bus-id>|<seq>` resume cursor
+ * (`buildResumeCursor`), so a subsequent poll can pass it straight to the CLI
+ * `--cursor` argument. Returns `undefined` when the record carries neither a
+ * resolvable bus id nor a sequence, so a caller can decide not to advance the
+ * stored cursor for that record.
  */
 export function extractCursorId(record: AgentBusCtlWatchRecord): string | undefined {
-  if (typeof record.message_id === "string" && record.message_id.trim()) {
-    return record.message_id.trim();
-  }
-  if (record.seq !== undefined && record.seq !== null) {
-    return String(record.seq);
-  }
-  return undefined;
+  const messageId = typeof record.message_id === "string" ? record.message_id.trim() : "";
+  const split = messageId ? splitMessageId(messageId) : {};
+  const seq = record.seq !== undefined && record.seq !== null ? record.seq : split.seq;
+  // bus_path arrives via parsed NDJSON, so it may not always be a string
+  // (e.g. an object or number). Only call .trim() when it is actually a
+  // string — never on a non-string value, which would throw a TypeError;
+  // otherwise fall back to the bus id derived from message_id.
+  const busId =
+    (typeof record.bus_path === "string" ? record.bus_path.trim() : undefined) || split.busId;
+  return buildResumeCursor(busId, seq);
+}
+
+/**
+ * Split a `<bus-id>-<seq>` message_id into its parts. Returns an empty object
+ * when the message_id has no trailing numeric `-<seq>` segment (so we never
+ * mis-parse a plain id).
+ */
+function splitMessageId(messageId: string): { busId?: string; seq?: string } {
+  const idx = messageId.lastIndexOf("-");
+  if (idx <= 0) return {};
+  const seqPart = messageId.slice(idx + 1);
+  if (!/^\d+$/.test(seqPart)) return {};
+  return { busId: messageId.slice(0, idx), seq: seqPart };
 }
 
 /**
@@ -393,9 +438,118 @@ export function loadCursor(
 }
 
 /**
+ * Return true when a watch failure diagnostic indicates the supplied resume
+ * cursor was rejected by the CLI. The `agent-busctl watch --cursor <id>`
+ * position token can go stale (the bus pruned its retention or the cursor was
+ * built from a different bus), and the CLI then refuses to resume with an
+ * "invalid cursor"-style error. When that happens the caller retries the watch
+ * from the beginning (no cursor) so loop mode keeps making progress instead of
+ * stalling on a rejected cursor forever.
+ *
+ * Both the stderr text and the bounded-watch closing failure object (parsed
+ * into the message list by `parseAgentBusCtlWatchOutput` as an `ok:false`
+ * record) can carry the diagnostic, so this checks the combined signal,
+ * case-insensitively, for a cursor-rejection phrase.
+ */
+export function isInvalidCursorFailure(...signals: readonly (string | undefined)[]): boolean {
+  const haystack = signals.filter((s): s is string => !!s).join("\n").toLowerCase();
+  return /invalid cursor|bad cursor|cursor not found|cursor .*invalid/i.test(haystack);
+}
+
+/**
+ * Run one `agent-busctl watch` sub-process with the given argv and reduce its
+ * NDJSON stream to an `AgentBusMessageReadResult`. This is the single
+ * sub-process primitive shared by the cursor and the no-cursor attempt of
+ * `watchAgentBusOnce`, so both go through identical spawn/parse/close handling
+ * and the "invalid cursor" retry can be layered on top without duplicating it.
+ *
+ * NO-TIMEOUT: the CLI watch is long-lived by nature — it keeps streaming until
+ * its `--for` watch window elapses and it emits its closing `ok:false`
+ * object, then exits cleanly. We deliberately do NOT wrap the sub-process in a
+ * Promise.race/child_process watchdog timeout. Shutdown is instead owned by the
+ * caller (loop mode aborts/kills the run), and any unexpected process exit is
+ * surfaced through the `close`/`error` handlers rather than being masked by a
+ * timer.
+ */
+async function runWatchOnce(
+  binary: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  cursorFilePath?: string,
+): Promise<AgentBusMessageReadResult> {
+  return new Promise<AgentBusMessageReadResult>((resolveResult) => {
+    const child: ChildProcess = spawn(binary, args as string[], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      resolveResult({
+        body: null,
+        status: 0,
+        error: `could not run agent-busctl (${binary}): ${reason}`,
+      });
+    });
+
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      const { messages, empty } = parseAgentBusCtlWatchOutput(stdout);
+      if (messages.length > 0) {
+        // Real messages arrived: capture the cursor id of the last message
+        // (kept in memory and persisted when a cursorFilePath was supplied) so
+        // a subsequent poll or restarted run can resume from this position.
+        // A persistence failure is non-fatal and must not fail the poll.
+        captureAndPersistCursor(messages, cursorFilePath);
+        // Surface them as the read body.
+        resolveResult({ body: messages as unknown as unknown[], status: 0 });
+        return;
+      }
+      if (empty) {
+        // Bounded watch finished with no messages: an idle poll, not an error.
+        resolveResult({ body: [], status: 0 });
+        return;
+      }
+      // No messages and not a clean empty: treat as a soft read failure unless
+      // the exit was clean (0) with an empty stream (defensive).
+      const detail = stderr.trim() || (stdout.trim() ? stdout.trim() : `exit code ${code}`);
+      resolveResult({
+        body: null,
+        status: code ?? 0,
+        error: code
+          ? `agent-busctl watch failed (exit ${code}): ${detail}`
+          : `agent-busctl watch produced no messages: ${detail}`,
+      });
+    });
+  });
+}
+
+/**
  * Invoke `agent-busctl watch` once and reduce its NDJSON stream to an
  * `AgentBusMessageReadResult` in the loop-poll `read` contract shape (body =
  * flat message array, error set on failure).
+ *
+ * CURSOR RETRY: when a resume cursor was supplied (`--cursor <id>` from the
+ * in-process or persisted state) and the watch fails because the CLI rejects
+ * the cursor as invalid (a stale/pruned position), this falls back to running
+ * the watch AGAIN from the beginning (no `--cursor`) so loop mode keeps making
+ * progress. The fallback result is returned directly (its own messages, or its
+ * own idle/error outcome), so a rejected cursor never hard-stalls a poll.
  *
  * NO-TIMEOUT: the CLI watch is long-lived by nature — it keeps streaming until
  * its `--for` watch window elapses and it emits its closing `ok:false`
@@ -461,77 +615,36 @@ export async function watchAgentBusOnce(options: {
     void startCursor.warnings;
   }
 
-  const args = [
+  const baseArgs = [
     "--bus", busUrl,
     "--identity", identityStore,
     "watch",
-    ...(startCursor.cursor !== undefined ? ["--cursor", startCursor.cursor] : []),
     "--for", `${Math.max(0, Math.round(watchWindowMs))}ms`,
     "--json",
   ];
 
-  return new Promise<AgentBusMessageReadResult>((resolveResult) => {
-    const child: ChildProcess = spawn(binary, args, {
-      env: env as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    // No watchdog timer: the CLI watch is long-lived by nature, and shutdown
-    // is owned by the caller. We settle only when the stream ends or the
-    // process exits (unexpected or clean), which keeps errors from an
-    // unexpected process exit visible instead of masking them with a timer.
-    let settled = false;
+  // First attempt with the resolved resume cursor (when one exists), so we pick
+  // up where a previous poll / prior run left off rather than re-reading the
+  // retained window.
+  const cursorAttempt = await runWatchOnce(
+    binary,
+    startCursor.cursor !== undefined ? [...baseArgs, "--cursor", startCursor.cursor] : baseArgs,
+    env as NodeJS.ProcessEnv,
+    options.cursorFilePath,
+  );
 
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
+  // If the cursor attempt failed because the CLI rejected the resume cursor as
+  // invalid (stale/pruned position), retry the watch from the beginning with NO
+  // cursor so the poll still makes progress instead of stalling on a rejected
+  // cursor. Any other outcome — real messages, an idle empty watch, or a
+  // genuine transport failure — is returned as-is.
+  if (
+    startCursor.cursor !== undefined &&
+    cursorAttempt.error !== undefined &&
+    isInvalidCursorFailure(cursorAttempt.error)
+  ) {
+    return runWatchOnce(binary, baseArgs, env as NodeJS.ProcessEnv, options.cursorFilePath);
+  }
 
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      const reason = error instanceof Error ? error.message : String(error);
-      resolveResult({
-        body: null,
-        status: 0,
-        error: `could not run agent-busctl (${binary}): ${reason}`,
-      });
-    });
-
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      const { messages, empty } = parseAgentBusCtlWatchOutput(stdout);
-      if (messages.length > 0) {
-        // Real messages arrived: capture the cursor id of the last message
-        // (kept in memory and persisted when a cursorFilePath was supplied) so
-        // a subsequent poll or restarted run can resume from this position.
-        // A persistence failure is non-fatal and must not fail the poll.
-        captureAndPersistCursor(messages, options.cursorFilePath);
-        // Surface them as the read body.
-        resolveResult({ body: messages as unknown as unknown[], status: 0 });
-        return;
-      }
-      if (empty) {
-        // Bounded watch finished with no messages: an idle poll, not an error.
-        resolveResult({ body: [], status: 0 });
-        return;
-      }
-      // No messages and not a clean empty: treat as a soft read failure unless
-      // the exit was clean (0) with an empty stream (defensive).
-      const detail = stderr.trim() || (stdout.trim() ? stdout.trim() : `exit code ${code}`);
-      resolveResult({
-        body: null,
-        status: code ?? 0,
-        error: code
-          ? `agent-busctl watch failed (exit ${code}): ${detail}`
-          : `agent-busctl watch produced no messages: ${detail}`,
-      });
-    });
-  });
+  return cursorAttempt;
 }

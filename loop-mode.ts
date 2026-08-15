@@ -52,6 +52,15 @@ export interface AgentBusMessageLike {
 export interface AgentBusClassificationContext {
   /** Current task/plan ID to watch for references (may be undefined). */
   readonly planId?: string;
+  /**
+   * Optional no-filter / respond-to-everything mode. When true, every message
+   * is classified as RELEVANT (interrupts the agent / triggers a re-plan)
+   * regardless of whether it references the current plan or carries a
+   * plan-change directive. This disables the conservative relevant/queued
+   * filtering so the agent responds to every bus message. Defaults to false,
+   * preserving the normal filtering behavior.
+   */
+  readonly respondAll?: boolean;
 }
 
 /**
@@ -121,8 +130,11 @@ export function normalizeForClassification(text: string): string {
 /**
  * Classify a bus message as relevant (interrupt execution) or queued
  * (defer). A message is relevant when:
- *   1. it references the current task/plan ID, or
- *   2. it contains a plan-change directive keyword/phrase.
+ *   1. the no-filter / respond-to-everything mode (`context.respondAll`) is
+ *      enabled — then *every* message is relevant so the agent responds to all
+ *      of them instead of filtering; or
+ *   2. it references the current task/plan ID, or
+ *   3. it contains a plan-change directive keyword/phrase.
  * Otherwise it is queued for later processing.
  */
 export function classifyAgentBusMessage(
@@ -131,6 +143,15 @@ export function classifyAgentBusMessage(
 ): AgentBusMessageClassification {
   const rawText = messageToSearchableText(message);
   const haystack = normalizeForClassification(rawText);
+
+  // No-filter / respond-to-everything mode: every message, even a blank one,
+  // is treated as relevant so nothing is ever dropped or deferred.
+  if (context.respondAll === true) {
+    return {
+      kind: "relevant",
+      reason: "no-filter mode is enabled: responding to every bus message",
+    };
+  }
 
   if (!haystack) {
     return { kind: "queued", reason: "message has no searchable text; queueing it" };

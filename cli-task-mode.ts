@@ -34,6 +34,13 @@ export interface ResolvedCliRunMode {
   readonly prompt?: string;
   /** Whether loop mode is enabled (--loop). Additive to either base mode. */
   readonly loop: boolean;
+  /**
+   * Whether no-filter / respond-to-everything mode is enabled (--respond-all).
+   * Only meaningful together with --loop: every loop-mode bus message is then
+   * treated as RELEVANT so the agent responds to all of them instead of
+   * filtering. Defaults to false (normal filtering behavior).
+   */
+  readonly respondAll: boolean;
 }
 
 /**
@@ -68,12 +75,15 @@ export function normalizeTaskId(value: string | undefined): string {
  * Resolve the CLI run mode from the parsed positional prompt and --task-id.
  * The two modes are mutually exclusive and at least one must be supplied.
  * `loop` is an additive modifier: it never selects a mode by itself and may be
- * combined with either prompt mode or task mode.
+ * combined with either prompt mode or task mode. `respondAll` is the loop-mode
+ * no-filter option: when true, every loop-mode bus message is treated as
+ * RELEVANT so the agent responds to all of them (defaults to false).
  */
 export function resolveCliRunMode(
   taskId: string | undefined,
   prompt: string | undefined,
   loop = false,
+  respondAll = false,
 ): ResolvedCliRunMode {
   const hasPrompt = typeof prompt === "string" && prompt.trim().length > 0;
   const hasTaskId = taskId !== undefined;
@@ -85,7 +95,7 @@ export function resolveCliRunMode(
         "Usage: <prompt> and --task-id cannot be used together. Use either prompt mode or task mode, not both.",
       );
     }
-    return { mode: "task", taskId: normalizedTaskId, loop };
+    return { mode: "task", taskId: normalizedTaskId, loop, respondAll };
   }
 
   if (!hasPrompt) {
@@ -94,5 +104,5 @@ export function resolveCliRunMode(
     );
   }
 
-  return { mode: "prompt", prompt: prompt as string, loop };
+  return { mode: "prompt", prompt: prompt as string, loop, respondAll };
 }
