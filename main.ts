@@ -34,6 +34,10 @@ import {
   epicIdentifier,
 } from "./specKeeperFlow.ts";
 import { resolveSpecKeeperDefaults, describeSpecKeeperDefaults } from "./specKeeperConfig.ts";
+import { fetchSpecKeeperTask, describeTaskWorkOrder } from "./specKeeperTaskFetch.ts";
+import type { TaskWorkOrder } from "./specKeeperTaskFetch.ts";
+import { claimSpecKeeperTask, describeClaimedSpecKeeperTask } from "./specKeeperTaskClaim.ts";
+import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperTaskPrompt.ts";
 import { Command } from "commander";
 
 const program = new Command();
@@ -66,13 +70,9 @@ try {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
 }
-if (runMode.mode === "task") {
-    // Task mode argument rules are enforced here. Task fetching, claiming, and
-    // execution are wired in later plan steps; until then, reject task mode
-    // explicitly instead of falling through to prompt mode with no prompt.
-    console.error("Spec Keeper task mode is not implemented yet. --task-id is recognized, but task execution is wired in a later step.");
-    process.exit(1);
-}
+// Task mode is handled inside main() after Spec Keeper defaults are resolved.
+// The run mode is resolved above so prompt-mode-only argument rules are
+// enforced before any runtime work starts.
 const commitInstruction = options.review ? "do not commit" : "commit all of your work";
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
@@ -371,10 +371,10 @@ function renderPrompt(template, variables) {
     const evaluator = new Function(...names, `return \`${template.replace(/`/g, "\\`")}\`;`);
     return evaluator(...values);
 }
-function buildPrompt(commandPrompts, toolCallTldrs) {
+function buildPrompt(commandPrompts, toolCallTldrs, commandLinePromptValue = commandLinePrompt) {
     const promptHistory = commandPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n") || "(none)";
     const toolHistory = toolCallTldrs.map((tldr, index) => `${index + 1}. ${tldr}`).join("\n") || "(none)";
-    return renderPrompt(buildPromptTemplate, { claudeInstructions, historyLimit, promptHistory, toolHistory, commandLinePrompt });
+    return renderPrompt(buildPromptTemplate, { claudeInstructions, historyLimit, promptHistory, toolHistory, commandLinePrompt: commandLinePromptValue });
 }
 function summarizeToolCall(name, toolArguments, toolResponse) { return truncate(`${name}(${truncate(stringify(toolArguments), 160)}) → ${truncate(stringify(toolResponse), 240)}`, 480); }
 
@@ -863,7 +863,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     }
 }
 
-async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
+async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, originalPrompt = commandLinePrompt) {
     // The review phase starts with a plan step: ask the model to plan how to
     // conduct the review of the executed work against the four review criteria.
     status.planning("Creating a review plan...");
@@ -904,7 +904,7 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
         }
     }
     const reviewRequest = renderPrompt(reviewPromptTemplate, {
-        claudeInstructions, originalPrompt: commandLinePrompt, plan: formatPlan(activeSteps),
+        claudeInstructions, originalPrompt, plan: formatPlan(activeSteps),
         executedSteps, changes, reviewPlan, learnings, reviewAttempt, maxReviewAttempts,
     });
     return runReview(client, configData, reviewRequest, null);
@@ -919,9 +919,17 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt) {
  * lifecycle. `reviewMode` preserves the existing --review commit behavior by
  * blocking Git commits during the step, without creating a worktree.
  */
-async function runSingleStep(prompt: string, configData: any, reviewMode: boolean, specKeeperDefaults: any = null): Promise<void> {
-    configData.completedSteps = [{ step: 1, text: commandLinePrompt }];
-    configData.activePlanSteps = [commandLinePrompt];
+async function runSingleStep(
+    prompt: string,
+    configData: any,
+    reviewMode: boolean,
+    specKeeperDefaults: any = null,
+    taskMode = false,
+    originalPrompt = commandLinePrompt,
+): Promise<void> {
+    const stepText = taskMode ? originalPrompt : commandLinePrompt;
+    configData.completedSteps = [{ step: 1, text: stepText }];
+    configData.activePlanSteps = [stepText];
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
     saveData(configData);
@@ -933,27 +941,31 @@ async function runSingleStep(prompt: string, configData: any, reviewMode: boolea
     let skTask: any = null;
 
     // Epic-first task sync for the no-plan path: reuse/create the configured
-    // default epic, then reuse/create one task beneath it for this run.
-    const epicSync = await specKeeperSync("epic-first task epic sync", async () => syncSpecKeeperEpic({
-        key: defaultEpic.key,
-        title: defaultEpic.title ?? defaultEpic.key ?? commandLinePrompt,
-        description: defaultEpic.description ?? `Auto-created by elastic-agent for: ${commandLinePrompt}`,
-        ...skClientOptions,
-    }));
-    if (epicSync) {
-        const taskSync = await specKeeperSync("task sync", async () => syncSpecKeeperTask({
-            key: defaultTask.key,
-            title: commandLinePrompt,
-            description: `Direct task execution (no plan): ${commandLinePrompt}`,
-            epicId: epicIdentifier(epicSync.epic),
-            keyPrefix: defaultTask.keyPrefix,
-            defaultStatus: defaultTask.status ?? "in_progress",
+    // default epic, then reuse/create one task beneath it for this run. Task
+    // mode already fetched and claimed the Spec Keeper task, so it must not
+    // create a second prompt-mode epic/task here.
+    if (!taskMode) {
+        const epicSync = await specKeeperSync("epic-first task epic sync", async () => syncSpecKeeperEpic({
+            key: defaultEpic.key,
+            title: defaultEpic.title ?? defaultEpic.key ?? commandLinePrompt,
+            description: defaultEpic.description ?? `Auto-created by elastic-agent for: ${commandLinePrompt}`,
             ...skClientOptions,
         }));
-        if (taskSync) {
-            skTask = taskSync.task;
-            if (!taskSync.created) {
-                await specKeeperSync("task in_progress", async () => updateTaskStatus(skTask, "in_progress", "Direct execution started.", skClientOptions));
+        if (epicSync) {
+            const taskSync = await specKeeperSync("task sync", async () => syncSpecKeeperTask({
+                key: defaultTask.key,
+                title: commandLinePrompt,
+                description: `Direct task execution (no plan): ${commandLinePrompt}`,
+                epicId: epicIdentifier(epicSync.epic),
+                keyPrefix: defaultTask.keyPrefix,
+                defaultStatus: defaultTask.status ?? "in_progress",
+                ...skClientOptions,
+            }));
+            if (taskSync) {
+                skTask = taskSync.task;
+                if (!taskSync.created) {
+                    await specKeeperSync("task in_progress", async () => updateTaskStatus(skTask, "in_progress", "Direct execution started.", skClientOptions));
+                }
             }
         }
     }
@@ -1038,8 +1050,6 @@ async function main(options: { review?: boolean } = {}) {
     if (!Array.isArray(configData.toolCallTldrs)) configData.toolCallTldrs = [];
     if (!Array.isArray(configData.replanHistory)) configData.replanHistory = [];
     if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
-    appendHistory(configData.commandLinePrompts, commandLinePrompt);
-    const prompt = buildPrompt(configData.commandLinePrompts, configData.toolCallTldrs);
 
     // Resolve Spec Keeper operational defaults once before any planning or
     // execution sync. This loads the local .spec-keeper file (when present) and
@@ -1048,42 +1058,79 @@ async function main(options: { review?: boolean } = {}) {
     for (const warning of specKeeperDefaults.warnings) status.warning(warning);
     status.specKeeper(`defaults loaded: ${describeSpecKeeperDefaults(specKeeperDefaults)}`);
 
+    // Task mode seeds the runtime from an existing Spec Keeper task: fetch it
+    // by id, claim it, and convert it into the initial agent prompt. The
+    // fetched task is the source of truth for the work order; prompt mode
+    // keeps using the original command-line prompt.
+    const isTaskMode = runMode.mode === "task";
+    let originalPrompt = commandLinePrompt;
+    let taskWorkOrder: TaskWorkOrder | null = null;
+    if (isTaskMode) {
+        const taskModeOptions = specKeeperClientOptions(specKeeperDefaults);
+        try {
+            taskWorkOrder = await fetchSpecKeeperTask(runMode.taskId!, taskModeOptions);
+            status.specKeeper(describeTaskWorkOrder(taskWorkOrder));
+            const claimedTask = await claimSpecKeeperTask(taskWorkOrder, taskModeOptions);
+            status.specKeeper(describeClaimedSpecKeeperTask(claimedTask));
+            taskWorkOrder = {
+                ...taskWorkOrder,
+                status: claimedTask.status || taskWorkOrder.status,
+                raw: claimedTask.task || taskWorkOrder.raw,
+            };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            status.error(`Task mode could not be started: ${message}`);
+            throw error;
+        }
+        originalPrompt = buildTaskWorkOrderBrief(taskWorkOrder);
+    }
+
+    appendHistory(configData.commandLinePrompts, originalPrompt);
+    const prompt = isTaskMode && taskWorkOrder
+        ? buildTaskWorkOrderPrompt(taskWorkOrder)
+        : buildPrompt(configData.commandLinePrompts, configData.toolCallTldrs, originalPrompt);
+
     // Planning-necessity classification: before entering the plan-then-execute
-    // flow, ask the LLM whether the original command-line prompt genuinely
-    // needs a formal plan. The classification runs after the prompt is resolved
-    // and before runExecutionPhase/executePlanStep is ever invoked. Invalid or
-    // missing classifier output falls back to requiresPlanning=true so the
-    // safer plan flow runs.
-    const planningNecessity = await determinePlanningNecessity(commandLinePrompt, client);
+    // flow, ask the LLM whether the work order genuinely needs a formal plan.
+    // The classification runs after the prompt is resolved and before
+    // runExecutionPhase/executePlanStep is ever invoked. Invalid or missing
+    // classifier output falls back to requiresPlanning=true so the safer plan
+    // flow runs.
+    const planningNecessity = await determinePlanningNecessity(originalPrompt, client);
     const selectedMode = selectExecutionMode(planningNecessity);
     status.classification(`requiresPlanning=${planningNecessity.requiresPlanning} (${planningNecessity.reason}); mode: ${selectedMode}`, hierarchyIndent("plan"));
     if (!planningNecessity.requiresPlanning) {
-        // No-plan single-step path: run the original command-line prompt
-        // directly. No planning prompt, plan JSON, plan review step, or
-        // plan-derived worktree lifecycle. The existing --review flag still
-        // controls commit behavior via commitInstruction and the Git commit
-        // guard handled by runSingleStep.
+        // No-plan single-step path: run the work order directly. No planning
+        // prompt, plan JSON, plan review step, or plan-derived worktree
+        // lifecycle. The existing --review flag still controls commit behavior
+        // via commitInstruction and the Git commit guard handled by
+        // runSingleStep.
         const directPrompt = `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}`;
-        await runSingleStep(directPrompt, configData, options.review === true, specKeeperDefaults);
+        await runSingleStep(directPrompt, configData, options.review === true, specKeeperDefaults, isTaskMode, originalPrompt);
         const totals = totalUsage(configData.tokenUsage);
         status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
-        status.success("Direct execution complete. Stopping.");
+        status.success(isTaskMode ? "Task-mode direct execution complete. Stopping." : "Direct execution complete. Stopping.");
         return;
     }
 
-    // Epic-first Spec Keeper coordination: always pull epics, select or create
-    // the epic that matches this work, fetch its tasks, and make that context
-    // available to the planning prompt so the plan incorporates the epic tasks.
-    // Best-effort: when Spec Keeper is unreachable we proceed without it so the
-    // run is not blocked by coordination unavailability.
+    // Epic-first Spec Keeper coordination for prompt mode: always pull epics,
+    // select or create the epic that matches this work, fetch its tasks, and
+    // make that context available to the planning prompt so the plan
+    // incorporates the epic tasks. Best-effort: when Spec Keeper is
+    // unreachable we proceed without it so the run is not blocked by
+    // coordination unavailability. Task mode already fetched and claimed its
+    // task and does not create a second prompt-mode epic here.
     let epicSync: any = null;
-    try {
-        epicSync = await syncSpecKeeperEpic({ title: commandLinePrompt, description: `Execution requested for: ${commandLinePrompt}`, projectSlug: specKeeperDefaults.projectSlug });
-        status.specKeeper(`${epicSync.selection}.`);
-    } catch (error) {
-        status.warning(`Spec Keeper epic-first sync skipped: ${error instanceof Error ? error.message : String(error)}`);
+    let epicContext = "";
+    if (!isTaskMode) {
+        try {
+            epicSync = await syncSpecKeeperEpic({ title: commandLinePrompt, description: `Execution requested for: ${commandLinePrompt}`, projectSlug: specKeeperDefaults.projectSlug });
+            status.specKeeper(`${epicSync.selection}.`);
+        } catch (error) {
+            status.warning(`Spec Keeper epic-first sync skipped: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        epicContext = buildEpicPlanContext(epicSync);
     }
-    const epicContext = buildEpicPlanContext(epicSync);
 
     status.planning("Creating an execution plan...");
 
@@ -1121,56 +1168,59 @@ async function main(options: { review?: boolean } = {}) {
     status.success(`Plan created with ${activeSteps.length} step${activeSteps.length === 1 ? "" : "s"}.`);
 
     const skClientOptions = specKeeperClientOptions(specKeeperDefaults);
-    const specKeeperState: any = {
-        epic: epicSync?.epic ?? null,
-        runTask: null,
-        stepTasks: [],
-        taskUpdateOptions: skClientOptions,
-    };
+    let specKeeperState: any = null;
+    if (!isTaskMode) {
+        specKeeperState = {
+            epic: epicSync?.epic ?? null,
+            runTask: null,
+            stepTasks: [],
+            taskUpdateOptions: skClientOptions,
+        };
 
-    // Persist the generated plan onto the selected epic so it becomes the
-    // durable home for the plan (best-effort; the run proceeds without it).
-    if (epicSync?.epic) {
-        try {
-            await updateEpicWithPlan(epicSync.epic, formatPlan(activeSteps), { title: commandLinePrompt, projectSlug: specKeeperDefaults.projectSlug });
-            status.specKeeper("updated epic with the generated plan.");
-        } catch (error) {
-            status.warning(`Spec Keeper plan update skipped: ${error instanceof Error ? error.message : String(error)}`);
-        }
-
-        await specKeeperSync("epic in_progress", async () => updateEpicStatus(epicSync.epic, "in_progress", skClientOptions));
-
-        const runTaskSync = await specKeeperSync("run task sync", async () => syncSpecKeeperTask({
-            key: specKeeperDefaults.defaultTask?.key,
-            title: commandLinePrompt,
-            description: `Plan execution for: ${commandLinePrompt}`,
-            epicId: epicIdentifier(epicSync.epic),
-            keyPrefix: specKeeperDefaults.defaultTask?.keyPrefix,
-            defaultStatus: specKeeperDefaults.defaultTask?.status ?? "in_progress",
-            ...skClientOptions,
-        }));
-        if (runTaskSync) {
-            specKeeperState.runTask = runTaskSync.task;
-            if (!runTaskSync.created) {
-                await specKeeperSync("run task in_progress", async () => updateTaskStatus(runTaskSync.task, "in_progress", "Plan execution started.", skClientOptions));
+        // Persist the generated plan onto the selected epic so it becomes the
+        // durable home for the plan (best-effort; the run proceeds without it).
+        if (epicSync?.epic) {
+            try {
+                await updateEpicWithPlan(epicSync.epic, formatPlan(activeSteps), { title: commandLinePrompt, projectSlug: specKeeperDefaults.projectSlug });
+                status.specKeeper("updated epic with the generated plan.");
+            } catch (error) {
+                status.warning(`Spec Keeper plan update skipped: ${error instanceof Error ? error.message : String(error)}`);
             }
-            await specKeeperSync("plan linked to run task", async () => updateSpecKeeperTask(
-                runTaskSync.task,
-                { plan: formatPlan(activeSteps), status: "in_progress" },
-                skClientOptions,
-            ));
-        }
 
-        const stepSync = await specKeeperSync("plan step tasks sync", async () => syncPlanStepTasks(
-            epicSync.epic,
-            activeSteps,
-            {
-                keyPrefix: specKeeperDefaults.defaultTask?.keyPrefix,
+            await specKeeperSync("epic in_progress", async () => updateEpicStatus(epicSync.epic, "in_progress", skClientOptions));
+
+            const runTaskSync = await specKeeperSync("run task sync", async () => syncSpecKeeperTask({
+                key: specKeeperDefaults.defaultTask?.key,
+                title: commandLinePrompt,
+                description: `Plan execution for: ${commandLinePrompt}`,
                 epicId: epicIdentifier(epicSync.epic),
+                keyPrefix: specKeeperDefaults.defaultTask?.keyPrefix,
+                defaultStatus: specKeeperDefaults.defaultTask?.status ?? "in_progress",
                 ...skClientOptions,
-            },
-        ));
-        if (stepSync) specKeeperState.stepTasks = stepSync.tasks;
+            }));
+            if (runTaskSync) {
+                specKeeperState.runTask = runTaskSync.task;
+                if (!runTaskSync.created) {
+                    await specKeeperSync("run task in_progress", async () => updateTaskStatus(runTaskSync.task, "in_progress", "Plan execution started.", skClientOptions));
+                }
+                await specKeeperSync("plan linked to run task", async () => updateSpecKeeperTask(
+                    runTaskSync.task,
+                    { plan: formatPlan(activeSteps), status: "in_progress" },
+                    skClientOptions,
+                ));
+            }
+
+            const stepSync = await specKeeperSync("plan step tasks sync", async () => syncPlanStepTasks(
+                epicSync.epic,
+                activeSteps,
+                {
+                    keyPrefix: specKeeperDefaults.defaultTask?.keyPrefix,
+                    epicId: epicIdentifier(epicSync.epic),
+                    ...skClientOptions,
+                },
+            ));
+            if (stepSync) specKeeperState.stepTasks = stepSync.tasks;
+        }
     }
 
     // Review loop: execute the plan, then review the result. The execution
@@ -1188,7 +1238,7 @@ async function main(options: { review?: boolean } = {}) {
         while (true) {
             await runExecutionPhase(activeSteps, plan, configData, executionContext, true, specKeeperState);
             reviewAttempt += 1;
-            const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt);
+            const review = await runReviewPhase(activeSteps, plan, configData, reviewAttempt, originalPrompt);
             if (review.passed) {
                 status.success(`Review passed on attempt ${reviewAttempt}.`);
                 // The review step is happy: commit the staged execution work.
@@ -1258,7 +1308,7 @@ async function main(options: { review?: boolean } = {}) {
 
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
-    status.success("Plan complete. Stopping.");
+    status.success(isTaskMode ? "Task-mode plan execution complete. Stopping." : "Plan complete. Stopping.");
     cleanupExecutionWorktree();
 }
 
