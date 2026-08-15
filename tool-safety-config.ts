@@ -31,6 +31,8 @@ export interface ToolSafetyConfig {
   readonly agentSourceDir: string;
   /** Absolute path of the starting directory (the runtime working directory). */
   readonly startDir: string;
+  /** True when --start-dir was explicitly provided (not the runtime-cwd default). */
+  readonly startDirConfigured: boolean;
   /** True when edit-capable tools are allowed to modify files under the configured directories. */
   readonly allowAgentSourceModifications: boolean;
 }
@@ -97,6 +99,7 @@ export function resolveToolSafetyConfig(
     enabled: options.disableClassifier !== true,
     agentSourceDir,
     startDir,
+    startDirConfigured: options.startDir !== undefined,
     allowAgentSourceModifications: options.allowAgentSourceModifications === true,
   };
 }

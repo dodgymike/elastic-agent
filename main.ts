@@ -523,7 +523,7 @@ const tools = [
             properties: { command: { type: "string" }, parameters: { type: "array", items: { type: "string" } } },
             required: ["command"],
         },
-        exec_handler: ({ command, parameters }) => ExecuteCommand(command, parameters),
+        exec_handler: ({ command, parameters }) => ExecuteCommand(command, parameters, toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined),
     },
     {
         type: "function", name: "Git",
@@ -1303,6 +1303,26 @@ async function dispatchToolCall(output, configData, goalKey) {
         return { output, toolArguments, toolResponse: { error: fullMessage }, errorMessage: fullMessage };
     }
 
+    // --start-dir tool cwd: run each tool from the configured start directory
+    // and restore the previous working directory afterwards, including when
+    // the tool rejects. The directory is validated at startup, but a chdir
+    // failure here fails the call safely instead of running the tool from an
+    // unexpected directory. The switch happens before the timer starts so a
+    // chdir failure never leaves an instrumented call running.
+    const previousCwd = process.cwd();
+    const configuredStartDir = toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
+    let toolCwdChanged = false;
+    if (configuredStartDir !== undefined && previousCwd !== configuredStartDir) {
+        try {
+            process.chdir(configuredStartDir);
+            toolCwdChanged = true;
+        } catch (error) {
+            const message = `Unable to enter --start-dir '${configuredStartDir}': ${error instanceof Error ? error.message : String(error)}`;
+            renderToolCallFailed(output, { error: message });
+            return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+        }
+    }
+
     const timer = startToolTimer({ prefix: toolChildIndent, color: terminalColor });
     timer.start();
     try {
@@ -1323,6 +1343,10 @@ async function dispatchToolCall(output, configData, goalKey) {
         const toolResponse = { error: message };
         renderToolCallFailed(output, toolResponse);
         return { output, toolArguments, toolResponse, errorMessage: message };
+    } finally {
+        if (toolCwdChanged) {
+            process.chdir(previousCwd);
+        }
     }
 }
 
