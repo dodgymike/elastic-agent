@@ -11,7 +11,7 @@ import chalk from "chalk";
 import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
 import type { ToolRenderPhase } from "./tool-renderer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, basename, join } from "node:path";
+import { dirname, basename, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
@@ -43,6 +43,7 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
+import { classifyToolCall, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
 
 const terminalColor = terminalColorEnabled(process.stdout);
 if (!terminalColor) chalk.level = 0;
@@ -827,6 +828,60 @@ function functionCallOutput(toolCall, resultOrError) {
     };
 }
 
+/**
+ * Shared tool-call dispatch used by both executePlanStep and runSingleStep.
+ * Safety classification runs before any exec_handler so an unsafe call never
+ * reaches the tool. If the classifier itself fails, mutating and high-risk
+ * tools fail closed; read-only tools may proceed only with an explicit warning
+ * so the check is never silently bypassed.
+ */
+async function dispatchToolCall(output) {
+    renderToolCallPending(output);
+    const tool = tools.find((candidate) => candidate.name === output.name);
+    let toolArguments;
+    try {
+        toolArguments = JSON.parse(output.arguments);
+    } catch (error) {
+        const message = `Tool arguments could not be parsed as JSON: ${error instanceof Error ? error.message : String(error)}`;
+        return { output, toolArguments: {}, toolResponse: { error: message }, errorMessage: message };
+    }
+
+    if (!tool?.exec_handler) {
+        const message = `No exec_handler found for tool: ${output.name}`;
+        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+    }
+
+    let classification;
+    try {
+        classification = await classifyToolCall(output.name, toolArguments, {
+            runtime: client,
+            workspaceRoot: process.cwd(),
+            promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
+        });
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const risk = toolRiskLevel(output.name);
+        if (risk !== "readonly") {
+            const message = `Safety classifier failed for ${output.name} (${risk} tool); refusing to execute: ${reason}`;
+            return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+        }
+        status.warning(`Safety classifier failed for read-only tool ${output.name}; proceeding with an explicit warning: ${reason}`, toolChildIndent);
+    }
+
+    if (classification && !classification.safe) {
+        const message = `Tool call blocked by safety classifier (${classification.source}): ${classification.reason}`;
+        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+    }
+
+    try {
+        const toolResponse = await tool.exec_handler(toolArguments);
+        return { output, toolArguments, toolResponse, errorMessage: null };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+    }
+}
+
 async function executePlanStep(step, index, steps, plan, configData, executionContext) {
     const color = terminalColor;
     for (const line of buildPrettyStepLines(index, steps.length, step, { color, remainingSteps: steps.slice(index + 1) })) {
@@ -849,22 +904,11 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         toolOutputs = [];
         for (const output of response.output ?? []) {
             if (output.type !== "function_call") continue;
-            renderToolCallPending(output);
-            const tool = tools.find((candidate) => candidate.name === output.name);
-            let toolArguments;
-            try {
-                toolArguments = JSON.parse(output.arguments);
-                if (!tool?.exec_handler) throw new Error(`No exec_handler found for tool: ${output.name}`);
-                const toolResponse = await tool.exec_handler(toolArguments);
-                toolOutputs.push(functionCallOutput(output, toolResponse));
-                appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments, toolResponse));
-                renderToolCallSucceeded(output, toolResponse);
-            } catch (error) {
-                const toolResponse = { error: error instanceof Error ? error.message : String(error) };
-                toolOutputs.push(functionCallOutput(output, toolResponse));
-                appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments ?? {}, toolResponse));
-                renderToolCallFailed(output, toolResponse.error);
-            }
+            const dispatched = await dispatchToolCall(output);
+            toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
+            appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
+            if (dispatched.errorMessage !== null) renderToolCallFailed(dispatched.output, dispatched.errorMessage);
+            else renderToolCallSucceeded(dispatched.output, dispatched.toolResponse);
         }
         saveData(configData);
         if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
@@ -1117,22 +1161,11 @@ async function runSingleStep(
             toolOutputs = [];
             for (const output of response.output ?? []) {
                 if (output.type !== "function_call") continue;
-                renderToolCallPending(output);
-                const tool = tools.find((candidate) => candidate.name === output.name);
-                let toolArguments;
-                try {
-                    toolArguments = JSON.parse(output.arguments);
-                    if (!tool?.exec_handler) throw new Error(`No exec_handler found for tool: ${output.name}`);
-                    const toolResponse = await tool.exec_handler(toolArguments);
-                    toolOutputs.push(functionCallOutput(output, toolResponse));
-                    appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments, toolResponse));
-                    renderToolCallSucceeded(output, toolResponse);
-                } catch (error) {
-                    const toolResponse = { error: error instanceof Error ? error.message : String(error) };
-                    toolOutputs.push(functionCallOutput(output, toolResponse));
-                    appendHistory(configData.toolCallTldrs, summarizeToolCall(output.name, toolArguments ?? {}, toolResponse));
-                    renderToolCallFailed(output, toolResponse.error);
-                }
+                const dispatched = await dispatchToolCall(output);
+                toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
+                appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
+                if (dispatched.errorMessage !== null) renderToolCallFailed(dispatched.output, dispatched.errorMessage);
+                else renderToolCallSucceeded(dispatched.output, dispatched.toolResponse);
             }
             saveData(configData);
             if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
