@@ -8,8 +8,14 @@ import {
 // Valid task mode: a task ID with no prompt selects task mode.
 const taskMode = resolveCliRunMode("TASK-1", undefined);
 assert.equal(taskMode.mode, "task");
+assert.notEqual(taskMode.mode, "prompt");
 assert.equal(taskMode.taskId, "TASK-1");
 assert.equal(taskMode.prompt, undefined);
+
+// Prompt mode is never selected when --task-id is present, even when the
+// positional prompt is empty or whitespace-only. Only a real prompt conflicts.
+assert.equal(resolveCliRunMode("TASK-1", "").mode, "task");
+assert.equal(resolveCliRunMode("TASK-1", "   ").mode, "task");
 
 // Task IDs are trimmed and URL-safe forms are accepted.
 assert.equal(resolveCliRunMode("  TASK-2  ", undefined).taskId, "TASK-2");
