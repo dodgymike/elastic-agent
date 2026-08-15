@@ -5,15 +5,18 @@
 // Compiled and executed standalone by the `test:edit-tool` npm script.
 import Edit from "../tools/Edit.js";
 import { Read } from "../tools/Read.js";
+import { FileSize } from "../tools/FileSize.js";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 
-// The runtime passes only `{ path }` to Read (the type interface is legacy-inconsistent
-// across this repository); cast to satisfy the standalone compiler.
-const readFileTool = (path: string): { read_hash: string; content?: string; error?: unknown } =>
-  Read({ path } as any) as unknown as { read_hash: string; content?: string; error?: unknown };
+// Read now requires file_size from FileSize, plus read_offset and read_length.
+const readFileTool = async (path: string): Promise<{ read_hash: string; content?: string; error?: unknown }> => {
+  const sizeResult = await FileSize({ path });
+  if (sizeResult.error !== undefined) throw new Error(`FileSize failed: ${String(sizeResult.error)}`);
+  return Read({ path, file_size: sizeResult.size, read_offset: 0, read_length: sizeResult.size }) as unknown as { read_hash: string; content?: string; error?: unknown };
+};
 
 const dir = mkdtempSync(join(tmpdir(), "edit-tool-test-"));
 let failures = 0;

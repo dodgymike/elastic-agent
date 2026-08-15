@@ -12,6 +12,7 @@ import { dirname, basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
+import FileSize from "./tools/FileSize.ts";
 import Edit from "./tools/Edit.ts";
 import ListDirectory from "./tools/ListDirectory.ts";
 import Http from "./tools/Http.ts";
@@ -172,8 +173,25 @@ const tools = [
     {
         type: "function", name: "Read",
         usage_prompt: "tools/read-usage.md",
+        description: "Read a page of a UTF-8 file after first obtaining its size with FileSize. Requires path, file_size, read_length, and read_offset. Refuses files larger than 500k.",
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string" },
+                file_size: { type: "number", description: "Size of the file in bytes. Obtain this from the FileSize tool before calling Read." },
+                read_length: { type: "number", description: "Maximum number of bytes to return in this page." },
+                read_offset: { type: "number", description: "Zero-based byte offset at which to start reading." },
+            },
+            required: ["path", "file_size", "read_length", "read_offset"],
+        },
+        exec_handler: ({ path, file_size, read_length, read_offset }) => Read({ path, file_size, read_length, read_offset }),
+    },
+    {
+        type: "function", name: "FileSize",
+        usage_prompt: "tools/file-size-usage.md",
+        description: "Return the size of a file in bytes. Call FileSize before Read so you can pass the required file_size value.",
         parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-        exec_handler: ({ path }) => Read({ path }),
+        exec_handler: ({ path }) => FileSize({ path }),
     },
     {
         type: "function", name: "Edit",

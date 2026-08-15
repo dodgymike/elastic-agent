@@ -64,14 +64,16 @@ On success the promise resolves with no return value (`undefined`). The file at
 2. Overwrite after reading:
 
    ```js
-   const r = await Read({ path: "notes.md" });
+   const sizeResult = await FileSize({ path: "notes.md" });
+   const r = await Read({ path: "notes.md", file_size: sizeResult.size, read_offset: 0, read_length: sizeResult.size });
    await Write({ path: "notes.md", content: "updated text", overwrite: true, read_hash: r.read_hash });
    ```
 
 3. Overwrite after an edit (use the edit's returned hash):
 
    ```js
-   const r = await Read({ path: "notes.md" });
+   const sizeResult = await FileSize({ path: "notes.md" });
+   const r = await Read({ path: "notes.md", file_size: sizeResult.size, read_offset: 0, read_length: sizeResult.size });
    const e = await Edit({ path: "notes.md", read_hash: r.read_hash, old_string: "a", new_string: "b" });
    await Write({ path: "notes.md", content: "full rewrite", overwrite: true, read_hash: e.read_hash });
    ```
