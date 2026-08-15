@@ -7,10 +7,17 @@ spec-keeper-enrolment.json
 # Local Spec Keeper credential store; keep outside the repository.
 .spec.local.json
 
+# Local Agent Bus identity store / roster metadata; keep outside the repository.
+.agent-bus.local
+.agent-bus-identity/
+
 node_modules/
 
 .env
 dist/
+
+# Transient TypeScript test build output.
+test/.ab-enrol-check/
 
 # Agent execution worktrees; keep the staging copies out of the repository.
 .worktrees/
