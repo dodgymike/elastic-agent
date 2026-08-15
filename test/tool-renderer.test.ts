@@ -28,8 +28,9 @@ function setEnv(name: string, value: string | undefined): void {
 const plain = { color: false };
 const colored = { color: true };
 
-// 1. The generic fallback uses the unified ToolName(args) label plus circle
-// format and never emits legacy Pending:/Succeeded:/Failed: prefixes.
+// 1. The pending phase owns the ToolName(args) label; the generic
+// succeeded/failed phases render only the status circle (plus any output) and
+// never emit legacy Pending:/Succeeded:/Failed: prefixes or repeat the label.
 {
     assertLines(
         renderToolPhase("pending", { name: "Read", arguments: '{"path":"/tmp/example.txt"}' }, undefined, plain),
@@ -37,11 +38,11 @@ const colored = { color: true };
     );
     assertLines(
         renderToolPhase("succeeded", { name: "Read" }, { content: "hello" }, plain),
-        ["Read", ' ● {"content":"hello"}'],
+        [' ● {"content":"hello"}'],
     );
     assertLines(
         renderToolPhase("failed", { name: "Read" }, "permission denied", plain),
-        ["Read", " ● permission denied"],
+        [" ● permission denied"],
     );
 }
 
@@ -72,15 +73,15 @@ const colored = { color: true };
 }
 
 // 3b. The generic failed renderer surfaces serialized `{ error }` payloads
-// rather than printing [object Object].
+// rather than printing [object Object], without repeating the pending label.
 {
     assertLines(
         renderToolPhase("failed", { name: "UnknownTool" }, { error: "no handler" }, plain),
-        ["UnknownTool", " ● no handler"],
+        [" ● no handler"],
     );
     assertLines(
         renderToolPhase("failed", { name: "Read" }, { error: "access denied" }, plain),
-        ["Read", " ● access denied"],
+        [" ● access denied"],
     );
 }
 
@@ -220,7 +221,7 @@ const colored = { color: true };
     const editCall = { name: "Edit", arguments: '{"path":"/tmp/a.txt"}' };
     assertLines(
         renderToolPhase("succeeded", editCall, { content: "new" }, plain),
-        ['Edit({"path":"/tmp/a.txt"})', ' ● {"content":"new"}'],
+        [' ● {"content":"new"}'],
     );
 }
 
@@ -337,31 +338,31 @@ const colored = { color: true };
     );
 }
 
-// 19. Git stage/commit success uses the shared helper label plus green circle,
-// followed by stdout and any non-empty stderr.
+// 19. Git stage/commit success uses the shared helper green circle, followed by
+// stdout and any non-empty stderr (the label is owned by the pending phase).
 {
     const gitCall = { name: "Git", arguments: '{"action":"stage"}' };
     assertLines(
         renderToolPhase("succeeded", gitCall, { command: ["add", "--all"], exitCode: 0, stdout: "", stderr: "" }, plain),
-        ["Git('stage')", " ●"],
+        [" ●"],
     );
     assertLines(
         renderToolPhase("succeeded", gitCall, { command: ["add", "--", "a.txt"], exitCode: 0, stdout: "staged\n", stderr: "" }, plain),
-        ["Git('stage')", " ●", " staged"],
+        [" ●", " staged"],
     );
     assertLines(
         renderToolPhase("succeeded", gitCall, { command: ["add", "--", "a.txt"], exitCode: 0, stdout: "staged\n", stderr: "warning\n" }, plain),
-        ["Git('stage')", " ●", " staged", " warning"],
+        [" ●", " staged", " warning"],
     );
 }
 
-// 20. Git errors render with the shared helper label and a red circle through
-// the failed phase.
+// 20. Git errors render with the shared helper red circle through the failed
+// phase, without repeating the pending label.
 {
     const gitCall = { name: "Git", arguments: '{"action":"commit"}' };
     assertLines(
         renderToolPhase("failed", gitCall, "The Git tool cannot commit during the execution phase.", plain),
-        ["Git('commit')", " ● The Git tool cannot commit during the execution phase."],
+        [" ● The Git tool cannot commit during the execution phase."],
     );
 }
 
@@ -370,7 +371,7 @@ const colored = { color: true };
     const gitCall = { name: "Git", arguments: '{"action":"commit"}' };
     assertLines(
         renderToolPhase("succeeded", gitCall, { error: "commit refused" }, plain),
-        ["Git('commit')", " ● commit refused"],
+        [" ● commit refused"],
     );
 }
 
@@ -379,7 +380,7 @@ const colored = { color: true };
     const gitCall = { name: "Git", arguments: '{"action":"list"}' };
     assertLines(
         renderToolPhase("succeeded", gitCall, { something: true }, plain),
-        ["Git('list')", ' ● {"something":true}'],
+        [' ● {"something":true}'],
     );
 }
 
@@ -399,56 +400,56 @@ const colored = { color: true };
     assertLines(renderToolPhase("pending", execCall, undefined, plain), ["ExecuteCommand('npm run build')"]);
 }
 
-// 25. ExecuteCommand success uses the shared helper label plus a green circle,
-// then stdout, then stderr only when stderr is non-empty.
+// 25. ExecuteCommand success uses the shared helper green circle, then stdout,
+// then stderr only when stderr is non-empty (no label repeat).
 {
     const execCall = { name: "ExecuteCommand" };
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "hello\nworld\n", stderr: "" }, plain),
-        ["ExecuteCommand", " ●", " hello", " world"],
+        [" ●", " hello", " world"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "", stderr: "" }, plain),
-        ["ExecuteCommand", " ●"],
+        [" ●"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "hello\n", stderr: "warning\n" }, plain),
-        ["ExecuteCommand", " ●", " hello", " warning"],
+        [" ●", " hello", " warning"],
     );
 }
 
-// 26. ExecuteCommand error uses the shared helper label plus a red circle with
-// the exit code, then stderr, then stdout because stdout can contain useful
-// diagnostics even on failure.
+// 26. ExecuteCommand error uses the shared helper red circle with the exit
+// code, then stderr, then stdout because stdout can contain useful diagnostics
+// even on failure (no label repeat).
 {
     const execCall = { name: "ExecuteCommand" };
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 1, stdout: "out-line\n", stderr: "err-line\n" }, plain),
-        ["ExecuteCommand", " ● exit 1", " err-line", " out-line"],
+        [" ● exit 1", " err-line", " out-line"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 2, stdout: "", stderr: "err-line\n" }, plain),
-        ["ExecuteCommand", " ● exit 2", " err-line"],
+        [" ● exit 2", " err-line"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 3, stdout: "out-line\n", stderr: "" }, plain),
-        ["ExecuteCommand", " ● exit 3", " out-line"],
+        [" ● exit 3", " out-line"],
     );
 }
 
-// 27. ExecuteCommand failure renders the shared helper label plus a red circle
-// with the thrown error message.
+// 27. ExecuteCommand failure renders the shared helper red circle with the
+// thrown error message, without repeating the pending label.
 {
     const execCall = { name: "ExecuteCommand" };
     assertLines(
         renderToolPhase("failed", execCall, "Bash was terminated by signal SIGTERM", plain),
-        ["ExecuteCommand", " ● Bash was terminated by signal SIGTERM"],
+        [" ● Bash was terminated by signal SIGTERM"],
     );
 }
 
-// 28. ExecuteCommand colored output colors the label by execution status:
-// green circle + green label on success, red circle + red label on failure.
-// Plain mode degrades to the same marker without ANSI escapes.
+// 28. ExecuteCommand colored output colors the status circle by execution
+// status: green on success, red on failure. Plain mode degrades to the same
+// marker without ANSI escapes.
 {
     const ch = ansiHelpers(true);
     const execCall = { name: "ExecuteCommand" };
@@ -458,8 +459,8 @@ const colored = { color: true };
         { exitCode: 0, stdout: "ok\n", stderr: "" },
         colored,
     );
-    assertLines(successLines, [ch.green("ExecuteCommand"), ` ${ch.green("●")}`, " ok"]);
-    assert.ok(successLines[0].includes("\u001b"), "success line must be colored green");
+    assertLines(successLines, [` ${ch.green("●")}`, " ok"]);
+    assert.ok(successLines[0].includes("\u001b"), "success circle must be colored green");
 
     const errorLines = renderToolPhase(
         "succeeded",
@@ -467,12 +468,12 @@ const colored = { color: true };
         { exitCode: 1, stdout: "", stderr: "bad\n" },
         colored,
     );
-    assertLines(errorLines, [ch.red("ExecuteCommand"), ` ${ch.red("●")} exit 1`, " bad"]);
-    assert.ok(errorLines[0].includes("\u001b"), "error line must be colored red");
+    assertLines(errorLines, [` ${ch.red("●")} exit 1`, " bad"]);
+    assert.ok(errorLines[0].includes("\u001b"), "error circle must be colored red");
 }
 
 // 28b. The pending tool-call label is colored orange, and the generic
-// succeeded/failed phases color the label green/red by execution status.
+// succeeded/failed phases color the status circle green/red by execution status.
 {
     const ch = ansiHelpers(true);
     const pending = renderToolPhase("pending", { name: "Read" }, undefined, colored);
@@ -480,12 +481,12 @@ const colored = { color: true };
     assert.ok(pending[0].includes("\u001b"), "pending label must be colored orange");
 
     const succeeded = renderToolPhase("succeeded", { name: "Read" }, { content: "x" }, colored);
-    assertLines(succeeded, [ch.green("Read"), ` ${ch.green("●")} {"content":"x"}`]);
-    assert.ok(succeeded[0].includes("\u001b"), "succeeded label must be colored green");
+    assertLines(succeeded, [` ${ch.green("●")} {"content":"x"}`]);
+    assert.ok(succeeded[0].includes("\u001b"), "succeeded circle must be colored green");
 
     const failed = renderToolPhase("failed", { name: "Read" }, "access denied", colored);
-    assertLines(failed, [ch.red("Read"), ` ${ch.red("●")} access denied`]);
-    assert.ok(failed[0].includes("\u001b"), "failed label must be colored red");
+    assertLines(failed, [` ${ch.red("●")} access denied`]);
+    assert.ok(failed[0].includes("\u001b"), "failed circle must be colored red");
 
     // Git and ExecuteCommand pending labels follow the same orange rule.
     assertLines(renderToolPhase("pending", { name: "Git", arguments: '{"action":"list"}' }, undefined, colored), [
@@ -497,30 +498,32 @@ const colored = { color: true };
     );
 }
 
-// 29. ExecuteCommand result without a numeric exit code defers to the generic renderer.
+// 29. ExecuteCommand result without a numeric exit code defers to the generic
+// renderer and emits only the circle plus summary.
 {
     assertLines(
         renderToolPhase("succeeded", { name: "ExecuteCommand" }, undefined, plain),
-        ["ExecuteCommand", " ●"],
+        [" ●"],
     );
 }
 
-// 30. The shared render helper prints stdout for success and includes stderr
-// only when it is non-empty; failures print stderr and include stdout when
-// present. No [SUCCESS] or [ERROR] text prefix is ever emitted.
+// 30. The shared render helper prints the green circle and stdout for success
+// and includes stderr only when it is non-empty; failures print the red circle
+// with the exit code, stderr, and stdout when present. No [SUCCESS] or [ERROR]
+// text prefix and no label repeat is ever emitted.
 {
     const call = { name: "ExecuteCommand" };
     const successWithStderr = renderToolCommand(call, { exitCode: 0, stdout: "out\n", stderr: "warn\n" }, plain);
-    assertLines(successWithStderr!, ["ExecuteCommand", " ●", " out", " warn"]);
+    assertLines(successWithStderr!, [" ●", " out", " warn"]);
 
     const successWithoutStderr = renderToolCommand(call, { exitCode: 0, stdout: "out\n", stderr: "" }, plain);
-    assertLines(successWithoutStderr!, ["ExecuteCommand", " ●", " out"]);
+    assertLines(successWithoutStderr!, [" ●", " out"]);
 
     const failureWithStdout = renderToolCommand(call, { exitCode: 1, stdout: "out\n", stderr: "err\n" }, plain);
-    assertLines(failureWithStdout!, ["ExecuteCommand", " ● exit 1", " err", " out"]);
+    assertLines(failureWithStdout!, [" ● exit 1", " err", " out"]);
 
     const failureWithoutStdout = renderToolCommand(call, { exitCode: 2, stdout: "", stderr: "err\n" }, plain);
-    assertLines(failureWithoutStdout!, ["ExecuteCommand", " ● exit 2", " err"]);
+    assertLines(failureWithoutStdout!, [" ● exit 2", " err"]);
 
     const all = [successWithStderr!, successWithoutStderr!, failureWithStdout!, failureWithoutStdout!].flat().join("\n");
     assert.ok(!all.includes("[SUCCESS]"), "shared helper must never emit [SUCCESS]");
@@ -630,8 +633,9 @@ const colored = { color: true };
     assert.ok(busPending.includes("[REDACTED]"), "AgentBus access token must be redacted");
 }
 
-// 34. Failed SpecKeeperEnroll calls redact both the argument label and any
-// secret-shaped error text through the shared helper path used by main.ts.
+// 34. Failed SpecKeeperEnroll calls redact any secret-shaped error text through
+// the shared helper path used by main.ts; the label is owned by the pending
+// phase and never repeated here.
 {
     const tokenField = ["to", "ken"].join("");
     const passwordField = ["pa", "ss", "word"].join("");
