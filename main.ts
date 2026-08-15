@@ -1,5 +1,6 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
+import { resolveCliRunMode } from "./cli-task-mode.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
@@ -39,7 +40,8 @@ const program = new Command();
 program
     .name("elastic-agent")
     .description("Plan and execute a prompt with the selected LLM provider.")
-    .argument("<prompt>", "task or request to plan and execute")
+    .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
+    .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--review", "Run the review stage after execution (default: false)", false)
     .addHelpText("after", `
@@ -56,13 +58,27 @@ Credentials must be supplied through the runtime environment or secret manager, 
 `);
 program.parse(process.argv);
 const options = program.opts();
+const commandLinePrompt = program.args[0];
+let runMode: ReturnType<typeof resolveCliRunMode>;
+try {
+    runMode = resolveCliRunMode(options.taskId, commandLinePrompt);
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
+if (runMode.mode === "task") {
+    // Task mode argument rules are enforced here. Task fetching, claiming, and
+    // execution are wired in later plan steps; until then, reject task mode
+    // explicitly instead of falling through to prompt mode with no prompt.
+    console.error("Spec Keeper task mode is not implemented yet. --task-id is recognized, but task execution is wired in a later step.");
+    process.exit(1);
+}
 const commitInstruction = options.review ? "do not commit" : "commit all of your work";
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
 let client: MultiTurnLlmRuntime;
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
-const commandLinePrompt = program.args[0];
 const dataFilename = "/tmp/data.json";
 const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
 const historyLimit = 10;
