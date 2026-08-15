@@ -446,11 +446,14 @@ function exfiltrationCommandReason(command: string): string | null {
   if (/\brsync\b/.test(lower) && /[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:/.test(command)) {
     return "rsync transfers files to a remote host.";
   }
-  if (/\bcurl\b/.test(lower) && /(?:-T|--upload-file)\b/.test(lower)) {
+  if (/\bcurl\b/.test(lower) && /(?:-T|--upload-file)\b/i.test(command)) {
     return "curl uploads a file to a remote host.";
   }
   if (/\bcurl\b/.test(lower) && /(?:-d|--data|--data-binary|--data-urlencode|-F|--form)\s+@/.test(command)) {
     return "curl sends local file contents to a remote host.";
+  }
+  if (/\bcurl\b/.test(lower) && /(?:-F|--form)\s+[A-Za-z0-9_.-]+=@/.test(command)) {
+    return "curl uploads a local file as a form field to a remote host.";
   }
   if (/\bwget\b/.test(lower) && /--post-file/.test(lower)) {
     return "wget uploads a local file to a remote host.";
