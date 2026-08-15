@@ -15,7 +15,7 @@ import {
     initialLoopReplanBudget,
     type LoopReplanBudget,
 } from "./loop-replan.js";
-import { resolveToolSafetyConfig } from "./tool-safety-config.js";
+import { resolveToolSafetyConfig, startDirPathWarning } from "./tool-safety-config.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
@@ -1357,6 +1357,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
     }
     let previousResponseId;
     let toolOutputs: any[] = [];
+    const startDirWarning = startDirPathWarning(toolSafetyConfig);
     while (true) {
         throwIfAborted(abortController.signal, "execution", index + 1);
         const request = { tools, abortPhase: "execution" } as any;
@@ -1364,7 +1365,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
         } else {
-            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable });
+            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable }) + startDirWarning;
         }
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print(toolChildIndent);
@@ -1385,7 +1386,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             reportExecutionFeedback(feedbackEntry);
             saveData(configData);
             if (!feedbackEntry.valid) {
-                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable });
+                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable }) + startDirWarning;
                 configData.retryPrompt =
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
@@ -1797,7 +1798,7 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
         // lifecycle. The existing --review flag still controls commit behavior
         // via commitInstruction and the Git commit guard handled by
         // runSingleStep.
-        const directPrompt = `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}`;
+        const directPrompt = `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}${startDirPathWarning(toolSafetyConfig)}`;
         if (taskLifecycle) {
             await specKeeperTaskNote(taskLifecycle, "note (execution started)", "Task-mode direct execution started.");
         }

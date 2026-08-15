@@ -103,3 +103,19 @@ export function resolveToolSafetyConfig(
     allowAgentSourceModifications: options.allowAgentSourceModifications === true,
   };
 }
+
+/**
+ * Build the model-facing path warning injected into tool-executing prompts.
+ *
+ * When `--start-dir` was explicitly configured, model tool calls must use
+ * paths that are absolute or relative to the normalized start directory. The
+ * returned value is the exact warning line with a leading blank-line separator
+ * so callers can append it to a prompt. When `--start-dir` was not provided
+ * (the runtime-cwd default), an empty string is returned so the prompt stays
+ * unchanged.
+ */
+export function startDirPathWarning(config: Pick<ToolSafetyConfig, "startDir" | "startDirConfigured">): string {
+  return config.startDirConfigured
+    ? `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${config.startDir}.`
+    : "";
+}
