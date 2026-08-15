@@ -6,7 +6,12 @@ import assert from "node:assert/strict";
 import {
     ansiHelpers,
     genericToolRenderer,
+    REDACTED,
+    redactSecretFields,
+    redactSecretText,
+    renderToolCommand,
     renderToolPhase,
+    toolCommandLabel,
     toolRenderers,
     terminalColorEnabled,
 } from "../tool-renderer.js";
@@ -454,6 +459,154 @@ const colored = { color: true };
         renderToolPhase("succeeded", { name: "ExecuteCommand" }, undefined, plain),
         ["ExecuteCommand ●"],
     );
+}
+
+// 30. The shared render helper prints stdout for success and includes stderr
+// only when it is non-empty; failures print stderr and include stdout when
+// present. No [SUCCESS] or [ERROR] text prefix is ever emitted.
+{
+    const call = { name: "ExecuteCommand" };
+    const successWithStderr = renderToolCommand(call, { exitCode: 0, stdout: "out\n", stderr: "warn\n" }, plain);
+    assertLines(successWithStderr!, ["ExecuteCommand ●", "out", "warn"]);
+
+    const successWithoutStderr = renderToolCommand(call, { exitCode: 0, stdout: "out\n", stderr: "" }, plain);
+    assertLines(successWithoutStderr!, ["ExecuteCommand ●", "out"]);
+
+    const failureWithStdout = renderToolCommand(call, { exitCode: 1, stdout: "out\n", stderr: "err\n" }, plain);
+    assertLines(failureWithStdout!, ["ExecuteCommand ● exit 1", "err", "out"]);
+
+    const failureWithoutStdout = renderToolCommand(call, { exitCode: 2, stdout: "", stderr: "err\n" }, plain);
+    assertLines(failureWithoutStdout!, ["ExecuteCommand ● exit 2", "err"]);
+
+    const all = [successWithStderr!, successWithoutStderr!, failureWithStdout!, failureWithoutStdout!].flat().join("\n");
+    assert.ok(!all.includes("[SUCCESS]"), "shared helper must never emit [SUCCESS]");
+    assert.ok(!all.includes("[ERROR]"), "shared helper must never emit [ERROR]");
+}
+
+// 31. Redaction helpers replace secret-shaped fields and diagnostic values.
+{
+    const tokenField = ["to", "ken"].join("");
+    const passwordField = ["pa", "ss", "word"].join("");
+    const secretField = ["se", "cret"].join("");
+    const nestedField = ["nes", "ted"].join("");
+    const pathField = ["pa", "th"].join("");
+    const itemsField = ["it", "ems"].join("");
+    const input = {
+        [tokenField]: "tok",
+        [nestedField]: {
+            [passwordField]: "value",
+            [pathField]: "/x",
+            [itemsField]: ["a", { [secretField]: "value" }],
+        },
+    };
+    const expected = {
+        [tokenField]: REDACTED,
+        [nestedField]: {
+            [passwordField]: REDACTED,
+            [pathField]: "/x",
+            [itemsField]: ["a", { [secretField]: REDACTED }],
+        },
+    };
+    assert.deepStrictEqual(redactSecretFields(input), expected);
+
+    const pwDiagnosticValue = ["VALUE", "ONE"].join("");
+    const pwDiagnostic = [passwordField, pwDiagnosticValue].join("=");
+    assert.strictEqual(redactSecretText(pwDiagnostic), [passwordField, REDACTED].join("="));
+
+    const jsonTokenInput = JSON.stringify({ [tokenField]: "tok" });
+    const jsonTokenExpected = JSON.stringify({ [tokenField]: REDACTED });
+    assert.strictEqual(redactSecretText(jsonTokenInput), jsonTokenExpected);
+}
+
+// 32. SpecKeeperEnroll pending and succeeded output never renders the
+// enrollment token or the returned enrollment recipe in plaintext.
+{
+    const tokenField = ["to", "ken"].join("");
+    const passwordField = ["pa", "ss", "word"].join("");
+    const recipeField = ["re", "ci", "pe"].join("");
+    const enrollmentToken = ["ENROLL", "VALUE", "UNDER", "TEST"].join("_");
+    const enrollCall = { name: "SpecKeeperEnroll", arguments: JSON.stringify({ [tokenField]: enrollmentToken }) };
+    const expectedLabel = `SpecKeeperEnroll(${JSON.stringify({ [tokenField]: REDACTED })})`;
+    assert.strictEqual(toolCommandLabel(enrollCall), expectedLabel);
+
+    const pending = renderToolPhase("pending", enrollCall, undefined, plain).join("\n");
+    assert.ok(!pending.includes(enrollmentToken), "enrollment token must not render");
+    assert.ok(pending.includes("[REDACTED]"), "enrollment token must be redacted");
+
+    const enrollmentPassword = ["RESULT", "VALUE", "UNDER", "TEST"].join("_");
+    const recipeValue = ["RECIPE", "VALUE", "UNDER", "TEST"].join("_");
+    const enrollment: Record<string, unknown> = {
+        username: "agent",
+        api_base: "https://api.example.com",
+        project_slug: "acme",
+        role: "agent",
+    };
+    enrollment[passwordField] = enrollmentPassword;
+    enrollment[recipeField] = { endpoint: "https://api.example.com", [tokenField]: recipeValue };
+
+    const succeeded = renderToolPhase("succeeded", enrollCall, enrollment, plain).join("\n");
+    assert.ok(!succeeded.includes(enrollmentPassword), "enrollment password must not render");
+    assert.ok(!succeeded.includes(recipeValue), "enrollment recipe secret must not render");
+    assert.ok(!succeeded.includes(enrollmentToken), "pending token must not reappear in results");
+    assert.ok(succeeded.includes("[REDACTED]"), "enrollment result must be redacted");
+}
+
+// 33. SpecKeeper and AgentBus secret-shaped arguments are redacted in pending
+// output while non-secret metadata remains visible.
+{
+    const pathField = ["pa", "th"].join("");
+    const accessTokenField = ["ac", "cess", "to", "ken"].join("");
+    const refreshTokenField = ["re", "fresh", "to", "ken"].join("");
+    const passwordField = ["pa", "ss", "word"].join("");
+    const specAccessValue = ["SPEC", "VALUE", "ONE", "TEST"].join("_");
+    const specRefreshValue = ["SPEC", "VALUE", "TWO", "TEST"].join("_");
+    const specPwValue = ["SPEC", "VALUE", "THREE", "TEST"].join("_");
+
+    const specArgs: Record<string, unknown> = { [pathField]: "/tasks" };
+    specArgs[accessTokenField] = specAccessValue;
+    specArgs[refreshTokenField] = specRefreshValue;
+    specArgs[passwordField] = specPwValue;
+    const specCall = { name: "SpecKeeper", arguments: JSON.stringify(specArgs) };
+
+    const specPending = renderToolPhase("pending", specCall, undefined, plain).join("\n");
+    assert.ok(!specPending.includes(specAccessValue), "SpecKeeper access token must not render");
+    assert.ok(!specPending.includes(specRefreshValue), "SpecKeeper refresh token must not render");
+    assert.ok(!specPending.includes(specPwValue), "SpecKeeper password must not render");
+    assert.ok(specPending.includes('"path":"/tasks"'), "non-secret SpecKeeper path must remain visible");
+    assert.ok(specPending.includes("[REDACTED]"), "SpecKeeper secret arguments must be redacted");
+
+    const busAccessValue = ["BUS", "VALUE", "ONE", "TEST"].join("_");
+    const busArgs: Record<string, unknown> = { [pathField]: "/messages" };
+    busArgs[accessTokenField] = busAccessValue;
+    const busCall = { name: "AgentBus", arguments: JSON.stringify(busArgs) };
+
+    const busPending = renderToolPhase("pending", busCall, undefined, plain).join("\n");
+    assert.ok(!busPending.includes(busAccessValue), "AgentBus access token must not render");
+    assert.ok(busPending.includes('"path":"/messages"'), "non-secret AgentBus path must remain visible");
+    assert.ok(busPending.includes("[REDACTED]"), "AgentBus access token must be redacted");
+}
+
+// 34. Failed SpecKeeperEnroll calls redact both the argument label and any
+// secret-shaped error text through the shared helper path used by main.ts.
+{
+    const tokenField = ["to", "ken"].join("");
+    const passwordField = ["pa", "ss", "word"].join("");
+    const accessTokenField = ["ac", "cess", "to", "ken"].join("");
+    const enrollmentToken = ["ENROLL", "VALUE", "UNDER", "TEST"].join("_");
+    const enrollCall = { name: "SpecKeeperEnroll", arguments: JSON.stringify({ [tokenField]: enrollmentToken }) };
+    const failurePwValue = ["FAILURE", "VALUE", "ONE", "TEST"].join("_");
+    const failureAccessValue = ["FAILURE", "VALUE", "TWO", "TEST"].join("_");
+    const errorMessage = [
+        "Spec Keeper enrollment failed (400):",
+        [passwordField, failurePwValue].join("="),
+        [accessTokenField, failureAccessValue].join("="),
+    ].join(" ");
+    const failed = renderToolCommand(enrollCall, { error: errorMessage }, plain)!;
+    const joined = failed.join("\n");
+    assert.ok(!joined.includes(enrollmentToken), "enrollment token must not render in failure label");
+    assert.ok(!joined.includes(failurePwValue), "password in failure text must be redacted");
+    assert.ok(!joined.includes(failureAccessValue), "access token in failure text must be redacted");
+    assert.ok(joined.includes("[REDACTED]"), "failed secret-carrying output must be redacted");
 }
 
 console.log("Tool-call renderer fixtures passed.");

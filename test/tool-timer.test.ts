@@ -53,6 +53,9 @@ function createHarness(options: {
         get cancelled() {
             return cancelled;
         },
+        tickScheduled() {
+            return tickCallback !== null;
+        },
     };
 }
 
@@ -107,6 +110,18 @@ function joinedWrites(writes: string[]): string {
     const allOutput = joinedWrites(harness.writes);
     assert.ok(!allOutput.includes("[SUCCESS]"), "timer must never emit [SUCCESS]");
     assert.ok(!allOutput.includes("[ERROR]"), "timer must never emit [ERROR]");
+}
+
+// 3b. stop() cleans up scheduled tick and interval state, leaving the timer
+// inactive so no further output can occur after completion.
+{
+    const harness = createHarness({ isTTY: true, color: false });
+    harness.timer.start();
+    assert.strictEqual(harness.tickScheduled(), true, "active timer must have a scheduled tick");
+    harness.timer.stop();
+    assert.strictEqual(harness.tickScheduled(), false, "stopped timer must clear its scheduled tick");
+    assert.strictEqual(harness.cancelled, true, "stopped timer must clear its interval");
+    assert.strictEqual(harness.timer.active, false, "stopped timer must be inactive");
 }
 
 // 4. stop() is idempotent: a second stop neither rewrites the final line nor

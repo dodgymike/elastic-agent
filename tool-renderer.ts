@@ -107,13 +107,59 @@ export function stringify(value: unknown): string {
     }
 }
 
+/** Placeholder used when secret-shaped values are omitted from terminal display. */
+export const REDACTED = "[REDACTED]";
+
+/** Keys whose values are secret-shaped and must never render in plaintext. */
+const SECRET_KEY_PATTERN =
+    /(?:authorization|token|password|secret|credential|api[_-]?key|cookie|session|access[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?id|username|recipe)/i;
+
+function isSecretKey(key: string): boolean {
+    return SECRET_KEY_PATTERN.test(key);
+}
+
+/**
+ * Recursively replace values under secret-shaped keys with `[REDACTED]`.
+ * Arrays are preserved so non-secret elements can still be summarized.
+ */
+export function redactSecretFields(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(redactSecretFields);
+    if (value && typeof value === "object") {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, item]) => [
+                key,
+                isSecretKey(key) ? REDACTED : redactSecretFields(item),
+            ]),
+        );
+    }
+    return value;
+}
+
+/** Redact common credential forms from free-form diagnostic or error text. */
+export function redactSecretText(text: string): string {
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        try {
+            return stringify(redactSecretFields(JSON.parse(trimmed)));
+        } catch {
+            // Not structured JSON after all; fall through to regex redaction.
+        }
+    }
+    return text
+        .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "[REDACTED AUTHORIZATION]")
+        .replace(
+            /(\b(?:access[_-]?token|refresh[_-]?token|password|secret|api[_-]?key|credential|authorization)\b\s*[:=]\s*)[^\s,;]+/gi,
+            "$1[REDACTED]",
+        );
+}
+
 /** Summarize a raw tool-call arguments JSON string for the pending line. */
 export function toolCallArgumentSummary(argumentsText: unknown): string {
     if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
     try {
-        return truncate(stringify(JSON.parse(argumentsText)), 160);
+        return truncate(stringify(redactSecretFields(JSON.parse(argumentsText))), 160);
     } catch {
-        return truncate(argumentsText, 160);
+        return truncate(redactSecretText(argumentsText), 160);
     }
 }
 
@@ -227,7 +273,7 @@ export function renderToolCommand(
         return lines;
     }
 
-    const message = toolCommandErrorText(payload);
+    const message = redactSecretText(toolCommandErrorText(payload));
     if (message) return [`${label} ${a.red("●")} ${message}`];
     return undefined;
 }
@@ -718,6 +764,38 @@ function renderGitFailed(toolCall: ToolCallDescriptor, error: unknown, options: 
     return renderToolCommand(toolCall, error, options);
 }
 
+/** Summarize a result after redacting secret-shaped values. */
+function redactedResultSummary(result: unknown): string {
+    if (result === undefined) return "";
+    return truncate(stringify(redactSecretFields(result)), 160);
+}
+
+/**
+ * Render a successful SpecKeeperEnroll/SpecKeeper/AgentBus call with every
+ * secret-shaped argument and result value replaced by `[REDACTED]`. Non-secret
+ * metadata (for example api_base, project_slug, role, status) remains visible.
+ */
+function renderRedactedSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] {
+    const label = toolCommandLabel(toolCall);
+    const circle = ansiHelpers(options.color).green("●");
+    const summary = redactedResultSummary(result);
+    return summary ? [`${label} ${circle} ${summary}`] : [`${label} ${circle}`];
+}
+
+/** Render a failed secret-carrying tool with a redacted error message. */
+function renderRedactedFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
+    const label = toolCommandLabel(toolCall);
+    const circle = ansiHelpers(options.color).red("●");
+    const message = redactSecretText(toolCommandErrorText(error));
+    return message ? [`${label} ${circle} ${message}`] : [`${label} ${circle}`];
+}
+
+const redactedToolRenderer: ToolRenderer = {
+    ...genericToolRenderer,
+    succeeded: renderRedactedSucceeded,
+    failed: renderRedactedFailed,
+};
+
 /**
  * Tool-specific renderers keyed by tool name. Each tool owns its renderer
  * object so later steps can attach specialized formatting (for example the
@@ -746,9 +824,9 @@ export const toolRenderers: Record<string, ToolRenderer> = {
         succeeded: renderGitSucceeded,
         failed: renderGitFailed,
     },
-    AgentBus: { ...genericToolRenderer },
-    SpecKeeper: { ...genericToolRenderer },
-    SpecKeeperEnroll: { ...genericToolRenderer },
+    AgentBus: { ...redactedToolRenderer },
+    SpecKeeper: { ...redactedToolRenderer },
+    SpecKeeperEnroll: { ...redactedToolRenderer },
 };
 
 export type ToolPhaseRenderFn = (

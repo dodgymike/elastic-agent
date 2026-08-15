@@ -31,8 +31,26 @@ const executeAt = dispatch.indexOf("await tool.exec_handler(toolArguments);");
 const successAt = dispatch.indexOf("renderToolCallSucceeded(output, toolResponse);");
 const failureAt = dispatch.indexOf("renderToolCallFailed(output, toolResponse);");
 assert.ok(pendingAt >= 0 && pendingAt < parseAt && parseAt < executeAt, "pending rendering must precede parsing and execution");
+assert.equal(
+  (dispatch.match(/renderToolCallPending\(output\);/g) ?? []).length,
+  1,
+  "pending rendering must be emitted exactly once inside dispatchToolCall",
+);
+assert.ok(!dispatch.includes("[TOOL] Pending"), "dispatchToolCall must not emit a legacy pending prefix");
+assert.ok(!dispatch.includes("[SUCCESS]"), "dispatchToolCall must not emit [SUCCESS]");
+assert.ok(!dispatch.includes("[ERROR]"), "dispatchToolCall must not emit [ERROR]");
 assert.ok(successAt > executeAt, "successful calls must render terminal success after execution");
 assert.ok(failureAt > executeAt, "failed calls must render terminal failure from the execution catch path");
+
+// The in-place timer starts after the safety check and before execution, and
+// stops once execution completes or throws.
+const classifyAt = dispatch.indexOf("classification = await classifyToolCall(");
+const timerAt = dispatch.indexOf("const timer = startToolTimer(");
+const timerStartAt = dispatch.indexOf("timer.start();");
+const timerStopAt = dispatch.indexOf("timer.stop();");
+assert.ok(classifyAt >= 0 && classifyAt < executeAt, "safety classifier must remain visible before execution");
+assert.ok(timerAt >= 0 && timerAt < timerStartAt && timerStartAt < executeAt, "timer must be created and started before tool execution");
+assert.ok(timerStopAt > executeAt, "timer must be stopped after tool execution");
 
 // The execution loop delegates to the dispatcher and no longer renders success
 // or failure directly from executePlanStep.
