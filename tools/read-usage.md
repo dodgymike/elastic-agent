@@ -32,20 +32,29 @@ when paging through a file larger than 50k.
 - `path` (string): filesystem path of the file to read.
 - `file_size` (number): size of the file in bytes. Obtain this from the
   `FileSize` tool before calling `Read`.
+
+`file_size` is always required. For byte-window reads (the default, when
+`line_range` is not supplied), these two are also required and must be
+supplied together:
+
 - `read_length` (number): maximum number of bytes to return in this page.
 - `read_offset` (number): zero-based byte offset at which to start reading.
 
-`file_size` is always required. `read_offset` and `read_length` describe the
-byte window used when `line_range` is not supplied.
+When `line_range` is supplied, `read_offset` and `read_length` are optional; if
+you provide them, provide both, and their byte window must cover the requested
+lines.
 
 ## Optional parameters
 
 - `line_range` (string): inclusive 1-based line range such as `"100-200"`, or a
   single line such as `"100"`. When supplied, `Read` returns only those lines
   instead of the byte window. `file_size` must still match the current file
-  size. The required `read_offset`/`read_length` byte window must cover the
-  requested lines, so pass `read_offset: 0` and `read_length: file_size` when
-  using line mode.
+  size. Either omit `read_offset`/`read_length` or pass both with a byte window
+  that covers the requested lines (for example `read_offset: 0` and
+  `read_length: file_size`).
+- `read_hash` (string): optional expected SHA-256 of the complete file. When
+  supplied, a mismatch is returned as an error instead of returning unchecked
+  content. The returned `read_hash` is always the full-file hash.
 
 ## Result
 
@@ -74,9 +83,13 @@ byte window used when `line_range` is not supplied.
   (for example `"100-200"` or `"100"`).
 - `line_range` end exceeds the total line count: returns an error object that
   reports the file's total line count.
+- `line_range` plus only one of `read_offset`/`read_length`: returns an error
+  object; supply both together or omit both.
 - `line_range` plus a byte window that does not cover the requested lines:
   returns an error object; pass `read_offset: 0` and `read_length: file_size`
-  to use line mode.
+  to use line mode, or omit the byte window entirely.
+- Optional `read_hash` mismatch: returns an error object with the actual hash;
+  re-`Read` the file and confirm its identity before trusting content.
 
 ## Critical operating constraints
 
@@ -92,8 +105,9 @@ byte window used when `line_range` is not supplied.
   even when you only read one page or a line range.
 - Always re-`Read` a file before `Edit`/`Write` when its content may have
   changed since the last read.
-- When using `line_range`, pass `read_offset: 0` and `read_length: file_size`
-  so the byte window covers the requested lines.
+- When using `line_range`, either omit `read_offset`/`read_length` or pass
+  `read_offset: 0` and `read_length: file_size` so the byte window covers the
+  requested lines.
 
 ## Examples
 
@@ -109,7 +123,7 @@ byte window used when `line_range` is not supplied.
 
    ```js
    const sizeResult = await FileSize({ path: "large-notes.md" });
-   const r = await Read({ path: "large-notes.md", file_size: sizeResult.size, read_offset: 0, read_length: sizeResult.size, line_range: "100-200" });
+   const r = await Read({ path: "large-notes.md", file_size: sizeResult.size, line_range: "100-200" });
    // r.content contains lines 100 through 200; r.read_hash is the full-file hash.
    ```
 

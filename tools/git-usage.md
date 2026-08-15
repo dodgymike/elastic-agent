@@ -42,6 +42,12 @@ mode and degrade to plain text otherwise. A clean working tree renders an
 explicit `working tree clean` empty-state, and a non-zero git exit is shown
 with command evidence and any stderr/stdout diagnostics.
 
+For `stage` and `commit` on success, the terminal renders a green circle with
+the literal `git <args>` command followed by any non-empty stdout. On failure
+it renders a red circle with `git <args> failed (exit N)` and then any stderr
+and stdout diagnostics. In no-color/non-TTY contexts the same information is
+shown as plain text.
+
 ## Error handling
 
 - The `action` value is constrained by the tool schema to `list`, `stage`, or
