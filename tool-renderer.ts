@@ -140,6 +140,63 @@ export const genericToolRenderer: CompleteToolRenderer = {
     failed: renderGenericFailed,
 };
 
+/** Extract the `command` field from a raw tool-call arguments JSON string. */
+function executeCommandText(argumentsText: unknown): string {
+    if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
+    try {
+        const parsed = JSON.parse(argumentsText) as { command?: unknown };
+        return typeof parsed?.command === "string" ? parsed.command : "";
+    } catch {
+        return "";
+    }
+}
+
+/** Convert captured stdout/stderr into non-empty display lines. */
+function executeCommandOutputLines(text: unknown): string[] {
+    if (typeof text !== "string") return [];
+    if (text.trim() === "") return [];
+    return text.split(/\r?\n/).filter((line) => line.length > 0);
+}
+
+interface ExecuteCommandResultLike {
+    exitCode?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+}
+
+function renderExecuteCommandPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
+    const command = truncate(executeCommandText(toolCall.arguments), 160);
+    if (!command) return ["ExecuteCommand"];
+    const quoted = command.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    return [`ExecuteCommand('${quoted}')`];
+}
+
+function renderExecuteCommandSucceeded(_toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
+    if (!result || typeof result !== "object") return undefined;
+    const { exitCode, stdout, stderr } = result as ExecuteCommandResultLike;
+    if (typeof exitCode !== "number") return undefined;
+
+    const green = ansiHelpers(options.color).green;
+    const red = ansiHelpers(options.color).red;
+
+    if (exitCode === 0) {
+        const stdoutLines = executeCommandOutputLines(stdout);
+        if (stdoutLines.length === 0) return [green("●")];
+        return [`${green("●")} ${stdoutLines[0]}`, ...stdoutLines.slice(1)];
+    }
+
+    const lines = [`${red("●")} exit ${exitCode}`];
+    lines.push(...executeCommandOutputLines(stderr));
+    lines.push(...executeCommandOutputLines(stdout));
+    return lines;
+}
+
+function renderExecuteCommandFailed(_toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
+    const red = ansiHelpers(options.color).red;
+    const message = String(error).trim();
+    return message ? [`${red("●")} ${message}`] : [red("●")];
+}
+
 /**
  * Tool-specific renderers keyed by tool name. Each tool owns its renderer
  * object so later steps can attach specialized formatting (for example the
@@ -154,7 +211,11 @@ export const toolRenderers: Record<string, ToolRenderer> = {
     Http: { ...genericToolRenderer },
     HttpRequest: { ...genericToolRenderer },
     ListDirectory: { ...genericToolRenderer },
-    ExecuteCommand: { ...genericToolRenderer },
+    ExecuteCommand: {
+        pending: renderExecuteCommandPending,
+        succeeded: renderExecuteCommandSucceeded,
+        failed: renderExecuteCommandFailed,
+    },
     Git: { ...genericToolRenderer },
     AgentBus: { ...genericToolRenderer },
     SpecKeeper: { ...genericToolRenderer },
