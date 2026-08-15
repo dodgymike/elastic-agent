@@ -80,6 +80,12 @@ prefix is ever emitted for a tool call.
 
 ## Safe use
 
+> Tool safety: commands that modify files are denied unless the agent was
+> started with `--allow-agent-source-modifications`. When that flag is set,
+> each detected file target must resolve inside `--agent-source-dir` or
+> `--start-dir` (boundary-safe, so `../` traversal is blocked).
+> `--disable-classifier` bypasses the check.
+
 **Allowed**
 - Read-only verification commands: builds, tests, grep, listing, and repository
   inspection not covered by the dedicated `Git` tool. Use `Git({ mode: "diff",

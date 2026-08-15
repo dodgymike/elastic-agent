@@ -11,7 +11,7 @@ import {
   toolRiskLevel,
 } from "../tool-safety-classifier.js";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "../llm/multi-turn-runtime.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -60,6 +60,18 @@ function staticVerdictWithRoots(toolName: string, parameters: unknown, allowedDi
   return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE, allowedDirectories });
 }
 
+type TestToolSafetyConfig = {
+  enabled: boolean;
+  agentSourceDir: string;
+  startDir: string;
+  allowAgentSourceModifications: boolean;
+};
+
+/** Like staticVerdict but with a resolved tool-safety CLI config. */
+function staticVerdictWithConfig(toolName: string, parameters: unknown, toolSafetyConfig: TestToolSafetyConfig) {
+  return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE, toolSafetyConfig });
+}
+
 function parseAs(text: string): { valid: true; safe: boolean; reason: string } | null {
   const result = parseToolSafetyClassification(text);
   return result.valid ? result : null;
@@ -87,6 +99,10 @@ function mockRuntime(handler: (input: string) => Promise<string>): MultiTurnLlmR
 }
 
 const tmpDir = mkdtempSync(join(tmpdir(), "tool-safety-classifier-test-"));
+const agentSourceDir = join(tmpDir, "agent-source");
+const startDir = join(tmpDir, "start-dir");
+mkdirSync(agentSourceDir);
+mkdirSync(startDir);
 const tempPrompt = join(tmpDir, "classifier-prompt.md");
 writeFileSync(
   tempPrompt,
@@ -368,6 +384,125 @@ async function main(): Promise<void> {
     check(
       "classifyToolCall allows a path in an allowed directory (canonical local root)",
       fullAllowed.safe === true && fullAllowed.source === "static",
+    );
+
+    // ------------------------------------------------------------------
+    // 5c. Tool-safety CLI config: edit/write policy driven by
+    //     --allow-agent-source-modifications, --agent-source-dir,
+    //     --start-dir, and --disable-classifier.
+    // ------------------------------------------------------------------
+    const denyEditsConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir,
+      startDir,
+      allowAgentSourceModifications: false,
+    };
+    const allowEditsConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir,
+      startDir,
+      allowAgentSourceModifications: true,
+    };
+    const disabledConfig: TestToolSafetyConfig = {
+      enabled: false,
+      agentSourceDir,
+      startDir,
+      allowAgentSourceModifications: false,
+    };
+    const privateKeyBlock = ["-----BEGIN ", "RSA PRIVATE KEY-----"].join("");
+
+    check(
+      "no allow flag denies Write even inside the configured directories",
+      staticVerdictWithConfig("Write", { path: join(agentSourceDir, "notes.md"), content: "hello" }, denyEditsConfig).decision === "unsafe",
+    );
+    check(
+      "no allow flag denies Edit inside the configured directories",
+      staticVerdictWithConfig("Edit", { path: join(startDir, "notes.md"), old_string: "a", new_string: "b" }, denyEditsConfig).decision === "unsafe",
+    );
+    check(
+      "no allow flag denies Delete inside the configured directories",
+      staticVerdictWithConfig("Delete", { path: join(startDir, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, denyEditsConfig).decision === "unsafe",
+    );
+    check(
+      "no allow flag denies file-modifying ExecuteCommand",
+      staticVerdictWithConfig("ExecuteCommand", { command: `touch ${join(startDir, "created.txt")}` }, denyEditsConfig).decision === "unsafe",
+    );
+
+    check(
+      "allow flag permits Write inside --agent-source-dir",
+      staticVerdictWithConfig("Write", { path: join(agentSourceDir, "notes.md"), content: "hello" }, allowEditsConfig).decision === "safe",
+    );
+    check(
+      "allow flag permits Edit inside --start-dir",
+      staticVerdictWithConfig("Edit", { path: join(startDir, "notes.md"), old_string: "a", new_string: "b" }, allowEditsConfig).decision === "safe",
+    );
+    check(
+      "allow flag permits a relative Write that resolves inside a configured directory",
+      staticVerdictWithConfig("Write", { path: "notes.md", content: "hello" }, allowEditsConfig).decision === "safe",
+    );
+    check(
+      "allow flag permits Delete inside --start-dir",
+      staticVerdictWithConfig("Delete", { path: join(startDir, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, allowEditsConfig).decision === "safe",
+    );
+    check(
+      "allow flag does not statically block a file-modifying command inside the configured directories",
+      staticVerdictWithConfig("ExecuteCommand", { command: `touch ${join(agentSourceDir, "created.txt")}` }, allowEditsConfig).decision !== "unsafe",
+    );
+
+    check(
+      "allow flag denies Write outside both configured directories",
+      staticVerdictWithConfig("Write", { path: "/etc/agent-notes.md", content: "hello" }, allowEditsConfig).decision === "unsafe",
+    );
+    check(
+      "allow flag denies Edit outside both configured directories",
+      staticVerdictWithConfig("Edit", { path: "/etc/agent-notes.md", old_string: "a", new_string: "b" }, allowEditsConfig).decision === "unsafe",
+    );
+    check(
+      "allow flag denies Delete outside both configured directories",
+      staticVerdictWithConfig("Delete", { path: "/etc/agent-notes.md", file_hash: "0".repeat(64), file_size: 5 }, allowEditsConfig).decision === "unsafe",
+    );
+    check(
+      "allow flag denies file-modifying ExecuteCommand outside both configured directories",
+      staticVerdictWithConfig("ExecuteCommand", { command: "touch /etc/agent-notes.md" }, allowEditsConfig).decision === "unsafe",
+    );
+
+    check(
+      "path traversal is blocked even with the allow flag set",
+      staticVerdictWithConfig("Write", { path: "../escape.md", content: "hello" }, allowEditsConfig).decision === "unsafe",
+    );
+    check(
+      "in-boundary path traversal is still rejected by the file path check",
+      staticVerdictWithConfig("Write", { path: `${agentSourceDir}/sub/../notes.md`, content: "hello" }, allowEditsConfig).decision === "unsafe",
+    );
+
+    check(
+      "--disable-classifier bypasses static classification",
+      staticVerdictWithConfig("Write", { path: "/etc/agent-notes.md", content: privateKeyBlock }, disabledConfig).decision === "safe",
+    );
+
+    const bypassCapture = capturingLogger();
+    const bypassResult = await classifyToolCall("Write", { path: "/etc/agent-notes.md", content: "hello" }, {
+      workspaceRoot: WORKSPACE,
+      toolSafetyConfig: disabledConfig,
+      logger: bypassCapture.logger,
+    });
+    check(
+      "--disable-classifier returns allowed without rendering a safety response",
+      bypassResult.safe === true && bypassResult.source === "static" && bypassCapture.lines.length === 0,
+    );
+
+    const deniedEditCapture = capturingLogger();
+    const deniedEdit = await classifyToolCall("Write", { path: join(agentSourceDir, "notes.md"), content: "hello" }, {
+      workspaceRoot: WORKSPACE,
+      toolSafetyConfig: denyEditsConfig,
+      logger: deniedEditCapture.logger,
+    });
+    check(
+      "no allow flag renders a denial safety response for an edit",
+      deniedEdit.safe === false
+        && deniedEdit.source === "static"
+        && /--allow-agent-source-modifications/.test(deniedEdit.reason)
+        && deniedEditCapture.lines.length === 1,
     );
 
     // ------------------------------------------------------------------

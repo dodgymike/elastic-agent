@@ -1,6 +1,7 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
+import { resolveToolSafetyConfig } from "./tool-safety-config.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
@@ -72,6 +73,10 @@ program
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--review", "Run the review stage after execution (default: false)", false)
+    .option("--disable-classifier", "Bypass the tool safety classifier", false)
+    .option("--agent-source-dir <dir>", "Agent source directory whose files may be edited (default: resolved agent source directory)")
+    .option("--start-dir <dir>", "Starting directory whose files may be edited (default: runtime working directory)")
+    .option("--allow-agent-source-modifications", "Allow edit-capable tools to modify files inside the agent source and start directories", false)
     .addHelpText("after", `
 Provider selection:
   --provider <provider-id> takes precedence over LLM_PROVIDER.
@@ -90,6 +95,21 @@ const commandLinePrompt = program.args[0];
 let runMode: ReturnType<typeof resolveCliRunMode>;
 try {
     runMode = resolveCliRunMode(options.taskId, commandLinePrompt);
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
+// Tool-safety flags are resolved and validated before any runtime work starts
+// so a missing or invalid --agent-source-dir/--start-dir produces a clear CLI
+// error instead of a mid-run failure.
+let toolSafetyConfig: ReturnType<typeof resolveToolSafetyConfig>;
+try {
+    toolSafetyConfig = resolveToolSafetyConfig({
+        disableClassifier: options.disableClassifier,
+        agentSourceDir: options.agentSourceDir,
+        startDir: options.startDir,
+        allowAgentSourceModifications: options.allowAgentSourceModifications,
+    });
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -1129,6 +1149,11 @@ async function dispatchToolCall(output, configData, goalKey) {
             // roots. Both are handed to the classifier as allowed directories
             // so legitimate calls that stay within either form are accepted.
             allowedDirectories: workspaceInit.allowedDirectories,
+            // Tool-safety CLI flags resolved once at startup (enabled,
+            // agentSourceDir, startDir, allowAgentSourceModifications) are
+            // threaded into the classifier so its edit/write policy and
+            // bypass behavior follow the user's configuration.
+            toolSafetyConfig,
             promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
             logger: createToolSafetyLogger(toolChildIndent),
         });
@@ -1669,6 +1694,8 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     status.planning("Creating an execution plan...");
 
     const planningPrompt = `${prompt}\n\n${planningSuffix}${epicContext}`;
+
+    console.log(planningPrompt);
 
     let planParseFailure: string | null = null;
     let parsedPlanningResponse: ReturnType<typeof parsePlanOrAbort> = { valid: false, reason: "Planning did not produce a response." };

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { RunAbortError } from "./llm/run-abort.js";
+import type { ToolSafetyConfig } from "./tool-safety-config.js";
 
 /**
  * Lightweight tool-call safety classifier.
@@ -97,6 +98,13 @@ export interface ToolSafetyClassifierOptions {
    * when it escapes *every* trusted root.
    */
   readonly allowedDirectories?: readonly string[];
+  /**
+   * Resolved tool-safety CLI configuration threaded from main.ts (enabled,
+   * agentSourceDir, startDir, allowAgentSourceModifications). When present,
+   * the classifier's edit/write policy and bypass behavior are driven by
+   * these values instead of the legacy workspaceRoot-only defaults.
+   */
+  readonly toolSafetyConfig?: ToolSafetyConfig;
   /** Override for the classifier prompt path (default prompts/tool-safety-classifier.md). */
   readonly promptPath?: string;
   /** Optional logger so tests can silence the default console output. */
@@ -255,6 +263,62 @@ function resolvesOutsideAllTrustedRoots(target: string, roots: readonly string[]
   return true;
 }
 
+/**
+ * Boundary-safe prefix check between two absolute paths. Returns true when
+ * `candidate` is equal to `dir` or is a descendant of `dir`. The check uses
+ * path.resolve plus path.relative, so a target such as `../outside` or an
+ * absolute path cannot escape the configured boundary through traversal.
+ */
+function isInsideBoundary(candidate: string, dir: string): boolean {
+  const rel = relative(resolve(dir), resolve(candidate));
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+/**
+ * True when `target` resolves inside at least one configured editable
+ * directory. Relative targets are resolved against each directory in turn,
+ * mirroring how tool paths are resolved relative to the runtime working
+ * directory.
+ */
+function isInsideAnyBoundary(target: string, dirs: readonly string[]): boolean {
+  if (dirs.length === 0) return false;
+  const absoluteTarget = isAbsolute(target) ? resolve(target) : null;
+  for (const dir of dirs) {
+    const resolvedDir = resolve(dir);
+    const candidate = absoluteTarget ?? resolve(resolvedDir, target);
+    if (isInsideBoundary(candidate, resolvedDir)) return true;
+  }
+  return false;
+}
+
+/** De-duplicated absolute editable roots derived from the tool-safety config. */
+function editableRoots(config: ToolSafetyConfig): string[] {
+  return Array.from(new Set([resolve(config.agentSourceDir), resolve(config.startDir)]));
+}
+
+/**
+ * Apply the configured edit/write policy to a file-mutating tool
+ * (Write/Edit/Delete).
+ * Returns a denial verdict when the policy forbids the edit, or null when the
+ * call may continue through the normal file checks. A missing path yields null
+ * so the existing tool-shape checks still produce the correct ambiguity error.
+ */
+function fileEditPolicyVerdict(
+  toolName: string,
+  target: string | null,
+  config: ToolSafetyConfig,
+  roots: readonly string[],
+): StaticToolSafetyVerdict | null {
+  if (target === null || target.trim() === "") return null;
+  if (!config.allowAgentSourceModifications) {
+    return unsafe(`${toolName} modifies files, which is denied because --allow-agent-source-modifications is not set.`);
+  }
+  if (!isInsideAnyBoundary(target, roots)) {
+    return unsafe(`${toolName} target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
+  }
+  return null;
+}
+
 function secretTextReason(text: string): string | null {
   for (const entry of SECRET_TEXT_PATTERNS) {
     if (entry.pattern.test(text)) {
@@ -404,7 +468,121 @@ function classifyFileTool(toolName: string, parameters: Record<string, unknown>,
   return safe(`${toolName} target '${target}' stays within the workspace and is not a protected file.`);
 }
 
-function classifyExecuteCommand(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
+/** Split a shell command into words while separating redirection operators. */
+function shellWords(command: string): string[] {
+  return command
+    .replace(/(>>|<<|<>|[<>])/g, " $1 ")
+    .split(/\s+/)
+    .filter((part) => part.length > 0);
+}
+
+/** Return redirection targets that write to a real file (not an fd or /dev/null). */
+function redirectionTargets(command: string): string[] {
+  const words = shellWords(command);
+  const targets: string[] = [];
+  for (let index = 0; index < words.length; index += 1) {
+    const part = words[index];
+    const isRedirect = [">", ">>", ">|"].includes(part)
+      || /^[0-9]+>>?$/.test(part)
+      || /^&>>?$/.test(part);
+    if (!isRedirect) continue;
+    const next = words[index + 1];
+    if (!next || next.startsWith("&") || next === "/dev/null" || next === "dev/null") continue;
+    targets.push(next.replace(/[,;)]+$/, ""));
+  }
+  return targets;
+}
+
+/** True when an ExecuteCommand invocation has a pattern that modifies files. */
+function isFileModifyingCommand(command: string): boolean {
+  const lower = command.toLowerCase();
+  if (redirectionTargets(command).length > 0) return true;
+  if (/^(touch|mkdir|rmdir|rm|unlink|cp|mv|ln|install|tee|chmod|chown|chgrp|truncate)\b/.test(lower)) return true;
+  if (/\b(sed|perl|awk)\b[^\n;|&]*\s-i\b/.test(lower)) return true;
+  if (/\bdd\b[^\n;|&]*\bof=/.test(lower)) return true;
+  if (/\bgit\s+(add|mv|rm|restore|checkout|apply|stash)\b/.test(lower)) return true;
+  return false;
+}
+
+/** Extract candidate paths that a file-modifying command may create or modify. */
+function fileModificationTargets(command: string): string[] {
+  const targets = redirectionTargets(command);
+  const words = shellWords(command);
+  const executable = (words[0] ?? "").toLowerCase();
+  const lower = command.toLowerCase();
+  const args = words.slice(1).filter((part) => ![">", ">>", ">|"].includes(part));
+  const positional = args.filter((part) => !/^--?[A-Za-z]/.test(part));
+
+  switch (executable) {
+    case "touch":
+    case "mkdir":
+    case "rmdir":
+    case "rm":
+    case "unlink":
+    case "chmod":
+    case "chown":
+    case "chgrp":
+    case "truncate":
+      targets.push(...positional);
+      break;
+    case "cp":
+    case "mv":
+    case "ln":
+    case "install":
+      if (positional.length > 0) targets.push(positional[positional.length - 1]);
+      break;
+    case "tee":
+      targets.push(...positional);
+      break;
+    default:
+      break;
+  }
+
+  if (/^sed\b/.test(executable) && /\s-i(?:\.\S+)?\b/.test(lower)) targets.push(...positional);
+  if (/^(perl|awk)\b/.test(executable) && /\s-i(?:\.\S+)?\b/.test(lower)) targets.push(...positional);
+  if (/^dd\b/.test(executable)) {
+    const of = lower.match(/\bof=([^\s;&|<>]+)/);
+    if (of) targets.push(of[1]);
+  }
+  if (/^git\b/.test(executable)) targets.push(...positional);
+
+  return Array.from(new Set(targets.filter((part) => part.length > 0)));
+}
+
+/**
+ * Apply the configured edit/write policy to a file-modifying ExecuteCommand.
+ * Returns a denial when modifications are disallowed, when the target paths
+ * cannot be determined, or when a target escapes both editable directories.
+ * Returns null when the command is not file-modifying or stays inside the
+ * configured boundaries (the command may still be ambiguous for the LLM).
+ */
+function executeCommandEditPolicyVerdict(
+  command: string,
+  config: ToolSafetyConfig,
+  roots: readonly string[],
+): StaticToolSafetyVerdict | null {
+  if (!isFileModifyingCommand(command)) return null;
+  if (!config.allowAgentSourceModifications) {
+    return unsafe("ExecuteCommand modifies files, which is denied because --allow-agent-source-modifications is not set.");
+  }
+  const targets = fileModificationTargets(command);
+  if (targets.length === 0) {
+    return unsafe("ExecuteCommand modifies files but its target paths could not be determined for the configured editable directories.");
+  }
+  for (const target of targets) {
+    if (!isInsideAnyBoundary(target, roots)) {
+      return unsafe(`ExecuteCommand file target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
+    }
+  }
+  return null;
+}
+
+function classifyExecuteCommand(
+  parameters: Record<string, unknown>,
+  roots: readonly string[],
+  config?: ToolSafetyConfig,
+  editRoots?: readonly string[],
+): StaticToolSafetyVerdict {
   const command = stringValue(parameters.command);
   if (command === null || command.trim() === "") {
     return ambiguous("ExecuteCommand has no non-empty command; the tool itself will reject the call.");
@@ -444,6 +622,11 @@ function classifyExecuteCommand(parameters: Record<string, unknown>, roots: read
   }
   if (/\b(bash|sh|zsh)\s+-c\b/i.test(command) || /\bcmd\s+\/c\b/i.test(command) || /\b(powershell|pwsh)\s+-command\b/i.test(command)) {
     return unsafe("ExecuteCommand nests another shell interpreter, which is a command-injection vector.");
+  }
+
+  if (config) {
+    const policyVerdict = executeCommandEditPolicyVerdict(command, config, editRoots ?? editableRoots(config));
+    if (policyVerdict) return policyVerdict;
   }
 
   const outsideReason = absolutePathEscapeReason(command, roots);
@@ -778,7 +961,11 @@ function classifyAgentBusEnrol(parameters: Record<string, unknown>, roots: reado
 export function classifyToolCallStatically(
   toolName: string,
   parameters: unknown,
-  options: { readonly workspaceRoot?: string; readonly allowedDirectories?: readonly string[] } = {},
+  options: {
+    readonly workspaceRoot?: string;
+    readonly allowedDirectories?: readonly string[];
+    readonly toolSafetyConfig?: ToolSafetyConfig;
+  } = {},
 ): StaticToolSafetyVerdict {
   if (typeof toolName !== "string" || toolName.trim() === "") {
     return unsafe("Tool name is missing or invalid; refusing to execute an unknown tool call.");
@@ -787,17 +974,35 @@ export function classifyToolCallStatically(
     ? (parameters as Record<string, unknown>)
     : {};
   const roots = trustedRoots(options.workspaceRoot ?? process.cwd(), options.allowedDirectories);
+  const config = options.toolSafetyConfig;
+
+  // --disable-classifier bypasses all safety classification. The returned
+  // safe verdict is silent by contract, so no safety response is rendered.
+  if (config && !config.enabled) {
+    return safe("Tool safety classifier is disabled by --disable-classifier; call allowed without a safety review.");
+  }
+
+  const policyRoots = config ? editableRoots(config) : roots;
+  const combinedRoots = config ? Array.from(new Set([...roots, ...policyRoots])) : roots;
 
   switch (toolName) {
     case "Read":
-    case "Write":
-    case "Edit":
-    case "Delete":
     case "FileSize":
     case "ListDirectory":
       return classifyFileTool(toolName, record, roots);
+    case "Write":
+    case "Edit":
+    case "Delete": {
+      if (config) {
+        const target = stringValue(record.path);
+        const policyVerdict = fileEditPolicyVerdict(toolName, target, config, policyRoots);
+        if (policyVerdict) return policyVerdict;
+        return classifyFileTool(toolName, record, policyRoots);
+      }
+      return classifyFileTool(toolName, record, roots);
+    }
     case "ExecuteCommand":
-      return classifyExecuteCommand(record, roots);
+      return classifyExecuteCommand(record, combinedRoots, config, policyRoots);
     case "Http":
       return classifyHttp(record);
     case "HttpRequest":
@@ -924,7 +1129,11 @@ export async function classifyToolCall(
 ): Promise<ToolSafetyClassification> {
   const logger = options.logger ?? defaultLogger;
   const promptPath = options.promptPath ?? TOOL_SAFETY_PROMPT_PATH;
-  const staticVerdict = classifyToolCallStatically(toolName, parameters, { workspaceRoot: options.workspaceRoot, allowedDirectories: options.allowedDirectories });
+  const staticVerdict = classifyToolCallStatically(toolName, parameters, {
+    workspaceRoot: options.workspaceRoot,
+    allowedDirectories: options.allowedDirectories,
+    toolSafetyConfig: options.toolSafetyConfig,
+  });
 
   if (staticVerdict.decision === "safe") {
     const classification: ToolSafetyClassification = { safe: true, reason: staticVerdict.reason, source: "static" };
