@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { RunAbortError } from "./llm/run-abort.js";
+import type { ToolSafetyConfig } from "./tool-safety-config.js";
 
 /**
  * Lightweight tool-call safety classifier.
@@ -97,6 +98,13 @@ export interface ToolSafetyClassifierOptions {
    * when it escapes *every* trusted root.
    */
   readonly allowedDirectories?: readonly string[];
+  /**
+   * Resolved tool-safety CLI configuration threaded from main.ts (enabled,
+   * agentSourceDir, startDir, allowAgentSourceModifications). When present,
+   * the classifier's edit/write policy and bypass behavior are driven by
+   * these values instead of the legacy workspaceRoot-only defaults.
+   */
+  readonly toolSafetyConfig?: ToolSafetyConfig;
   /** Override for the classifier prompt path (default prompts/tool-safety-classifier.md). */
   readonly promptPath?: string;
   /** Optional logger so tests can silence the default console output. */
@@ -724,7 +732,11 @@ function classifyIntegrationTool(toolName: string, parameters: Record<string, un
 export function classifyToolCallStatically(
   toolName: string,
   parameters: unknown,
-  options: { readonly workspaceRoot?: string; readonly allowedDirectories?: readonly string[] } = {},
+  options: {
+    readonly workspaceRoot?: string;
+    readonly allowedDirectories?: readonly string[];
+    readonly toolSafetyConfig?: ToolSafetyConfig;
+  } = {},
 ): StaticToolSafetyVerdict {
   if (typeof toolName !== "string" || toolName.trim() === "") {
     return unsafe("Tool name is missing or invalid; refusing to execute an unknown tool call.");
@@ -868,7 +880,11 @@ export async function classifyToolCall(
 ): Promise<ToolSafetyClassification> {
   const logger = options.logger ?? defaultLogger;
   const promptPath = options.promptPath ?? TOOL_SAFETY_PROMPT_PATH;
-  const staticVerdict = classifyToolCallStatically(toolName, parameters, { workspaceRoot: options.workspaceRoot, allowedDirectories: options.allowedDirectories });
+  const staticVerdict = classifyToolCallStatically(toolName, parameters, {
+    workspaceRoot: options.workspaceRoot,
+    allowedDirectories: options.allowedDirectories,
+    toolSafetyConfig: options.toolSafetyConfig,
+  });
 
   if (staticVerdict.decision === "safe") {
     const classification: ToolSafetyClassification = { safe: true, reason: staticVerdict.reason, source: "static" };

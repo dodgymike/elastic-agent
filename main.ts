@@ -1133,6 +1133,11 @@ async function dispatchToolCall(output, configData, goalKey) {
             // roots. Both are handed to the classifier as allowed directories
             // so legitimate calls that stay within either form are accepted.
             allowedDirectories: workspaceInit.allowedDirectories,
+            // Tool-safety CLI flags resolved once at startup (enabled,
+            // agentSourceDir, startDir, allowAgentSourceModifications) are
+            // threaded into the classifier so its edit/write policy and
+            // bypass behavior follow the user's configuration.
+            toolSafetyConfig,
             promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
             logger: createToolSafetyLogger(toolChildIndent),
         });
