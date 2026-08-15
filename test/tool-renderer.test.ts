@@ -364,4 +364,83 @@ const colored = { color: true };
     );
 }
 
+// 24. ExecuteCommand pending renders the command as ExecuteCommand('...').
+{
+    const execCall = { name: "ExecuteCommand", arguments: '{"command":"npm run build"}' };
+    assertLines(renderToolPhase("pending", execCall, undefined, plain), ["ExecuteCommand('npm run build')"]);
+}
+
+// 25. ExecuteCommand success shows a green circle with captured stdout only;
+// empty stdout is suppressed to leave just the circle.
+{
+    const execCall = { name: "ExecuteCommand" };
+    assertLines(
+        renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "hello\nworld\n", stderr: "" }, plain),
+        ["● hello", "world"],
+    );
+    assertLines(
+        renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "", stderr: "" }, plain),
+        ["●"],
+    );
+}
+
+// 26. ExecuteCommand error shows the exit code, then stderr, then stdout
+// because stdout can contain useful diagnostics even on failure.
+{
+    const execCall = { name: "ExecuteCommand" };
+    assertLines(
+        renderToolPhase("succeeded", execCall, { exitCode: 1, stdout: "out-line\n", stderr: "err-line\n" }, plain),
+        ["● exit 1", "err-line", "out-line"],
+    );
+    assertLines(
+        renderToolPhase("succeeded", execCall, { exitCode: 2, stdout: "", stderr: "err-line\n" }, plain),
+        ["● exit 2", "err-line"],
+    );
+    assertLines(
+        renderToolPhase("succeeded", execCall, { exitCode: 3, stdout: "out-line\n", stderr: "" }, plain),
+        ["● exit 3", "out-line"],
+    );
+}
+
+// 27. ExecuteCommand failure renders a red circle with the thrown error message.
+{
+    const execCall = { name: "ExecuteCommand" };
+    assertLines(
+        renderToolPhase("failed", execCall, "Bash was terminated by signal SIGTERM", plain),
+        ["● Bash was terminated by signal SIGTERM"],
+    );
+}
+
+// 28. ExecuteCommand colored output applies green/red circles; plain mode
+// degrades to the same marker without ANSI escapes.
+{
+    const ch = ansiHelpers(true);
+    const execCall = { name: "ExecuteCommand" };
+    const successLines = renderToolPhase(
+        "succeeded",
+        execCall,
+        { exitCode: 0, stdout: "ok\n", stderr: "" },
+        colored,
+    );
+    assertLines(successLines, [`${ch.green("●")} ok`]);
+    assert.ok(successLines[0].includes("\u001b"), "success circle must be colored green");
+
+    const errorLines = renderToolPhase(
+        "succeeded",
+        execCall,
+        { exitCode: 1, stdout: "", stderr: "bad\n" },
+        colored,
+    );
+    assertLines(errorLines, [`${ch.red("●")} exit 1`, "bad"]);
+    assert.ok(errorLines[0].includes("\u001b"), "error circle must be colored red");
+}
+
+// 29. ExecuteCommand result without a numeric exit code defers to the generic renderer.
+{
+    assertLines(
+        renderToolPhase("succeeded", { name: "ExecuteCommand" }, undefined, plain),
+        ["Succeeded: ExecuteCommand"],
+    );
+}
+
 console.log("Tool-call renderer fixtures passed.");
