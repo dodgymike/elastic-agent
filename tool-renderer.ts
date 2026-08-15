@@ -50,13 +50,13 @@ export interface AnsiHelpers {
     yellow(text: string): string;
     cyan(text: string): string;
     gray(text: string): string;
-    orange(text: string): string;
+    blue(text: string): string;
     bold(text: string): string;
     greenBold(text: string): string;
     redBold(text: string): string;
     cyanBold(text: string): string;
     yellowBold(text: string): string;
-    orangeBold(text: string): string;
+    blueBold(text: string): string;
 }
 
 /**
@@ -65,22 +65,22 @@ export interface AnsiHelpers {
  * contexts without conditional calls at each rendering site.
  */
 export function ansiHelpers(color: boolean): AnsiHelpers {
-    // Orange uses the 256-color palette (ANSI 38;5;208) so it degrades
-    // gracefully on terminals without truecolor support.
-    const orange = color ? chalk.ansi256(208) : (text: string) => text;
+    // Blue uses the standard ANSI blue (34) so it degrades gracefully on
+    // terminals without truecolor support.
+    const blue = color ? chalk.blue : (text: string) => text;
     return {
         green: (text) => (color ? chalk.green(text) : text),
         red: (text) => (color ? chalk.red(text) : text),
         yellow: (text) => (color ? chalk.yellow(text) : text),
         cyan: (text) => (color ? chalk.cyan(text) : text),
         gray: (text) => (color ? chalk.gray(text) : text),
-        orange,
+        blue,
         bold: (text) => (color ? chalk.bold(text) : text),
         greenBold: (text) => (color ? chalk.green.bold(text) : text),
         redBold: (text) => (color ? chalk.red.bold(text) : text),
         cyanBold: (text) => (color ? chalk.cyan.bold(text) : text),
         yellowBold: (text) => (color ? chalk.yellow.bold(text) : text),
-        orangeBold: (text) => (color ? chalk.ansi256(208).bold(text) : text),
+        blueBold: (text) => (color ? chalk.blue.bold(text) : text),
     };
 }
 
@@ -293,7 +293,7 @@ export function renderToolCommand(
 function renderGenericPending(toolCall: ToolCallDescriptor, options: ToolRendererOptions): string[] {
     const label = toolCommandLabel(toolCall);
     const a = ansiHelpers(options.color);
-    return [a.orange(label)];
+    return [a.blue(label)];
 }
 
 function renderGenericSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] {
@@ -334,7 +334,7 @@ function executeCommandText(argumentsText: unknown): string {
 }
 
 function renderExecuteCommandPending(toolCall: ToolCallDescriptor, options: ToolRendererOptions): string[] {
-    return [ansiHelpers(options.color).orange(toolCommandLabel(toolCall))];
+    return [ansiHelpers(options.color).blue(toolCommandLabel(toolCall))];
 }
 
 /**
@@ -743,7 +743,7 @@ function renderGitCommandFailure(args: string[], exitCode: number, result: GitRe
 }
 
 function renderGitPending(toolCall: ToolCallDescriptor, options: ToolRendererOptions): string[] {
-    return [ansiHelpers(options.color).orange(toolCommandLabel(toolCall))];
+    return [ansiHelpers(options.color).blue(toolCommandLabel(toolCall))];
 }
 
 function renderGitSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
