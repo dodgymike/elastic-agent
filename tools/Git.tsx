@@ -50,17 +50,17 @@ export type GitOptions =
  * explicit `all: true` opt-in; it never stages the whole repository by
  * accident.
  *
- * `list` runs `git status --short --branch`, whose stdout is suitable for
- * displaying both staged and unstaged changes. `stage` runs either
- * `git add -- <paths...>` or `git add --all`; `commit` runs
- * `git commit -m <message>`.
+ * `list` runs `git status --porcelain=v1 --branch`, the stable machine-readable
+ * status format whose stdout is suitable for displaying branch, staged,
+ * unstaged, and untracked changes. `stage` runs either `git add -- <paths...>`
+ * or `git add --all`; `commit` runs `git commit -m <message>`.
  */
 export default async function Git(options: GitOptions): Promise<GitCommandResult> {
   validateCwd(options.cwd);
 
   switch (options.action) {
     case "list":
-      return runGit(["status", "--short", "--branch"], options.cwd);
+      return runGit(["status", "--porcelain=v1", "--branch"], options.cwd);
 
     case "stage": {
       const paths = options.paths ?? [];

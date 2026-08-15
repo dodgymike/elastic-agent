@@ -472,6 +472,160 @@ function renderEditSucceeded(toolCall: ToolCallDescriptor, result: unknown, opti
     return lines;
 }
 
+/** Extract the `action` field from a raw tool-call arguments JSON string. */
+function gitActionText(argumentsText: unknown): string {
+    if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
+    try {
+        const parsed = JSON.parse(argumentsText) as { action?: unknown };
+        return typeof parsed?.action === "string" ? parsed.action : "";
+    } catch {
+        return "";
+    }
+}
+
+interface GitResultLike {
+    command?: unknown;
+    exitCode?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+    error?: unknown;
+}
+
+interface GitStatusEntry {
+    x: string;
+    y: string;
+    path: string;
+}
+
+interface GitStatusSections {
+    branch: string;
+    staged: GitStatusEntry[];
+    unstaged: GitStatusEntry[];
+    untracked: GitStatusEntry[];
+}
+
+/** Return the literal git arguments (excluding the `git` executable). */
+function gitCommandArgs(result: GitResultLike): string[] {
+    if (!Array.isArray(result.command)) return [];
+    return result.command.filter((arg): arg is string => typeof arg === "string");
+}
+
+/** Convert captured git stdout/stderr into non-empty display lines. */
+function gitOutputLines(text: unknown): string[] {
+    return executeCommandOutputLines(text);
+}
+
+/**
+ * Parse `git status --porcelain=v1 --branch` stdout into its branch label and
+ * the staged, unstaged, and untracked entry lists. Porcelain v1 is a stable
+ * line-oriented format: a `## ` header followed by `XY path` entries, where X
+ * is the index status and Y is the worktree status. A single entry appears in
+ * both the staged and unstaged sections when both X and Y are changed.
+ */
+function parseGitStatus(stdout: string): GitStatusSections {
+    const lines = stdout.split(/\r?\n/);
+    const branchLine = lines.find((line) => line.startsWith("## "));
+    const branch = branchLine ? branchLine.slice(3).trim() : "";
+    const staged: GitStatusEntry[] = [];
+    const unstaged: GitStatusEntry[] = [];
+    const untracked: GitStatusEntry[] = [];
+
+    for (const line of lines) {
+        if (line.startsWith("## ")) continue;
+        if (line.length < 4) continue;
+        const x = line[0];
+        const y = line[1];
+        if (!/^[A-Z?! ]$/.test(x) || !/^[A-Z?! ]$/.test(y)) continue;
+        const entry: GitStatusEntry = { x, y, path: line.slice(3) };
+        if (x === "?" && y === "?") {
+            untracked.push(entry);
+            continue;
+        }
+        if (x !== " " && x !== "?") staged.push(entry);
+        if (y !== " " && y !== "?") unstaged.push(entry);
+    }
+
+    return { branch, staged, unstaged, untracked };
+}
+
+/** Render a clean/working-tree status as branch plus sectioned change lists. */
+function renderGitStatus(stdout: string, options: ToolRendererOptions): string[] {
+    const a = ansiHelpers(options.color);
+    const { branch, staged, unstaged, untracked } = parseGitStatus(stdout);
+    const lines = [a.bold("Git status"), a.cyan(`Branch: ${branch || "(unknown)"}`)];
+
+    if (staged.length > 0) {
+        lines.push(`${a.green("● Staged")} (${staged.length})`);
+        for (const entry of staged) lines.push(`  ${a.green(`${entry.x}${entry.y}`)} ${entry.path}`);
+    }
+    if (unstaged.length > 0) {
+        lines.push(`${a.yellow("● Unstaged")} (${unstaged.length})`);
+        for (const entry of unstaged) lines.push(`  ${a.yellow(`${entry.x}${entry.y}`)} ${entry.path}`);
+    }
+    if (untracked.length > 0) {
+        lines.push(`${a.cyan("● Untracked")} (${untracked.length})`);
+        for (const entry of untracked) lines.push(`  ${a.cyan(`${entry.x}${entry.y}`)} ${entry.path}`);
+    }
+
+    if (staged.length === 0 && unstaged.length === 0 && untracked.length === 0) {
+        lines.push(`${a.green("●")} working tree clean`);
+    }
+    return lines;
+}
+
+/** Render a non-zero git exit with command evidence followed by diagnostics. */
+function renderGitCommandFailure(args: string[], exitCode: number, result: GitResultLike, a: AnsiHelpers): string[] {
+    const command = `git ${args.join(" ")}`;
+    const lines = [`${a.red("●")} ${command} failed (exit ${exitCode})`];
+    lines.push(...gitOutputLines(result.stderr));
+    lines.push(...gitOutputLines(result.stdout));
+    return lines;
+}
+
+function renderGitPending(toolCall: ToolCallDescriptor, _options: ToolRendererOptions): string[] {
+    const action = gitActionText(toolCall.arguments);
+    if (!action) return ["Git"];
+    return [`Git('${action.replace(/'/g, "\\'")}')`];
+}
+
+function renderGitSucceeded(_toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
+    if (!result || typeof result !== "object") return undefined;
+    const gitResult = result as GitResultLike;
+    const a = ansiHelpers(options.color);
+
+    // Some runtime guards return a serialized `{ error }` object rather than
+    // throwing. Surface it as an error line even when the call was dispatched
+    // through the succeeded phase.
+    if (typeof gitResult.error === "string" && gitResult.error.trim() !== "") {
+        return [`${a.red("●")} ${gitResult.error.trim()}`];
+    }
+    if (typeof gitResult.exitCode !== "number") return undefined;
+
+    const args = gitCommandArgs(gitResult);
+    if (args.length === 0) return undefined;
+
+    if (args[0] === "status") {
+        if (gitResult.exitCode !== 0) {
+            return renderGitCommandFailure(args, gitResult.exitCode, gitResult, a);
+        }
+        return renderGitStatus(typeof gitResult.stdout === "string" ? gitResult.stdout : "", options);
+    }
+
+    if (gitResult.exitCode === 0) {
+        const command = `git ${args.join(" ")}`;
+        const stdoutLines = gitOutputLines(gitResult.stdout);
+        return [`${a.green("●")} ${command}`, ...stdoutLines];
+    }
+
+    return renderGitCommandFailure(args, gitResult.exitCode, gitResult, a);
+}
+
+function renderGitFailed(_toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
+    const a = ansiHelpers(options.color);
+    const message = String(error).trim();
+    return message ? [`${a.red("●")} ${message}`] : [a.red("●")];
+}
+
 /**
  * Tool-specific renderers keyed by tool name. Each tool owns its renderer
  * object so later steps can attach specialized formatting (for example the
@@ -494,7 +648,12 @@ export const toolRenderers: Record<string, ToolRenderer> = {
         succeeded: renderExecuteCommandSucceeded,
         failed: renderExecuteCommandFailed,
     },
-    Git: { ...genericToolRenderer },
+    Git: {
+        ...genericToolRenderer,
+        pending: renderGitPending,
+        succeeded: renderGitSucceeded,
+        failed: renderGitFailed,
+    },
     AgentBus: { ...genericToolRenderer },
     SpecKeeper: { ...genericToolRenderer },
     SpecKeeperEnroll: { ...genericToolRenderer },

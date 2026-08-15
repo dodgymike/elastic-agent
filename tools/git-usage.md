@@ -29,8 +29,18 @@ work. Follow the runtime's commit instruction for the current step. Use
 
 - `command` (string[]): the git arguments that were run.
 - `exitCode` (number): git's exit status; `0` means success.
-- `stdout` (string): git standard output.
+- `stdout` (string): git standard output. For `action: "list"` this is the
+  stable `git status --porcelain=v1 --branch` output.
 - `stderr` (string): git standard error.
+
+## Formatted status output
+
+For `action: "list"`, the terminal renders the porcelain output as a formatted
+status view with sections for the branch, staged changes, unstaged changes,
+and untracked files. Section headers and status codes use colors/icons in TTY
+mode and degrade to plain text otherwise. A clean working tree renders an
+explicit `working tree clean` empty-state, and a non-zero git exit is shown
+with command evidence and any stderr/stdout diagnostics.
 
 ## Error handling
 

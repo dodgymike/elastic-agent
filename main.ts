@@ -290,7 +290,10 @@ const tools = [
                 const message = executionWorktreePath
                     ? "The Git tool cannot commit during the execution phase. Changes are staged in the execution worktree; only the review step commits when it is satisfied."
                     : "The Git tool cannot commit during the execution phase; the --review flag requires the work to remain uncommitted.";
-                return Promise.resolve({ error: message });
+                // Throwing routes this through the normal tool-error path so
+                // the terminal renders it as an error while the model still
+                // receives the same serialized `{ error }` result.
+                throw new Error(message);
             }
             return Git(options);
         },

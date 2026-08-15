@@ -225,4 +225,143 @@ const colored = { color: true };
     assert.ok(lines[lines.length - 1].includes("more diff line(s) omitted"), "truncation note must be present");
 }
 
+// 14. Git pending renders the requested action.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"list"}' };
+    assertLines(renderToolPhase("pending", gitCall, undefined, plain), ["Git('list')"]);
+    assertLines(renderToolPhase("pending", { name: "Git" }, undefined, plain), ["Git"]);
+}
+
+// 15. Git status renders a clean working tree with an explicit empty-state.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"list"}' };
+    const result = { command: ["status", "--porcelain=v1", "--branch"], exitCode: 0, stdout: "## main\n", stderr: "" };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, result, plain),
+        ["Git status", "Branch: main", "● working tree clean"],
+    );
+}
+
+// 16. Git status sections parse staged, unstaged, untracked, and rename entries.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"list"}' };
+    const stdout = [
+        "## main...origin/main [ahead 1, behind 2]",
+        "M  staged.txt",
+        "A  added.txt",
+        "R  old.txt -> new.txt",
+        " M unstaged.txt",
+        "MM both.txt",
+        " D deleted.txt",
+        "?? new-file.txt",
+    ].join("\n") + "\n";
+    const result = { command: ["status", "--porcelain=v1", "--branch"], exitCode: 0, stdout, stderr: "" };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, result, plain),
+        [
+            "Git status",
+            "Branch: main...origin/main [ahead 1, behind 2]",
+            "● Staged (4)",
+            "  M  staged.txt",
+            "  A  added.txt",
+            "  R  old.txt -> new.txt",
+            "  MM both.txt",
+            "● Unstaged (3)",
+            "   M unstaged.txt",
+            "  MM both.txt",
+            "   D deleted.txt",
+            "● Untracked (1)",
+            "  ?? new-file.txt",
+        ],
+    );
+}
+
+// 17. Git status colors each section header and its status code.
+{
+    const ch = ansiHelpers(true);
+    const gitCall = { name: "Git", arguments: '{"action":"list"}' };
+    const result = {
+        command: ["status", "--porcelain=v1", "--branch"],
+        exitCode: 0,
+        stdout: "## main\nM  staged.txt\n?? new-file.txt\n",
+        stderr: "",
+    };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, result, colored),
+        [
+            ch.bold("Git status"),
+            ch.cyan("Branch: main"),
+            `${ch.green("● Staged")} (1)`,
+            `  ${ch.green("M ")} staged.txt`,
+            `${ch.cyan("● Untracked")} (1)`,
+            `  ${ch.cyan("??")} new-file.txt`,
+        ],
+    );
+}
+
+// 18. Git status failure preserves command evidence and stderr.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"list"}' };
+    const result = {
+        command: ["status", "--porcelain=v1", "--branch"],
+        exitCode: 128,
+        stdout: "",
+        stderr: "fatal: not a git repository\n",
+    };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, result, plain),
+        ["● git status --porcelain=v1 --branch failed (exit 128)", "fatal: not a git repository"],
+    );
+}
+
+// 19. Git stage/commit success preserves the exact command.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"stage"}' };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, { command: ["add", "--all"], exitCode: 0, stdout: "", stderr: "" }, plain),
+        ["● git add --all"],
+    );
+    assertLines(
+        renderToolPhase("succeeded", gitCall, { command: ["add", "--", "a.txt"], exitCode: 0, stdout: "staged\n", stderr: "" }, plain),
+        ["● git add -- a.txt", "staged"],
+    );
+}
+
+// 20. Git errors render with a red circle through the failed phase.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"commit"}' };
+    assertLines(
+        renderToolPhase("failed", gitCall, "The Git tool cannot commit during the execution phase.", plain),
+        ["● The Git tool cannot commit during the execution phase."],
+    );
+}
+
+// 21. A serialized `{ error }` Git result is surfaced as an error line.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"commit"}' };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, { error: "commit refused" }, plain),
+        ["● commit refused"],
+    );
+}
+
+// 22. A Git result without an exit code defers to the generic renderer.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"list"}' };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, { something: true }, plain),
+        ['Succeeded: Git → {"something":true}'],
+    );
+}
+
+// 23. A repository with no commits yet still renders a clean empty-state.
+{
+    const gitCall = { name: "Git", arguments: '{"action":"list"}' };
+    const result = { command: ["status", "--porcelain=v1", "--branch"], exitCode: 0, stdout: "## No commits yet on main\n", stderr: "" };
+    assertLines(
+        renderToolPhase("succeeded", gitCall, result, plain),
+        ["Git status", "Branch: No commits yet on main", "● working tree clean"],
+    );
+}
+
 console.log("Tool-call renderer fixtures passed.");
