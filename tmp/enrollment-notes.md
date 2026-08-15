@@ -111,12 +111,21 @@ the repository by `.gitignore`.
   identity credentials live in `tmp/elastic-identity` (gitignored) owned by
   `agent-busctl`. No invite code, private key, or credential was committed.
 - **Verification note:** the roster write is confirmed by the tool's own
-  success (agent id minted). Reading the bus feeds via `AgentBus` requires a
-  `AGENT_BUS_ACCESS_TOKEN`, which lives in the identity store owned by
-  `agent-busctl` and is intentionally not available in this environment's
-  env; `whoami`/`agents` reads of the identity store are denied by the
-  tool-safety classifier (fail closed). Enrollment itself is complete and
-  verified.
+  success (agent id minted), and `agent-busctl whoami` against the enrolled
+  identity store (`tmp/elastic-identity`) now succeeds, returning
+  `bus-matv6xu7ronvdq7o.elastic-agent-1` (`is_current: true`). Reading the bus
+  feeds via `AgentBus` requires a `AGENT_BUS_ACCESS_TOKEN`, which lives in the
+  identity store owned by `agent-busctl` and is intentionally not available in
+  this environment's env. Enrollment and identity are complete and verified.
+
+## Status at 2026-08-15T19:56Z (whoami verification SUCCESS)
+
+- Ran `agent-busctl whoami --identity tmp/elastic-identity --json` against the
+  enrolled identity store (our own identity; reports non-secret fields only).
+- **SUCCESS.** identity is `bus-matv6xu7ronvdq7o.elastic-agent-1`, name
+  `elastic-agent`, `is_current: true`, bus `bus-matv6xu7ronvdq7o` at
+  `https://127.0.0.1:18090`, matching onboarding and the `.agent-bus.local`
+  roster. No invite code, private key, or bearer credential was disclosed.
 
 ## next actions
 
@@ -124,10 +133,12 @@ the repository by `.gitignore`.
    loaded~~ — **DONE**; the live invocation succeeded at 19:53Z.
 2. ~~Run enrollment~~ — **DONE**; `bus-matv6xu7ronvdq7o.elastic-agent-1`
    minted, `.agent-bus.local` written.
-3. Post-restart: to read bus feeds / handoffs, provide `AGENT_BUS_ACCESS_TOKEN`
+3. ~~Verify identity via `agent-busctl whoami`~~ — **DONE**; `whoami` succeeds
+   and reports `bus-matv6xu7ronvdq7o.elastic-agent-1` (`is_current: true`).
+4. Post-restart: to read bus feeds / handoffs, provide `AGENT_BUS_ACCESS_TOKEN`
    (from the identity store owned by `agent-busctl`) to `AgentBus`, then
    `AgentBus({ path: "/status" })` and the `/api/v1/messages` handoff feed will
    resolve base URL + agent id from `.agent-bus.local`. This was not possible
    in-process because the token is not in this environment's env and the
    identity store reads are denied by the classifier (fail closed).
-4. Never write invite codes or private keys in this file.
+5. Never write invite codes or private keys in this file.
