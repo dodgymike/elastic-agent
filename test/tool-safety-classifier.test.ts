@@ -148,6 +148,42 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 1c. AgentBusEnrol — redeeming an in-workspace agent-bus invite.
+    // ------------------------------------------------------------------
+    check(
+      "AgentBusEnrol with an in-workspace invite and name is allowed",
+      staticVerdict("AgentBusEnrol", { inviteFile: "tmp/elastic-invite.json", name: "elastic-agent" }).decision === "safe",
+    );
+    check(
+      "AgentBusEnrol with an in-workspace identity store is allowed",
+      staticVerdict("AgentBusEnrol", { inviteFile: "tmp/elastic-invite.json", name: "elastic-agent", identity: "tmp/elastic-identity" }).decision === "safe",
+    );
+    check(
+      "AgentBusEnrol refuses an invite that names data.json",
+      staticVerdict("AgentBusEnrol", { inviteFile: "data.json", name: "elastic-agent" }).decision === "unsafe",
+    );
+    check(
+      "AgentBusEnrol refuses an invite that names .agent-bus.local",
+      staticVerdict("AgentBusEnrol", { inviteFile: ".agent-bus.local", name: "elastic-agent" }).decision === "unsafe",
+    );
+    check(
+      "AgentBusEnrol refuses an invite path with control characters",
+      staticVerdict("AgentBusEnrol", { inviteFile: "tmp/invite\n.json", name: "elastic-agent" }).decision === "unsafe",
+    );
+    check(
+      "AgentBusEnrol refuses an invite path with traversal",
+      staticVerdict("AgentBusEnrol", { inviteFile: "tmp/../etc/invite.json", name: "elastic-agent" }).decision === "unsafe",
+    );
+    check(
+      "AgentBusEnrol refuses an invite path outside the workspace",
+      staticVerdict("AgentBusEnrol", { inviteFile: "/opt/agent-bus-invite.json", name: "elastic-agent" }).decision === "unsafe",
+    );
+    check(
+      "AgentBusEnrol is a mutating tool",
+      toolRiskLevel("AgentBusEnrol") === "mutating",
+    );
+
+    // ------------------------------------------------------------------
     // 1b. Harmless shell no-ops are allowed statically.
     // ------------------------------------------------------------------
     check(

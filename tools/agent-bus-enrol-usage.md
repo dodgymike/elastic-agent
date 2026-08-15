@@ -53,22 +53,23 @@ non-secret metadata: `busUrl`, `busFingerprint`, `agentId`, `name`,
 
 The invite is an operator-minted, **single-use** bearer credential in a JSON file named
 `agent-bus-invite-*.json` (default discovery requires exactly one such file in the repo
-root). Recognized fields across the common synonyms:
+root). Recognized fields across the common synonyms (both camelCase and snake_case are
+accepted so invites from different bus operators parse identically):
 
-- Bus URL — `url`, `busUrl`, or `bus` (required).
-- TLS certificate fingerprint of the bus — `fingerprint` or `busFingerprint`
-  (required; must be 64 lowercase hex characters).
-- Enrollment/bearer credential — `token` or `invite` (required; consumed by
-  `agent-busctl`, never read into the tool output or store).
-- Agent name — `name` or `agentName` (optional; used as the default `--name`).
-- Expiry — `expiresAt`, `expiry`, or numeric `exp` (optional).
+- Bus URL — `url`, `busUrl`, `bus`, or `bus_address` (required).
+- TLS certificate fingerprint of the bus — `fingerprint`, `busFingerprint`, or
+  `bus_cert_fingerprint` (required; must be 64 lowercase hex characters).
+- Enrollment/bearer credential — `token`, `invite`, or `invite_secret` (required;
+  consumed by `agent-busctl`, never read into the tool output or store).
+- Agent name — `name`, `agentName`, or `label` (optional; used as the default `--name`).
+- Expiry — `expiresAt`, `expiry`, `expires_at`, or numeric `exp` (optional).
 
 ```json
 {
-  "url": "https://bus.example.com",
-  "fingerprint": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-  "token": "<single-use-bearer-credential>",
-  "name": "planner"
+  "bus_address": "https://bus.example.com",
+  "bus_cert_fingerprint": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "invite_secret": "<single-use-bearer-credential>",
+  "label": "planner"
 }
 ```
 
