@@ -43,7 +43,7 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
-import { classifyToolCall, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
+import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 
 const terminalColor = terminalColorEnabled(process.stdout);
@@ -905,6 +905,7 @@ async function dispatchToolCall(output) {
             runtime: client,
             workspaceRoot: process.cwd(),
             promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
+            logger: createToolSafetyLogger(toolChildIndent),
         });
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);

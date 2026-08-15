@@ -67,7 +67,10 @@ Deny the call (safe: false) when any of the following apply:
 
 Allow the call (safe: true) when it stays within the workspace, uses a tool for
 its intended purpose, is read-only or a normal in-workspace edit, and none of
-the deny rules above apply.
+the deny rules above apply. Harmless no-ops such as `> /dev/null`,
+`2>/dev/null`, `true`, and `:` (and equivalent redirections whose only target
+is /dev/null) are allowed when they perform no file reads or writes outside
+/dev/null.
 
 TOOL CALL:
 Tool name:

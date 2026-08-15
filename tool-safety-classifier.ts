@@ -23,9 +23,10 @@ import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-r
  * 3. A fail-closed fallback when the LLM is unavailable or its output cannot
  *    be parsed.
  *
- * The decision is logged with the [TOOL SAFETY] prefix. Parameter values are
- * never logged; the LLM prompt receives only normalized and redacted
- * parameters.
+ * Allowed decisions produce no console output; denied or fail-closed
+ * decisions are logged with the [TOOL SAFETY] prefix through the supplied
+ * logger. Parameter values are never logged; the LLM prompt receives only
+ * normalized and redacted parameters.
  */
 
 /** Prompt file loaded from the repository root, matching main.ts prompt loading. */
@@ -120,15 +121,35 @@ function ambiguous(reason: string): StaticToolSafetyVerdict {
 }
 
 function logDecision(toolName: string, classification: ToolSafetyClassification, logger: NonNullable<ToolSafetyClassifierOptions["logger"]>): void {
-  const message = `[TOOL SAFETY] ${toolName}: ${classification.safe ? "safe" : "unsafe"} (${classification.source}): ${classification.reason}`;
-  if (classification.safe) logger("info", message);
-  else logger("error", message);
+  if (classification.safe) return; // Allowed calls produce no [TOOL SAFETY] output.
+  const message = `[TOOL SAFETY] ${toolName}: unsafe (${classification.source}): ${classification.reason}`;
+  logger("error", message);
 }
 
-function defaultLogger(level: "info" | "error", message: string): void {
-  if (level === "error") console.error(message);
-  else console.log(message);
+/** Write target for the safety logger; kept injectable so tests can capture output. */
+export interface ToolSafetyLoggerTarget {
+  readonly info: (line: string) => void;
+  readonly error: (line: string) => void;
 }
+
+/**
+ * Build a safety logger that indents every line of a [TOOL SAFETY] message
+ * with the supplied prefix. main.ts passes the tool-result indentation so
+ * safety messages sit under the pending `ToolName(args)` line, while tests can
+ * pass their own prefix and capture the output.
+ */
+export function createToolSafetyLogger(
+  prefix: string,
+  target: ToolSafetyLoggerTarget = { info: (line) => console.log(line), error: (line) => console.error(line) },
+): NonNullable<ToolSafetyClassifierOptions["logger"]> {
+  return (level, message) => {
+    const lines = String(message).split("\n").map((line) => `${prefix}${line}`).join("\n");
+    if (level === "error") target.error(lines);
+    else target.info(lines);
+  };
+}
+
+const defaultLogger = createToolSafetyLogger("");
 
 /** Return the non-string, non-null string path value or null when invalid. */
 function stringValue(value: unknown): string | null {
@@ -374,6 +395,10 @@ function classifyExecuteCommand(parameters: Record<string, unknown>, workspaceRo
   const outsideReason = absolutePathEscapeReason(command, workspaceRoot);
   if (outsideReason) return unsafe(`ExecuteCommand accesses a path outside the workspace: ${outsideReason}`);
 
+  if (isHarmlessNoOp(command)) {
+    return safe("ExecuteCommand is a harmless no-op that reads or writes nothing outside /dev/null.");
+  }
+
   if (isKnownSafeCommand(command)) {
     return safe("ExecuteCommand is a known-safe, read-only or standard verification command.");
   }
@@ -481,6 +506,39 @@ function absolutePathEscapeReason(command: string, workspaceRoot: string): strin
     if (resolvesOutsideWorkspace(cleaned, workspaceRoot)) return cleaned;
   }
   return null;
+}
+
+/** True when the command is only redirections whose every target is /dev/null. */
+function isDevNullRedirectOnly(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+  const parts = trimmed.split(/\s+/);
+  let index = 0;
+  let sawRedirect = false;
+  while (index < parts.length) {
+    const part = parts[index];
+    if (/^(?:[12]?|&)?>>?\/dev\/null$/.test(part)) {
+      sawRedirect = true;
+      index += 1;
+      continue;
+    }
+    if (/^(?:[12]?|&)?>>?$/.test(part) && parts[index + 1] === "/dev/null") {
+      sawRedirect = true;
+      index += 2;
+      continue;
+    }
+    return false;
+  }
+  return sawRedirect;
+}
+
+/** True for shell no-ops that read or write nothing outside /dev/null. */
+function isHarmlessNoOp(command: string): boolean {
+  const trimmed = command.trim();
+  if (trimmed === "true" || trimmed === ":") return true;
+  if (/^true(?:\s+[A-Za-z0-9_./-]+)+$/.test(trimmed)) return true;
+  if (/^:(?:\s+[A-Za-z0-9_./-]+)+$/.test(trimmed)) return true;
+  return isDevNullRedirectOnly(trimmed);
 }
 
 function isKnownSafeCommand(command: string): boolean {
