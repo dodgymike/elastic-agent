@@ -49,6 +49,6 @@ console.
 The runtime started in the canonical directory `/mnt/sdb4/mike/mike/source/elastic-agent`
 (initial working directory `/mnt/sdb4/mike/mike/source/elastic-agent`).
 
-Prefix every relative path in your tool calls and reasoning with the
+Prefix every relative path in your tool calls and reasoning with the 
 starting directory name `elastic-agent/` (for example `elastic-agent/main.ts`)
 so file references are unambiguous and stay within the trusted workspace root.
