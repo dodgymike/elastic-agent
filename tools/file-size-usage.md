@@ -35,6 +35,23 @@ Never use it to read `data.json`.
 - If the file changes between `FileSize` and `Read`, `Read` detects the size
   mismatch and asks you to call `FileSize` again.
 
+## Safe use
+
+**Allowed**
+- Stat workspace files to obtain their size before `Read`.
+
+**Denied**
+- Inspecting any `data.json`, especially the repo-root `data.json`.
+- Inspecting credential stores, secret files, private keys, or enrollment
+  recipes.
+
+**Dangerous examples (do not run)**
+- `FileSize({ path: "data.json" })`
+- `FileSize({ path: ".spec.local.json" })`
+
+**Required permissions**
+- Stat permission on the target file only; no secret or `data.json` access.
+
 ## Examples
 
 1. Get a file's size before reading it:

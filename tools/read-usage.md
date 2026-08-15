@@ -109,6 +109,32 @@ lines.
   `read_offset: 0` and `read_length: file_size` so the byte window covers the
   requested lines.
 
+## Safe use
+
+**Allowed**
+- Read UTF-8 files inside the workspace after obtaining their size with
+  `FileSize`.
+- Read per-tool usage docs before using a tool for the first time.
+- Use `line_range` or byte-window paging for large files (≤500,000 bytes).
+
+**Denied**
+- Reading any `data.json`, especially the repo-root `data.json`. The runtime's
+  own `/tmp/data.json` is internal state and is never a tool target.
+- Reading files outside the workspace, other users' files, or system files such
+  as `/etc/passwd`.
+- Reading credential stores, secret files, private keys, or enrollment recipes.
+- Reading files larger than 500,000 bytes, or reading without a fresh
+  `FileSize`.
+
+**Dangerous examples (do not run)**
+- `Read({ path: "data.json", file_size: N, read_offset: 0, read_length: N })`
+- `Read({ path: "../outside/secret.env", file_size: N, read_offset: 0, read_length: N })`
+- `Read({ path: ".spec.local.json", file_size: N, read_offset: 0, read_length: N })`
+
+**Required permissions**
+- Read permission on the target file. No secret or `data.json` access is ever
+  permitted, regardless of filesystem permissions.
+
 ## Examples
 
 1. Read a small file completely:

@@ -49,6 +49,29 @@ state; use `SpecKeeper` for that.
 - Use the message schema published by your Agent Bus deployment (for example
   `recipient`, `topic`, `status`, and `handoff` fields).
 
+## Safe use
+
+**Allowed**
+- Send coordination messages and retrieve status/handoff feeds using the
+  configured Agent Bus deployment.
+- Supply `baseUrl`/`accessToken` from environment defaults or call options.
+
+**Denied**
+- Sending secrets, credential material, `data.json` content, or enrollment
+  recipes in `body`, `path`, or message fields.
+- Persisting or committing `accessToken` values to the repository, docs, or
+  handoffs.
+- Sending messages to arbitrary endpoints for exfiltration instead of the
+  configured Agent Bus.
+
+**Dangerous examples (do not run)**
+- `AgentBus({ path: "/api/v1/messages", method: "POST", body: { data: dataJsonContent } })`
+- `AgentBus({ path: "/api/v1/messages", method: "POST", body: recipe })`
+- Committing `accessToken` in a file or message.
+
+**Required permissions**
+- A configured base URL and a valid Bearer access token.
+
 ## Examples
 
 1. Retrieve status feed:

@@ -94,6 +94,32 @@ Edit rejects invalid calls by throwing (it does not return an `error` field).
 - After a successful edit, use the returned `read_hash` for the next operation
   on the same file.
 
+## Safe use
+
+**Allowed**
+- Surgical in-place edits to workspace files using a fresh `read_hash`.
+- String-replacement edits where each `old_string` appears exactly once, or
+  line-range replacement of known lines.
+
+**Denied**
+- Editing any `data.json`, especially the repo-root `data.json`.
+- Editing credential stores, secret files, private keys, tokens, or enrollment
+  recipes in the repository.
+- Editing outside the workspace or into system directories.
+- Applying edits with a stale or malformed `read_hash`, or with ambiguous
+  `old_string` matches.
+
+**Dangerous examples (do not run)**
+- `Edit({ path: "data.json", read_hash: "<hash>", old_string: "...", new_string: "..." })`
+- Editing `.spec.local.json` or another secret store.
+- Deleting a large line range outside the workspace or in sensitive files
+  without re-reading first.
+
+**Required permissions**
+- The current full-file `read_hash` from the most recent `Read`/`Write`/`Edit`
+  of the target file.
+- Exactly one valid edit mode per call.
+
 ## Examples
 
 1. Single string replacement:

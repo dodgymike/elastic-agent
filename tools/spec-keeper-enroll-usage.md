@@ -44,6 +44,27 @@ An enrollment recipe containing:
 - Never write the enrollment recipe to the repository, commit messages, task
   notes, or handoffs.
 
+## Safe use
+
+**Allowed**
+- Redeem a single-use enrollment token and store the returned recipe only in
+  the approved secret store with restrictive permissions (for example mode
+  `0600`).
+
+**Denied**
+- Writing the recipe to the repository, docs, task notes, commit messages, or
+  handoffs.
+- Logging the recipe or the token.
+- Reusing a one-time token.
+
+**Dangerous examples (do not run)**
+- Writing the returned recipe to `CLAUDE.md`, `SPEC_KEEPER.md`, or any repo
+  file.
+- Passing the token or recipe in an `ExecuteCommand` command that logs it.
+
+**Required permissions**
+- A non-empty, single-use enrollment token.
+
 ## Examples
 
 1. Redeem a token and store the recipe safely:

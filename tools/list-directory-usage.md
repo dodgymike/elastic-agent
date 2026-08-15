@@ -36,6 +36,24 @@ An array of entries, each with:
   `ExecuteCommand` (for example `ls -la` or `find`) to distinguish files from
   directories or to recurse.
 
+## Safe use
+
+**Allowed**
+- List immediate children of workspace directories.
+
+**Denied**
+- Listing directories outside the workspace, user home directories, or system
+  directories to map secrets.
+- Listing secret-store or credential directories without an approved reason.
+
+**Dangerous examples (do not run)**
+- `ListDirectory({ directory: "/root" })`
+- `ListDirectory({ directory: "~/.ssh" })`
+- `ListDirectory({ directory: "../outside" })`
+
+**Required permissions**
+- Read permission on the listed directory only.
+
 ## Examples
 
 1. List the tools directory:

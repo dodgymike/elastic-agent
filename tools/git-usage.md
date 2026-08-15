@@ -70,6 +70,32 @@ shown as plain text.
   satisfied).
 - Stage only intended files and never commit secrets.
 
+## Safe use
+
+**Allowed**
+- `action: "list"` to inspect working-tree state.
+- `action: "stage"` with explicit `paths` or `all: true` for intended files.
+- `action: "commit"` of staged, reviewed work following the current step's
+  commit instruction.
+
+**Denied**
+- Staging or committing `data.json`, credential stores, secret files, private
+  keys, tokens, or enrollment recipes.
+- Staging both `paths` and `all: true` in one call.
+- Committing without a message, or committing in `--review` mode when the
+  runtime rejects it.
+- Force-pushing or rewriting remote history through shell commands.
+
+**Dangerous examples (do not run)**
+- `Git({ action: "stage", all: true })` while secrets or `data.json` are
+  untracked or modified.
+- `Git({ action: "commit", message: "..." })` with a secret file staged.
+- `Git({ action: "stage", paths: ["data.json"] })`
+
+**Required permissions**
+- `stage`: at least one non-empty `path` or `all: true`.
+- `commit`: a non-empty `message` and staged work.
+
 ## Examples
 
 1. List changes:

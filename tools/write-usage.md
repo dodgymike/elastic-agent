@@ -53,6 +53,33 @@ On success the promise resolves with no return value (`undefined`). The file at
 - New files: `read_hash` may be `""`; the file is created/truncated and written.
 - Never write credentials, secrets, or `data.json`.
 
+## Safe use
+
+**Allowed**
+- Create new files inside the workspace with `read_hash: ""`.
+- Overwrite an existing workspace file with `overwrite: true` and the exact
+  current `read_hash`.
+
+**Denied**
+- Writing any `data.json`, especially the repo-root `data.json`.
+- Writing credential stores, secret files, private keys, tokens, or enrollment
+  recipes into the repository.
+- Writing outside the workspace or into system directories.
+- Overwriting an existing file without a current `read_hash` and
+  `overwrite: true`.
+
+**Dangerous examples (do not run)**
+- `Write({ path: "data.json", content: "...", read_hash: "" })`
+- `Write({ path: ".spec.local.json", content: "...", read_hash: "" })`
+- `Write({ path: "../outside/notes.md", content: "...", read_hash: "" })`
+- Writing credentials or an enrollment recipe to `CLAUDE.md`, handoffs, or task
+  notes.
+
+**Required permissions**
+- For new files: an existing parent directory.
+- For existing files: the current full-file `read_hash` plus
+  `overwrite: true`.
+
 ## Examples
 
 1. Create a new file:

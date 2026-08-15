@@ -44,7 +44,9 @@ Each usage file must include the following sections, in order:
 8. `## Critical operating constraints` — invariants that must always be
    honored (hash/overwrite rules, path requirements, secret handling,
    sequencing, non-zero exit codes, etc.).
-9. `## Examples` — one to three minimal, correct examples.
+9. `## Safe use` — explicit guardrails with **Allowed**, **Denied**,
+   **Dangerous examples (do not run)**, and **Required permissions**.
+10. `## Examples` — one to three minimal, correct examples.
 
 ## Writing rules
 
@@ -88,6 +90,24 @@ Each usage file must include the following sections, in order:
 ## Critical operating constraints
 
 <invariants the caller must always honor>
+
+## Safe use
+
+**Allowed**
+
+<safe operations>
+
+**Denied**
+
+<unsafe operations>
+
+**Dangerous examples (do not run)**
+
+<examples of blocked calls>
+
+**Required permissions**
+
+<permissions or preconditions required>
 
 ## Examples
 

@@ -207,6 +207,31 @@ response bodies are never logged.
 - Record task state transitions (`in_progress`, `blocked`, `done`) and material
   decisions on the server.
 
+## Safe use
+
+**Allowed**
+- Planning and execution CRUD against supported project resources (`/tasks`,
+  `/epics`, `/decisions`, `/notes`, etc.) or documented absolute
+  `/api/v1/...` routes.
+- Resolving credentials from the approved secret store or environment.
+
+**Denied**
+- Answering simple questions with Spec Keeper.
+- Obsolete root paths such as `/goals` or `/task-queue`.
+- Storing credentials or enrollment recipes in the repository, notes, docs, or
+  handoffs.
+- Sending secret content or local file data in request bodies for exfiltration.
+
+**Dangerous examples (do not run)**
+- `SpecKeeper({ path: "/tasks", method: "POST", body: { data: dataJsonContent } })`
+- Hardcoding `username`/`password` or `accessToken` in a call or repo file.
+- `SpecKeeper({ path: "/api/v1/...", method: "DELETE", ... })` without
+  verifying the target.
+
+**Required permissions**
+- Valid Cognito credentials from the approved store or a minted access token
+  for the resolved project slug.
+
 ## Examples
 
 1. Read the task queue:
