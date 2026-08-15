@@ -35,12 +35,16 @@
  *   starting directory and instructs the agent to prefix relative paths with
  *   the canonical directory name.
  *
- * The module is pure (no I/O beyond realpathSync) and dependency-free so it can
- * be unit tested in isolation and embedded into main.ts's startup.
+ * The resolution helpers are pure (no I/O beyond realpathSync) and
+ * dependency-free so they can be unit tested in isolation and embedded into
+ * main.ts's startup. The markdown-injection helpers that write the generated
+ * section into a CLAUDE.md file live in `injectWorkspaceInitMarkdown` /
+ * `writeWorkspaceInitMarkdown` and perform explicit, idempotent file I/O only
+ * when the caller asks for it.
  */
 
-import { realpathSync } from "node:fs";
-import { isAbsolute, resolve, relative, sep } from "node:path";
+import { realpathSync, readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, resolve, sep } from "node:path";
 
 /** Stable snapshot of the resolver's starting-directory knowledge. */
 export interface WorkspaceInit {
@@ -144,4 +148,76 @@ export function workspaceInitMarkdown(pwd: string, canonicalPath: string): strin
     `so file references are unambiguous and stay within the trusted workspace root.`,
     "",
   ].join("\n");
+}
+
+/** Result of injecting the starting-directory section into CLAUDE.md content. */
+export interface InjectWorkspaceInitResult {
+  /** The complete updated content (identical to the input when unchanged). */
+  readonly content: string;
+  /** True when the file content actually changed (section added or replaced). */
+  readonly changed: boolean;
+  /** True when an existing injected section was replaced rather than appended. */
+  readonly replaced: boolean;
+}
+
+/**
+ * Idempotently inject the starting-directory markdown block into an existing
+ * CLAUDE.md document.
+ *
+ * - When no section carrying WORKSPACE_INIT_MARKER is present, the block is
+ *   appended at the end of the document (preserving a trailing newline so the
+ *   block is cleanly separated from the rest of the content).
+ * - When a section carrying the marker already exists, the old block is
+ *   replaced in place, keeping any content that followed it intact. If the
+ *   existing block already matches the newly generated one, nothing changes
+ *   (idempotent).
+ *
+ * Existing CLAUDE.md content is otherwise never modified, so other sections
+ * and any prior user-authored content are preserved.
+ */
+export function injectWorkspaceInitMarkdown(claudeContent: string, init: WorkspaceInit): InjectWorkspaceInitResult {
+  const block = init.toMarkdown();
+  const marker = `<!-- ${WORKSPACE_INIT_MARKER}`;
+  const markerIndex = claudeContent.indexOf(marker);
+  if (markerIndex === -1) {
+    // No section yet: append at the end, ensuring a single separating newline.
+    let content = claudeContent;
+    if (content.length > 0 && !content.endsWith("\n")) content += "\n";
+    content += block;
+    return { content, changed: true, replaced: false };
+  }
+  // An injected section exists. The section is delimited by its own marker
+  // comment at the start and runs to the start of the next `# ` heading that
+  // follows the block's own "Starting directory" heading (or EOF when the
+  // section is the last one). Replacing just that region keeps any content
+  // before the marker and after a following heading intact. The `before`
+  // slice already includes the separator newline that precedes the marker
+  // (the block's own leading blank line), so the new block is appended here
+  // without its leading newline to avoid doubling the separator on re-inject.
+  const blockHeading = "\n# Starting directory";
+  const blockHeadingAt = claudeContent.indexOf(blockHeading, markerIndex);
+  let sectionEnd = claudeContent.length;
+  if (blockHeadingAt !== -1) {
+    const nextHeadingAt = claudeContent.indexOf("\n# ", blockHeadingAt + blockHeading.length);
+    if (nextHeadingAt !== -1) sectionEnd = nextHeadingAt + 1; // keep the leading "\n"
+  }
+  const before = claudeContent.slice(0, markerIndex);
+  const after = claudeContent.slice(sectionEnd);
+  const blockWithoutLeadingNewline = block.startsWith("\n") ? block.slice(1) : block;
+  const content = before + blockWithoutLeadingNewline + after;
+  return { content, changed: content !== claudeContent, replaced: true };
+}
+
+/**
+ * Read `filePath`, inject the starting-directory markdown block (see
+ * `injectWorkspaceInitMarkdown`), and write the file back only when the content
+ * actually changed. The file is written directly (no atomic rename) because the
+ * target is the repo-root CLAUDE.md that is written once at startup; callers
+ * that need atomic updates can use `injectWorkspaceInitMarkdown` directly.
+ */
+export function writeWorkspaceInitMarkdown(filePath: string, init: WorkspaceInit): InjectWorkspaceInitResult {
+  const existing = readFileSync(filePath, "utf-8");
+  const result = injectWorkspaceInitMarkdown(existing, init);
+  if (result.changed) writeFileSync(filePath, result.content, "utf-8");
+  return result;
 }

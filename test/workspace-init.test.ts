@@ -3,7 +3,7 @@
 // path of the starting directory, packaging them for CLAUDE.md injection and
 // as trusted roots for the tool classifier.
 // Compiled and executed standalone by the `test:workspace-init` npm script.
-import { mkdtempSync, rmSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import {
@@ -11,6 +11,8 @@ import {
   loadWorkspaceInit,
   workspaceInitMarkdown,
   workspaceInitToState,
+  injectWorkspaceInitMarkdown,
+  writeWorkspaceInitMarkdown,
   WORKSPACE_INIT_MARKER,
   type WorkspaceInit,
 } from "../workspace-init.js";
@@ -131,6 +133,70 @@ async function main(): Promise<void> {
     {
       const md = workspaceInitMarkdown("/repo/path", "/repo/path");
       check("markdown mentions the directory name", md.includes("path/") || md.includes("/path"));
+    }
+
+    // ------------------------------------------------------------------
+    // 9. injectWorkspaceInitMarkdown appends a fresh section idempotently,
+    //    preserving any prior user-authored CLAUDE.md content.
+    // ------------------------------------------------------------------
+    {
+      const init = resolveWorkspaceInit();
+      const original = "# Mission\n\nSome existing guidance.\n";
+      // First injection appends the section (no marker present yet).
+      const first = injectWorkspaceInitMarkdown(original, init);
+      check("injection appends the section", first.changed === true && first.replaced === false);
+      check("injection marks the section with the marker", first.content.includes(WORKSPACE_INIT_MARKER));
+      check("injection preserves the original content", first.content.startsWith("# Mission\n\nSome existing guidance."));
+      check("injection states the canonical directory", first.content.includes(init.canonicalPath));
+      // Re-injecting the same block is a no-op (idempotent).
+      const second = injectWorkspaceInitMarkdown(first.content, init);
+      check("re-injection is idempotent (no change)", second.changed === false && second.content === first.content);
+    }
+
+    // ------------------------------------------------------------------
+    // 10. injectWorkspaceInitMarkdown replaces an existing section in place,
+    //     keeping any content that followed it intact.
+    // ------------------------------------------------------------------
+    {
+      const initA = resolveWorkspaceInit("/alpha/repo");
+      const initB = resolveWorkspaceInit("/beta/repo");
+      const original = "# Mission\n\nLead-in text.\n";
+      const injected = injectWorkspaceInitMarkdown(original, initA);
+      check("first injection is an append", injected.replaced === false);
+      // Now replace the section with a different init, preserving trailing text.
+      const trailing = `${injected.content}\n# Closing section\n\nTrailing content.`;
+      const replaced = injectWorkspaceInitMarkdown(trailing, initB);
+      check("replacement flags replaced=true", replaced.replaced === true);
+      check("replacement changed the content", replaced.changed === true);
+      check("replacement uses the new canonical path", replaced.content.includes(initB.canonicalPath));
+      check("replacement drops the old canonical path", !replaced.content.includes(initA.canonicalPath));
+      check("trailing section is preserved", replaced.content.includes("# Closing section") && replaced.content.includes("Trailing content."));
+      // Marker appears exactly once.
+      const markerCount = replaced.content.split(`<!-- ${WORKSPACE_INIT_MARKER}`).length - 1;
+      check("replacement leaves exactly one marker section", markerCount === 1);
+    }
+
+    // ------------------------------------------------------------------
+    // 11. writeWorkspaceInitMarkdown reads/writes the file only when needed.
+    // ------------------------------------------------------------------
+    {
+      const dir = mkdtempSync(join(tmpdir(), "ws-init-write-"));
+      const filePath = join(dir, "CLAUDE.md");
+      try {
+        const init = resolveWorkspaceInit();
+        const originalContent = "# Mission\n\nExisting content.\n";
+        writeFileSync(filePath, originalContent, "utf-8");
+        // First write adds the section.
+        const first = writeWorkspaceInitMarkdown(filePath, init);
+        check("first write changed the file", first.changed === true);
+        check("file now carries the marker", readFileSync(filePath, "utf-8").includes(WORKSPACE_INIT_MARKER));
+        check("file preserved the original content", readFileSync(filePath, "utf-8").startsWith("# Mission"));
+        // Second write is a no-op (file unchanged).
+        const second = writeWorkspaceInitMarkdown(filePath, init);
+        check("second write did not change the file", second.changed === false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   } finally {
     if (failures > 0) {

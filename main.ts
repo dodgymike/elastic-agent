@@ -12,7 +12,7 @@ import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./to
 import { startToolTimer } from "./tool-timer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, isAbsolute, join } from "node:path";
-import { resolveWorkspaceInit, loadWorkspaceInit, workspaceInitToState, type WorkspaceInit } from "./workspace-init.ts";
+import { resolveWorkspaceInit, loadWorkspaceInit, workspaceInitToState, writeWorkspaceInitMarkdown, type WorkspaceInit } from "./workspace-init.ts";
 import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
@@ -1359,6 +1359,18 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     // state when present, otherwise record the freshly resolved init.
     if (!configData.workspaceInit || !configData.workspaceInit.pwd) {
         configData.workspaceInit = workspaceInitToState(workspaceInit);
+    }
+
+    // Inject the starting directory (pwd + canonical path) guidance into the
+    // repo-root CLAUDE.md so the model is told to prefix relative paths with the
+    // starting directory name. This is idempotent: an existing injected section
+    // is replaced in place and any other CLAUDE.md content is preserved. The
+    // injection runs at startup, before any agent action that depends on file
+    // paths, so the section is in place for the remainder of the run.
+    try {
+        writeWorkspaceInitMarkdown("CLAUDE.md", workspaceInit);
+    } catch (error) {
+        status.warning(`Could not inject starting-directory guidance into CLAUDE.md: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     // Resolve Spec Keeper operational defaults once before any planning or
