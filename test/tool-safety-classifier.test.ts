@@ -538,6 +538,79 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 6b. Git mode-to-action normalization: read-only `mode` selectors
+    //     classify statically without an LLM classifier request, and
+    //     unknown/missing actions are rejected deterministically.
+    // ------------------------------------------------------------------
+    check(
+      "Git mode diff is classified read-only and safe statically",
+      staticVerdict("Git", { mode: "diff" }).decision === "safe",
+    );
+    const gitDiffVerdict = staticVerdict("Git", { mode: "diff" });
+    check(
+      "Git mode diff verdict names the read-only operation",
+      gitDiffVerdict.reason.includes("diff") && /read-only/i.test(gitDiffVerdict.reason),
+    );
+    check(
+      "Git read-only modes status/log/diff/ls-files are all classified safe",
+      ["status", "log", "diff", "ls-files"].every((mode) => staticVerdict("Git", { mode }).decision === "safe"),
+    );
+    check(
+      "Git legacy list action remains a read-only safe alias",
+      staticVerdict("Git", { action: "list" }).decision === "safe",
+    );
+
+    let gitDiffLlmCalls = 0;
+    const gitDiffRuntime = mockRuntime(async () => {
+      gitDiffLlmCalls += 1;
+      return '{"safe":true,"reason":"unexpected"}';
+    });
+    const gitDiffAsync = await classifyToolCall("Git", { mode: "diff" }, {
+      runtime: gitDiffRuntime,
+      workspaceRoot: WORKSPACE,
+      promptPath: tempPrompt,
+      logger: silentLogger,
+    });
+    check(
+      "classifyToolCall resolves Git mode diff statically without an LLM request",
+      gitDiffAsync.safe === true && gitDiffAsync.source === "static" && gitDiffLlmCalls === 0,
+    );
+
+    const missingGitVerdict = staticVerdict("Git", {});
+    check(
+      "Git with a missing action and mode is rejected deterministically",
+      missingGitVerdict.decision === "unsafe",
+    );
+    check(
+      "Git missing action reason explains the deterministic rejection",
+      /neither a recognized action nor a recognized mode/i.test(missingGitVerdict.reason),
+    );
+    check(
+      "Git with an unknown action is rejected deterministically",
+      staticVerdict("Git", { action: "frobnicate" }).decision === "unsafe",
+    );
+    check(
+      "Git with an unknown mode is rejected deterministically",
+      staticVerdict("Git", { mode: "frobnicate" }).decision === "unsafe",
+    );
+
+    let gitUnknownLlmCalls = 0;
+    const gitUnknownRuntime = mockRuntime(async () => {
+      gitUnknownLlmCalls += 1;
+      return '{"safe":true,"reason":"unexpected"}';
+    });
+    const gitUnknownAsync = await classifyToolCall("Git", { action: "frobnicate" }, {
+      runtime: gitUnknownRuntime,
+      workspaceRoot: WORKSPACE,
+      promptPath: tempPrompt,
+      logger: silentLogger,
+    });
+    check(
+      "classifyToolCall rejects an unknown Git action statically without an LLM request",
+      gitUnknownAsync.safe === false && gitUnknownAsync.source === "static" && gitUnknownLlmCalls === 0,
+    );
+
+    // ------------------------------------------------------------------
     // 7. Classifier prompt output parsing.
     // ------------------------------------------------------------------
     const parsedSafe = parseAs('{"safe":true,"reason":"all good"}');
