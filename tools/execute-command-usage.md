@@ -70,6 +70,7 @@ prefix is ever emitted for a tool call.
   --check`, and repository inspection.
 - Passing dynamic values as `parameters` (`$1`, `$2`, ...) instead of shell
   interpolation.
+- using agent-busctl and spec keeper related commands or binaries
 
 **Denied**
 - Destructive commands: `rm -rf`, deletion outside the workspace, filesystem
