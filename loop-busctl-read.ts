@@ -265,20 +265,60 @@ export function defaultBusCursorFilePath(projectRoot: string): string {
 }
 
 /**
- * Extract the cursor (position) id from a single parsed message record.
- * `agent-busctl watch` records carry a stable `message_id` in the form
- * `<bus-id>-<seq>`; when that is absent we fall back to the numeric `seq`.
- * Returns `undefined` when the record carries neither, so a caller can decide
- * not to advance the stored cursor for that record.
+ * Build the base64-encoded resume cursor for `agent-busctl watch --cursor`.
+ *
+ * The CLI's `--cursor` expects an opaque base64 token of the form
+ * `v2|<bus-id>|<seq>` (UTF-8 encoded, then base64). Building it from the bus id
+ * and sequence keeps the cursor self-describing and stable across restarts,
+ * independent of the raw message format.
+ *
+ * Returns `undefined` when either part is missing or blank, so callers never
+ * persist a malformed cursor.
+ */
+export function buildResumeCursor(
+  busId: string | undefined,
+  seq: number | string | undefined,
+): string | undefined {
+  const b = busId?.trim();
+  if (!b) return undefined;
+  if (seq === undefined || seq === null) return undefined;
+  const seqStr = String(seq).trim();
+  if (!seqStr) return undefined;
+  return Buffer.from(`v2|${b}|${seqStr}`, "utf8").toString("base64");
+}
+
+/**
+ * Extract the resume cursor (position) token from a single parsed message
+ * record. `agent-busctl watch` records carry a stable `message_id` in the form
+ * `<bus-id>-<seq>`, plus a `seq` field; the bus id is read from `bus_path`
+ * (when present) or derived from `message_id` by stripping the trailing
+ * `-<seq>`.
+ *
+ * The returned value is the base64-encoded `v2|<bus-id>|<seq>` resume cursor
+ * (`buildResumeCursor`), so a subsequent poll can pass it straight to the CLI
+ * `--cursor` argument. Returns `undefined` when the record carries neither a
+ * resolvable bus id nor a sequence, so a caller can decide not to advance the
+ * stored cursor for that record.
  */
 export function extractCursorId(record: AgentBusCtlWatchRecord): string | undefined {
-  if (typeof record.message_id === "string" && record.message_id.trim()) {
-    return record.message_id.trim();
-  }
-  if (record.seq !== undefined && record.seq !== null) {
-    return String(record.seq);
-  }
-  return undefined;
+  const messageId = typeof record.message_id === "string" ? record.message_id.trim() : "";
+  const split = messageId ? splitMessageId(messageId) : {};
+  const seq = record.seq !== undefined && record.seq !== null ? record.seq : split.seq;
+  const busId = record.bus_path?.trim() || split.busId;
+  return buildResumeCursor(busId, seq);
+}
+
+/**
+ * Split a `<bus-id>-<seq>` message_id into its parts. Returns an empty object
+ * when the message_id has no trailing numeric `-<seq>` segment (so we never
+ * mis-parse a plain id).
+ */
+function splitMessageId(messageId: string): { busId?: string; seq?: string } {
+  const idx = messageId.lastIndexOf("-");
+  if (idx <= 0) return {};
+  const seqPart = messageId.slice(idx + 1);
+  if (!/^\d+$/.test(seqPart)) return {};
+  return { busId: messageId.slice(0, idx), seq: seqPart };
 }
 
 /**
