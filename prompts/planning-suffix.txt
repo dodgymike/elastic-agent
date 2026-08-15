@@ -14,4 +14,3 @@ EXAMPLE RESPONSE:
   "expected_outcome": ""
 }
 
-
