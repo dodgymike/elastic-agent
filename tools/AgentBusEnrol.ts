@@ -227,7 +227,7 @@ function parseCtlJson(text: string): Record<string, unknown> | null {
 }
 
 /** Extract the agent id from JSON output across common field names. */
-function extractAgentId(json: Record<string, unknown> | null, text: string, name: string): string | undefined {
+function extractAgentId(json: Record<string, unknown> | null, text: string): string | undefined {
   if (json) {
     for (const key of ["agentId", "agent_id", "id", "agent"]) {
       const v = json[key];
@@ -327,7 +327,7 @@ export default function agentBusEnrol(options: AgentBusEnrolOptions = {}): Agent
   }
 
   const json = parseCtlJson(stdout);
-  const agentId = extractAgentId(json, stdout, name);
+  const agentId = extractAgentId(json, stdout);
   if (!agentId) {
     throw new Error(
       "Enrolment returned success but no agent id could be parsed from agent-busctl output; verify with `agent-busctl whoami`.",
