@@ -25,6 +25,7 @@ test/.loop-mode-build/
 test/.loop-queue-build/
 test/.loop-poll-build/
 test/.loop-replan-build/
+test/.loop-bus-guard-build/
 test/.compile-verify/
 test/.compile-verify-2/
 test/.loop-mode-build-verify/

@@ -17,6 +17,10 @@ import {
     initialLoopReplanBudget,
     type LoopReplanBudget,
 } from "./loop-replan.js";
+import {
+    missingTokenPollDiagnostic,
+    resolveAgentBusTokenAvailability,
+} from "./loop-bus-guard.js";
 import { resolveToolSafetyConfig } from "./tool-safety-config.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
@@ -330,9 +334,27 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
  * or unreachable (transport failures are soft and yield `undefined`). It is a
  * distinct helper from `pollLoopBusBetweenSteps` (which only returns a boolean)
  * because the caller needs the message object itself to seed the prompt.
+ *
+ * Token-availability guard: this pre-planning poll runs before planning begins,
+ * which is before any later enrollment/initialization step that provisions the
+ * bearer credential. To avoid a startup-time "Agent Bus needs
+ * options.accessToken…" failure (transport failures here would otherwise be a
+ * soft no-op), we check availability *before* reading the bus. When no bearer
+ * credential is available we skip the poll entirely and emit exactly ONE clear,
+ * actionable diagnostic (naming the identity store from `.agent-bus.local` and
+ * directing the operator to export `AGENT_BUS_ACCESS_TOKEN`). Fail-safe:
+ * startup continues without a prior bus message — the same behavior as an idle
+ * or unreachable bus. The diagnostic never contains the token value.
  */
 async function pollAgentBus(): Promise<{ text?: string } | undefined> {
     if (!options.loop) return undefined;
+
+    const tokenAvailability = resolveAgentBusTokenAvailability();
+    if (!tokenAvailability.available) {
+        status.warning(missingTokenPollDiagnostic(tokenAvailability), hierarchyIndent("plan"));
+        return undefined;
+    }
+
     const planId = runMode.mode === "task" ? runMode.taskId : undefined;
     const result = await pollLoopBusOnce({
         read: loopBusRead,

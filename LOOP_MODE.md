@@ -154,6 +154,34 @@ than crashing a step boundary. During the idle wait an unreachable bus is a
 soft no-op: loop mode keeps polling instead of crashing, so a temporarily
 unavailable bus never kills the agent.
 
+### Pre-planning poll and the launch token requirement
+
+In addition to the between-step and idle polls, loop mode performs **one**
+non-blocking Agent Bus poll before planning begins (in `main.ts`,
+`pollAgentBus`) so a coordination message that arrived before startup becomes
+the plan's work order instead of being queued. That poll runs before any later
+enrollment/initialization step that may provision the credential, so **the
+bearer token must be available at launch** for it to succeed.
+
+The credential must come from the environment (`AGENT_BUS_ACCESS_TOKEN`) or a
+per-call `accessToken`; it is **never** stored in `.agent-bus.local` (which
+carries only non-secret metadata such as the bus URL and identity). Launch loop
+mode with the token exported:
+
+```sh
+export AGENT_BUS_ACCESS_TOKEN="$(agent-busctl credential ...)"  # your secret manager
+elastic-agent --loop "implement the payment retry"
+```
+
+When the token is not available at the pre-planning poll, the runtime does not
+fail. It **skips** that single pre-planning poll and emits exactly ONE
+actionable `[WARNING]` — naming the identity store from `.agent-bus.local` (when
+enrolled) and directing you to export `AGENT_BUS_ACCESS_TOKEN` — then continues
+normal startup. This keeps the failure mode the same as an idle or unreachable
+bus (fail **open**), so a missing pre-planning credential never blocks the run;
+it just means no prior bus message is used as the work order. The warning never
+contains the token value.
+
 ---
 
 ## Idle listening between plans
@@ -243,9 +271,12 @@ Agent Bus is mocked — no network is touched):
 - `npm run test:loop-queue`
 - `npm run test:loop-poll`
 - `npm run test:loop-replan`
+- `npm run test:loop-bus-guard`
 
 They cover classification of relevant vs. queued messages, queue save/load,
 restart draining (including the fail-safe undrained tail), re-plan invocation
-on a relevant message, and the idle-loop primitive
+on a relevant message, the idle-loop primitive
 (`pollLoopBusUntilMessage`: waiting for a relevant message, respecting the
-idle-poll cap, and stopping on abort).
+idle-poll cap, and stopping on abort), and the pre-planning token-availability
+guard (`test:loop-bus-guard`: a missing token skips the poll with an actionable
+diagnostic; a valid mock token lets the first poll succeed before planning).
