@@ -1,10 +1,30 @@
 # Loop mode (`--loop`)
 
 Loop mode lets the runtime keep running after it starts a plan and watch the
-Agent Bus between execution steps. Incoming coordination messages are
-classified at each step boundary and either interrupt the work order (a
-*relevant* message triggers a re-plan) or are persisted to a durable queue for
-later (an *irrelevant* message never disturbs the plan in flight).
+Agent Bus between execution steps **and while idle between plans**. Incoming
+coordination messages are classified at each step boundary and either interrupt
+the work order (a *relevant* message triggers a re-plan) or are persisted to a
+durable queue for later (an *irrelevant* message never disturbs the plan in
+flight). After a plan finishes, the agent does not exit: it keeps polling the
+bus waiting for new work, so it stays "listening" — exactly the behavior of a
+long-lived coordination agent.
+
+## Poll mode only
+
+Loop mode consumes the Agent Bus **exclusively by polling**. Every live read is
+a bounded HTTP `GET` of the messages feed through `loop-poll.ts`:
+
+- `pollLoopBusOnce` — one bounded between-step read.
+- `pollLoopBusUntilMessage` — the keep-listening loop that polls at
+  `LOOP_POLL_INTERVAL_MS` while idle between plans.
+
+Loop mode never subscribes, streams, long-polls, or opens a persistent
+connection to the bus. The only non-poll retrieval is the durable-queue drain
+on restart (below), which re-reads messages a *previous* run polled and
+persisted to `bus-queue.json` — it is not a live transport. Keeping delivery
+poll-only means each idle loop makes no outbound connection until the configured
+poll interval elapses, so an agent running `--loop` costs nothing between polls
+and always fails open when the bus is unreachable.
 
 This document describes the CLI surface, the classification rule, the durable
 queue, the between-step poll loop, and the re-planning safety guard. The
@@ -114,6 +134,10 @@ re-plan.
 - `routeAgentBusMessages` classifies a batch and enqueues the irrelevant ones.
 - `pollLoopBusOnce` orchestrates one poll through an injectable `read`
   dependency so it is fully unit-testable without a network.
+- `pollLoopBusUntilMessage` *loops on the feed*, sleeping `pollIntervalMs`
+  between polls and waiting until a relevant message arrives (or the wait is
+  bounded/aborted). This is the "keep listening" primitive used while idle
+  between plans.
 
 Poll timing:
 
@@ -121,11 +145,123 @@ Poll timing:
 | ------- | ------- | ------- | ----- |
 | Poll interval | `LOOP_POLL_INTERVAL_MS` | `5000` | Minimum `100`; enforced to avoid a hot-loop. |
 | Per-poll request timeout | `LOOP_POLL_REQUEST_TIMEOUT_MS` | `2000` | One hung bus read never blocks a step boundary indefinitely. |
+| Idle-wait cap | `LOOP_MAX_IDLE_POLLS` | `0` | `0` waits indefinitely (until a relevant message or Ctrl-C); a positive integer bounds how many idle polls a run performs. |
 | Feed path | `LOOP_BUS_MESSAGES_PATH` | `/api/v1/messages` | Route read from the Agent Bus. |
 
 Soft-failure contract: a missing/malformed queue file or an unreachable bus is
 reported as a warning and loop mode fails **open** to normal execution rather
-than crashing a step boundary.
+than crashing a step boundary. During the idle wait an unreachable bus is a
+soft no-op: loop mode keeps polling instead of crashing, so a temporarily
+unavailable bus never kills the agent.
+
+### Pre-planning poll and authentication (no access token required)
+
+In addition to the between-step and idle polls, loop mode performs **one**
+non-blocking Agent Bus poll before planning begins (in `main.ts`,
+`pollAgentBus`) so a coordination message that arrived before startup becomes
+the plan's work order instead of being queued.
+
+Every loop-mode bus read — the pre-planning poll, the between-step polls, and
+the idle loop — goes through `loopBusRead`, which shells out to the
+`agent-busctl` CLI (`loop-busctl-read.ts`, `watchAgentBusOnce`) instead of using
+a raw authenticated HTTP client. Authentication is handled by the **enrolled
+identity** the CLI reads from its credential store, driven with `--bus` and
+`--identity`. **No `AGENT_BUS_ACCESS_TOKEN` (or per-call `accessToken`) is
+required.** The CLI is invoked like:
+
+```sh
+./agent-busctl --bus https://127.0.0.1:18090 --identity tmp/elastic-identity/ watch --for 600ms --json
+```
+
+The bus URL and identity store resolve from `AGENT_BUS_URL`/`AGENT_BUS_BASE_URL`
+and `AGENT_BUS_IDENTITY`, then from the non-secret `.agent-bus.local` roster
+(the enrolled `busUrl` and `identityStore`). An empty bounded watch ("no
+messages arrived") is a normal idle outcome, not an error; if the CLI, bus, or
+identity is unavailable the read fails **soft** (a `[WARNING]`, then normal
+startup) exactly as an unreachable bus did before. There is no bearer-token
+availability gate.
+
+### Long-lived watch — no external poll timeout
+
+`agent-busctl watch` is a **long-lived watch by nature**: it keeps streaming
+(and, on a busy bus, re-delivering) until it is stopped. `watchAgentBusOnce`
+therefore applies **no external watchdog / child-process timeout** — there is no
+`Promise.race` or `child_process` `timeout` wrapping the CLI. This "removed
+bus-poll timeout" is a deliberate contract:
+
+- The `LOOP_POLL_REQUEST_TIMEOUT_MS` value tunes only the CLI's own `--for`
+  watch window (how long a single poll waits for messages before reporting
+  idle) — it is **not** a SIGKILL bound on the stream.
+- Shutdown is owned by the caller: loop mode aborts/kills the run (Ctrl-C /
+  SIGTERM routes through the normal abort handler), and the sub-process is
+  allowed to live as long as the run needs it.
+- Errors from an **unexpected process exit** are still surfaced (through the
+  `close`/`error` handlers) rather than being masked by a timer.
+
+### Cursor resume across polls
+
+Each loop-mode poll is a fresh `agent-busctl watch` of the bus feed. To keep
+reads moving **forward** instead of re-delivering the retained window, the loop
+tracks a **cursor id** (the `message_id` each watch record carries, or its
+`seq`):
+
+- After a poll that receives messages, `watchAgentBusOnce` captures the last
+  message's cursor id, keeps it in-process via `getLastCursorId()`, and persists
+  it to a **git-ignored** loop-mode state file, `bus-cursor.json` (alongside
+  `bus-queue.json`), via `saveCursor` / `loadCursor`. This is a non-secret
+  position token only — never a secrets store and never `data.json`.
+- Before the **next** poll (pre-planning, between-step, or idle),
+  `resolveStartCursorId` resolves the cursor to resume from — in-process first,
+  then the persisted file — and passes it back to the CLI as
+  `--cursor <id>`. When no cursor exists yet (a normal first run) the flag is
+  omitted and the watch starts naturally.
+- The `agent-busctl` CLI accepts `--cursor` without any access token; the
+  working example needs only `--bus` + `--identity`.
+
+The cursor is an at-least-once position: killing a watch mid-batch re-delivers
+that batch on restart, so loop mode's handlers stay idempotent (dedupe on
+`message_id`) exactly as the CLI documents.
+
+---
+
+## Idle listening between plans
+
+When a plan completes with no relevant message pending, loop mode does **not**
+exit. `runAgentReplanLoop` (in `main.ts`) enters an idle-wait that keeps polling
+the Agent Bus via `pollLoopBusUntilMessage`:
+
+- Each idle poll classifies every message; irrelevant ones are queued durably
+  and never dropped.
+- When a *relevant* message arrives while idle, it becomes the pending replan
+  directive and the agent re-enters planning with it as the new work order —
+  the same replan path (budget + safety guard) used for step-boundary messages.
+- The idle wait continues until a relevant message arrives, `LOOP_MAX_IDLE_POLLS`
+  is exhausted (when set to a positive value), or the run is interrupted
+  (Ctrl-C / SIGTERM routes through the normal abort handler).
+
+This is what makes `--loop` a true long-lived listener: it keeps watching the
+bus for new work after finishing a plan instead of stopping.
+
+---
+
+## Reading the queue on restart
+
+Loop mode "reads the queue when restarting". At the top of `runAgentReplanLoop`
+(in `main.ts`), before executing any work, `drainLoopQueueAtRestart` drains the
+durable `bus-queue.json` left by a prior run (via `drainBusQueue`) and
+re-classifies every drained message against the **current** plan:
+
+- A message that is **relevant now** (it references the current task/plan ID or
+  carries a plan-change directive) is promoted to a pending re-plan candidate,
+  so the restart re-enters planning with it.
+- A message that is **still irrelevant** is acknowledged and dropped — it was
+  queued precisely because it must not interrupt execution, and replaying it
+  verbatim into a fresh plan could corrupt the work order.
+
+This is a *local, non-live* read (the messages were already polled and persisted
+by an earlier run); it is not an Agent Bus connection, so the "poll mode only"
+live-delivery contract is unchanged. A missing or corrupt queue is a soft
+failure: it surfaces as a `[WARNING]` and does not abort startup.
 
 ---
 
@@ -163,7 +299,9 @@ finishes or aborts.
 | Classification rule | `loop-mode.ts` | `loop-poll.ts`, `main.ts` |
 | Durable queue + drain | `loop-queue.ts` | `loop-poll.ts`, `main.ts` |
 | Between-step poll | `loop-poll.ts` | `main.ts` |
+| Idle listening loop | `loop-poll.ts` | `main.ts` (`runAgentReplanLoop`) |
 | Re-plan prompt + safety | `loop-replan.ts` | `main.ts` |
+| Bus read via agent-busctl | `loop-busctl-read.ts` | `main.ts` (`loopBusRead`) |
 
 ## Tests
 
@@ -174,7 +312,13 @@ Agent Bus is mocked — no network is touched):
 - `npm run test:loop-queue`
 - `npm run test:loop-poll`
 - `npm run test:loop-replan`
+- `npm run test:loop-busctl-read`
 
 They cover classification of relevant vs. queued messages, queue save/load,
-restart draining (including the fail-safe undrained tail), and re-plan
-invocation on a relevant message.
+restart draining (including the fail-safe undrained tail), re-plan invocation
+on a relevant message, the idle-loop primitive
+(`pollLoopBusUntilMessage`: waiting for a relevant message, respecting the
+idle-poll cap, and stopping on abort), and the `agent-busctl` read
+(`test:loop-busctl-read`: NDJSON parsing, an empty watch as a normal idle
+outcome, missing bus/identity soft errors, and roster resolution — with **no
+`AGENT_BUS_ACCESS_TOKEN` anywhere**).

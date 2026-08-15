@@ -1,10 +1,12 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
-import { defaultBusQueueFilePath } from "./loop-queue.js";
-import { messageToSearchableText } from "./loop-mode.js";
+import { defaultBusQueueFilePath, drainBusQueue } from "./loop-queue.js";
+import { classifyAgentBusMessage, messageToSearchableText } from "./loop-mode.js";
 import {
     pollLoopBusOnce,
+    pollLoopBusUntilMessage,
+    resolveLoopMaxIdlePolls,
     resolveLoopPollTiming,
     type AgentBusRead,
 } from "./loop-poll.js";
@@ -15,6 +17,7 @@ import {
     initialLoopReplanBudget,
     type LoopReplanBudget,
 } from "./loop-replan.js";
+import { defaultBusCursorFilePath, watchAgentBusOnce } from "./loop-busctl-read.js";
 import { resolveToolSafetyConfig, startDirPathWarning } from "./tool-safety-config.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
@@ -234,6 +237,17 @@ const loopPollTiming = resolveLoopPollTiming();
 const loopQueueFilePath = defaultBusQueueFilePath(mainCwd);
 
 /**
+ * The loop-mode bus cursor state file path: `bus-cursor.json` in the project
+ * root (git-ignored, alongside `bus-queue.json`). Each poll that receives
+ * messages persists the last message's cursor id here, and the next poll
+ * resumes from it (or from the in-process cursor) so a restart — or the next
+ * pre-planning/between-step/idle poll — keeps reading forward instead of
+ * re-delivering the retained window. Never a secrets store and never
+ * `data.json`; see loop-busctl-read.ts.
+ */
+const loopBusCursorFilePath = defaultBusCursorFilePath(mainCwd);
+
+/**
  * Feed path read from the Agent Bus during loop mode. The default is the
  * deployment's messages route; operators may override it via
  * `LOOP_BUS_MESSAGES_PATH`.
@@ -241,24 +255,38 @@ const loopQueueFilePath = defaultBusQueueFilePath(mainCwd);
 const loopBusMessagesPath = process.env.LOOP_BUS_MESSAGES_PATH ?? "/api/v1/messages";
 
 /**
- * Wrap the real AgentBus client so it satisfies the `AgentBusRead` contract
- * used by pollLoopBusOnce: a bounded single GET of the messages route that
- * normalizes success/transport failure into a non-throwing result (the bus
- * client itself may throw when unconfigured — we capture that as a soft
- * "read failed" outcome instead of letting it propagate into the step loop).
+ * Wrap the `agent-busctl watch` shell-out so it satisfies the `AgentBusRead`
+ * contract used by pollLoopBusOnce: a single bounded read of the Agent Bus
+ * feed that normalizes success/transport failure into a non-throwing result.
+ *
+ * This deliberately does NOT use the raw authenticated HTTP client
+ * (`tools/AgentBus.ts`), which required a bearer credential
+ * (`options.accessToken` / `AGENT_BUS_ACCESS_TOKEN`). The real Agent Bus
+ * authenticates through the enrolled identity held by `agent-busctl` and
+ * driven with `--bus` and `--identity` — no access token is involved (see
+ * loop-busctl-read.ts). `watchAgentBusOnce` shells out to that CLI, resolves
+ * the bus URL and identity store from the environment or `.agent-bus.local`,
+ * and folds any transport failure into a soft "read failed" outcome instead of
+ * letting it propagate into the step loop.
+ *
+ * NO-TIMEOUT: `agent-busctl watch` is a long-lived watch by nature, so
+ * `watchAgentBusOnce` applies no external watchdog timeout; shutdown is owned
+ * by the caller (loop mode aborts/kills the run) and unexpected process exits
+ * are still surfaced. The `requestTimeoutMs` value is used only as the CLI's
+ * `--for` watch window (how long it waits for messages before reporting
+ * idle), not as a SIGKILL bound.
  */
-const loopBusRead: AgentBusRead = async ({ path, timeoutMs }) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        const result = await AgentBus({ path, method: "GET" });
-        return { body: result.body, status: result.status };
-    } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return { body: null, status: 0, error: reason };
-    } finally {
-        clearTimeout(timer);
-    }
+const loopBusRead: AgentBusRead = async () => {
+    // cursorFilePath: enables cursor RESUME — after a poll that receives
+    // messages, the last message's cursor id is persisted to bus-cursor.json
+    // and the next poll (pre-planning, between-step, or idle) passes it back
+    // via `--cursor` so reads keep moving forward across restarts. When no
+    // cursor exists yet (a first run), no --cursor flag is passed and the
+    // watch starts naturally. See loop-busctl-read.ts resolveStartCursorId.
+    return watchAgentBusOnce({
+        watchWindowMs: loopPollTiming.requestTimeoutMs,
+        cursorFilePath: loopBusCursorFilePath,
+    });
 };
 
 /**
@@ -313,6 +341,103 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
         status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, reportPrefix);
     }
     return false;
+}
+
+/**
+ * Perform a single non-blocking Agent Bus poll *before planning starts* and
+ * return the first relevant message as a `{ text?: string }` object, or
+ * `undefined` when there is none.
+ *
+ * This reuses the same bounded, fail-open read path as `pollLoopBusBetweenSteps`
+ * (`loopBusRead` -> `normalizeAgentBusMessages` -> relevant filtering) so a
+ * directive that arrived before startup becomes the plan's work order rather
+ * than being queued and only picked up at a step boundary. It deliberately
+ * does NOT use the blocking `pollLoopBusUntilMessage` loop: it performs exactly
+ * one bounded read, so startup never blocks when the bus is idle, unconfigured,
+ * or unreachable (transport failures are soft and yield `undefined`). It is a
+ * distinct helper from `pollLoopBusBetweenSteps` (which only returns a boolean)
+ * because the caller needs the message object itself to seed the prompt.
+ *
+ * No bearer-token gate: this poll goes through `loopBusRead`, which shells out
+ * to the `agent-busctl` CLI (see loop-busctl-read.ts). Authentication is
+ * handled by the enrolled identity (`--bus` + `--identity`), so no
+ * `AGENT_BUS_ACCESS_TOKEN` (or per-call accessToken) is required. When the CLI
+ * is unavailable or the bus is unreachable the read fails soft (yields
+ * `undefined`) exactly like an idle or unreachable bus.
+ */
+async function pollAgentBus(): Promise<{ text?: string } | undefined> {
+    if (!options.loop) return undefined;
+
+    const planId = runMode.mode === "task" ? runMode.taskId : undefined;
+    const result = await pollLoopBusOnce({
+        read: loopBusRead,
+        path: loopBusMessagesPath,
+        requestTimeoutMs: loopPollTiming.requestTimeoutMs,
+        queueFilePath: loopQueueFilePath,
+        context: { planId },
+        report: (message) => status.warning(message, hierarchyIndent("plan")),
+    });
+    if (result.relevantMessages.length === 0) return undefined;
+    return result.relevantMessages[0] as { text?: string };
+}
+
+/**
+ * Drain the durable Agent Bus queue at loop-mode restart and re-route anything
+ * that is now relevant to the current plan.
+ *
+ * Loop mode persists *irrelevant* messages to `bus-queue.json` during a run so
+ * unrelated coordination never disturbs the plan in flight (see loop-queue.ts).
+ * `pollLoopBusUntilMessage` and `pollLoopBusOnce` are the only live-read paths —
+ * loop mode consumes the Agent Bus *exclusively by polling* and never
+ * subscribes, streams, or long-polls. This startup call is the complement to
+ * that poll-only contract: it "reads the queue when restarting" (per the
+ * loop-mode plan) by draining the durable queue left by a prior run and, for
+ * each drained message, re-classifying it against the *current* plan context.
+ *
+ *   - a drained message that is *relevant now* (it references the current
+ *     plan/task ID or carries a plan-change directive) is promoted to a pending
+ *     re-plan candidate so the restart re-enters planning with it;
+ *   - a drained message that is still irrelevant is acknowledged and dropped —
+ *     it was queued precisely because it must not interrupt execution, and
+ *     replaying it verbatim into a new plan could corrupt the work order.
+ *
+ * Fail-soft contract: a missing/corrupt queue, or a single bad drained message,
+ * never aborts startup. They surface as [WARNING]s and the loop continues to
+ * its normal poll-only execution.
+ */
+async function drainLoopQueueAtRestart(reportPrefix = hierarchyIndent("plan")): Promise<void> {
+    const planId = runMode.mode === "task" ? runMode.taskId : undefined;
+    const context = { planId };
+
+    let warnings: string[] = [];
+    let promotedCount = 0;
+    const drain = await drainBusQueue(loopQueueFilePath, {
+        handler: (entry) => {
+            const classification = classifyAgentBusMessage(entry.message as never, context);
+            if (classification.kind === "relevant") {
+                pendingLoopReplanMessages.push(entry.message);
+                promotedCount += 1;
+            }
+        },
+    });
+    warnings = warnings.concat(drain.warnings);
+
+    for (const warning of warnings) status.warning(`loop queue: ${warning}`, reportPrefix);
+
+    if (drain.drainedCount === 0 && warnings.length === 0) return;
+
+    if (promotedCount > 0) {
+        const text = truncate(pendingLoopReplanText() || "a plan-change directive", 240);
+        status.replan(
+            `Loop mode restart: drained ${drain.drainedCount} queued message(s); ${promotedCount} are relevant now and warrant a re-plan: ${text}`,
+            reportPrefix,
+        );
+    } else {
+        status.success(
+            `Loop mode restart: drained ${drain.drainedCount} queued message(s); none are relevant to the current plan.`,
+            reportPrefix,
+        );
+    }
 }
 
 /**
@@ -1743,6 +1868,24 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
     // keeps using the original command-line prompt.
     const isTaskMode = runMode.mode === "task";
     if (!isTaskMode) activePromptSpecKeeperOptions = specKeeperClientOptions(specKeeperDefaults);
+
+    // Loop-mode pre-planning bus poll: before the work order is resolved (and
+    // thus before any planning begins), poll the Agent Bus once for a relevant
+    // coordination message so a directive that arrived before startup becomes
+    // the plan's work order rather than being queued and picked up only at a
+    // step boundary. This is a single non-blocking bounded read (see
+    // pollAgentBus), so startup never blocks when the bus is idle or
+    // unreachable. When a relevant message is found its searchable text seeds
+    // the prompt exactly the way the step-5 replan loop does.
+    const busMessage = await pollAgentBus();
+    if (busMessage) {
+        commandLinePrompt = extractReplanPrompt([busMessage]);
+        status.replan(
+            `Loop mode: using a relevant bus message received before planning as the work order: ${truncate(messageToSearchableText(busMessage), 240)}`,
+            hierarchyIndent("plan"),
+        );
+    }
+
     let originalPrompt = commandLinePrompt;
     let taskWorkOrder: TaskWorkOrder | null = null;
     let taskLifecycle: any = null;
@@ -2207,6 +2350,13 @@ async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } 
         return main(options);
     }
 
+    // Loop mode restart: read the durable Agent Bus queue persisted by a prior
+    // run before starting any work ("ALWAYS READ THE QUEUE WHEN RESTARTING").
+    // Queued messages that are relevant to the *current* plan are promoted to
+    // pending re-plan candidates; the rest are drained and dropped. Live Agent
+    // Bus reads remain exclusively polling (pollLoopBusOnce / pollLoopBusUntilMessage).
+    await drainLoopQueueAtRestart();
+
     let replanBudget: LoopReplanBudget = initialLoopReplanBudget();
     let iteration = 0;
     while (true) {
@@ -2216,7 +2366,64 @@ async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } 
         throwIfAborted(abortController.signal, "cleanup");
         const outcome = await main(options);
         const hasPending = outcome.loopReplanPending === true && pendingLoopReplanMessages.length > 0;
-        if (!hasPending) return { success: outcome.success };
+
+        if (!hasPending) {
+            // The plan completed normally (nothing relevant arrived at a step
+            // boundary). Loop mode does not exit here: it keeps the agent alive
+            // and keeps polling the Agent Bus, waiting for a relevant message
+            // that should drive the next re-plan. Irrelevant messages arriving
+            // while idle are queued durably by the poll, never dropped. The
+            // wait is bounded by LOOP_MAX_IDLE_POLLS (default: wait until a
+            // relevant message arrives or the run is aborted) so the agent
+            // truly keeps listening between plans.
+            const idlePrefix = hierarchyIndent("plan");
+            const maxIdlePolls = resolveLoopMaxIdlePolls();
+            status.success(
+                "Loop mode: plan complete. Continuing to watch the Agent Bus for new work; press Ctrl-C to stop.",
+                idlePrefix,
+            );
+            const idle = await pollLoopBusUntilMessage({
+                read: loopBusRead,
+                path: loopBusMessagesPath,
+                requestTimeoutMs: loopPollTiming.requestTimeoutMs,
+                pollIntervalMs: loopPollTiming.pollIntervalMs,
+                queueFilePath: loopQueueFilePath,
+                context: { planId: runMode.mode === "task" ? runMode.taskId : undefined },
+                maxIdlePolls,
+                signal: abortController.signal,
+                onPoll: (result) => {
+                    for (const warning of result.warnings) {
+                        if (result.readFailed) {
+                            status.warning(`loop poll: ${warning}`, idlePrefix);
+                        }
+                    }
+                    if (!result.readFailed && result.queuedCount > 0) {
+                        status.success(`loop poll: ${result.queuedCount} irrelevant message(s) queued`, idlePrefix);
+                    }
+                },
+            });
+
+            if (idle.aborted) {
+                // A SIGINT/SIGTERM interrupted the idle wait; route through the
+                // abort handler so cleanup and finalization run normally.
+                throwIfAborted(abortController.signal, "cleanup");
+            }
+            if (idle.maxIdlePollsReached) {
+                status.replan(
+                    `Loop mode: idle-wait ceiling of ${maxIdlePolls} poll(s) reached with no relevant message; stopping.`,
+                    idlePrefix,
+                );
+                return { success: outcome.success };
+            }
+
+            // A relevant message arrived while idle: surface it as a pending
+            // re-plan so the replan handling below re-enters planning with it.
+            pendingLoopReplanMessages = [...idle.relevantMessages];
+            for (const relevant of idle.relevantMessages) {
+                const text = truncate(messageToSearchableText(relevant as { text?: string }), 240);
+                status.replan(`Loop mode: detected a relevant bus message while idle, warranting a re-plan: ${text}`, idlePrefix);
+            }
+        }
 
         // A relevant message changed the plan: decide whether it is safe to
         // re-enter planning on top of the preserved work.

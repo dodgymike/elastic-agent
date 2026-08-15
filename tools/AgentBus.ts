@@ -49,6 +49,13 @@ export interface AgentBusResult {
 interface AgentBusLocalConfig {
   busUrl?: string;
   agentId?: string;
+  /**
+   * Path to the `agent-busctl` identity store that owns the bearer credential.
+   * Read only to make the "missing access token" diagnostic actionable — the
+   * token itself is NEVER read from this path (it is secret and owned by the
+   * operator's secret manager).
+   */
+  identityStore?: string;
 }
 
 /** The default (non-secret) roster filename written by AgentBusEnrol. */
@@ -82,6 +89,7 @@ function loadAgentBusLocalConfig(storePath: string | undefined): AgentBusLocalCo
   return {
     busUrl: str("busUrl") ?? str("bus_url") ?? str("bus"),
     agentId: str("agentId") ?? str("agent_id") ?? str("id"),
+    identityStore: str("identityStore") ?? str("identity_store"),
   };
 }
 
@@ -114,6 +122,17 @@ export default async function agentBus(options: AgentBusOptions): Promise<AgentB
     );
   }
   if (!accessToken?.trim()) {
+    if (local.identityStore) {
+      // Enrolled but missing the bearer credential: tell the operator exactly
+      // where it must come from so the loop-mode warning is actionable. The
+      // identity store is owned by agent-busctl and is never read here.
+      throw new Error(
+        "Agent Bus needs options.accessToken or AGENT_BUS_ACCESS_TOKEN. You are enrolled " +
+          `(identity '${identity ?? "(unknown)"}', bus '${baseUrl}'); export the bearer credential ` +
+          `from the identity store '${local.identityStore}' to the AGENT_BUS_ACCESS_TOKEN ` +
+          "environment variable (or pass accessToken per call).",
+      );
+    }
     throw new Error("Agent Bus needs options.accessToken or AGENT_BUS_ACCESS_TOKEN.");
   }
   if (!options.path.startsWith("/")) throw new Error("Agent Bus path must begin with '/'.");

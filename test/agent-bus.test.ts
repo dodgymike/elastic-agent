@@ -131,6 +131,31 @@ function main(): Promise<void> {
         err !== undefined && new RegExp(OPT_TOKEN_KEY + ".*" + ENV_TOKEN_KEY, "i").test(err.message),
       );
 
+      // ---- 5b. when enrolled, the missing-token error names the identity store
+      // (actionable hint) and never attempts to read the bearer from it. -----
+      const enrolledStore = join(dir, "enrolled-store.json");
+      writeFileSync(
+        enrolledStore,
+        `${JSON.stringify({
+          busUrl: "http://127.0.0.1:9200",
+          agentId: "bus-b.agent-2",
+          identityStore: join(dir, "ident"),
+        })}\n`,
+        { mode: 0o600 },
+      );
+      err = undefined;
+      try {
+        await agentBus({ path: "/x", store: enrolledStore });
+      } catch (error) {
+        err = error as Error;
+      }
+      check(
+        "enrolled-but-missing-token error names the identity store for the operator",
+        err !== undefined &&
+          /identity store '.*ident'|enrolled \(identity 'bus-b\.agent-2'/.test(err?.message ?? "") &&
+          new RegExp(OPT_TOKEN_KEY + ".*" + ENV_TOKEN_KEY, "i").test(err?.message ?? ""),
+      );
+
       // ---- 6. malformed/missing roster falls back gracefully ---------------
       const malformedStore = join(dir, "malformed-store.json");
       writeFileSync(malformedStore, "{ not json !!");

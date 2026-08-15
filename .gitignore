@@ -25,7 +25,13 @@ test/.loop-mode-build/
 test/.loop-queue-build/
 test/.loop-poll-build/
 test/.loop-replan-build/
+test/.loop-busctl-read-build/
 test/.compile-verify/
+test/.compile-verify-2/
+test/.loop-mode-build-verify/
+test/.loop-poll-build-verify/
+test/.loop-replan-build-verify/
+test/.loop-queue-build-verify/
 test/.dt-verify/
 
 # Agent execution worktrees; keep the staging copies out of the repository.
@@ -37,6 +43,10 @@ test/.dt-verify/
 # Loop-mode Agent Bus queue persistence; transient runtime state.
 bus-queue.json
 bus-queue.json.tmp
+
+# Loop-mode Agent Bus cursor resume state; transient runtime position (non-secret).
+bus-cursor.json
+bus-cursor.json.tmp
 .history_tmp_mike
 .history_tmp_mike_2
 .history-2026-08-15-001.log

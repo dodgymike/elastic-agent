@@ -1,0 +1,399 @@
+/**
+ * Regression tests for loop-busctl-read.ts: the loop-mode Agent Bus read shells
+ * out to the `agent-busctl` CLI (with `--bus` and `--identity`) and requires NO
+ * `AGENT_BUS_ACCESS_TOKEN` — authentication is handled by the enrolled identity
+ * the CLI reads from the credential store. The watch NDJSON stream is parsed
+ * into the flat message array the loop-mode router expects, an empty watch is a
+ * normal "no messages" outcome, and every transport/configuration failure is
+ * surfaced as a soft `error` (never thrown).
+ *
+ * No network is touched: the test substitutes a stub `agent-busctl` script on a
+ * temp PATH and points the module at it via the `loop-busctl-read` test harness.
+ *
+ * Compiled and executed standalone by the `test:loop-busctl-read` npm script.
+ */
+import {
+    captureAndPersistCursor,
+    clearInMemoryCursor,
+    defaultBusCursorFilePath,
+    extractCursorId,
+    getLastCursorId,
+    loadAgentBusRoster,
+    loadCursor,
+    parseAgentBusCtlWatchOutput,
+    resolveAgentBusCtlBinary,
+    resolveStartCursorId,
+    saveCursor,
+    watchAgentBusOnce,
+    type AgentBusCtlWatchRecord,
+} from "../loop-busctl-read.js";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const dir = mkdtempSync(join(tmpdir(), "loop-busctl-read-test-"));
+
+let failures = 0;
+function check(name: string, cond: boolean): void {
+    if (cond) console.log(`PASS: ${name}`);
+    else {
+        failures += 1;
+        console.error(`FAIL: ${name}`);
+    }
+}
+
+/** Write an executable stub `agent-busctl` that prints the given stdout. */
+function writeStubCtl(name: string, stdout: string, exitCode = 0): string {
+    const bin = join(dir, name);
+    writeFileSync(
+        bin,
+        `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(stdout)});\nprocess.stderr.write("");\nprocess.exit(${exitCode});\n`,
+        { mode: 0o755 },
+    );
+    chmodSync(bin, 0o755);
+    return bin;
+}
+
+async function main(): Promise<void> {
+    const savedEnv: Record<string, string | undefined> = {};
+    const envKeys = ["AGENT_BUS_URL", "AGENT_BUS_BASE_URL", "AGENT_BUS_IDENTITY", "AGENT_BUSCTL", "AGENT_BUS_STORE"];
+    for (const key of envKeys) {
+        savedEnv[key] = process.env[key];
+        delete process.env[key];
+    }
+
+    // 1. NDJSON parsing: message records are kept, the trailing failure object
+    //    (ok:false, kind:empty / exit_code 8) is filtered and flags "empty".
+    const parseResult = parseAgentBusCtlWatchOutput(
+        [
+            JSON.stringify({ message_id: "bus-1", from: "a.agent", text: "hello" }),
+            JSON.stringify({ message_id: "bus-2", from: "a.agent", text: "world", body: "d29ybGQ=" }),
+            JSON.stringify({ ok: false, kind: "empty", exit_code: 8 }),
+        ].join("\n"),
+    );
+    check("message records are parsed into the message list", parseResult.messages.length === 2);
+    check("the empty failure object is filtered out", !parseResult.messages.some((m) => (m as any).ok === false));
+    check("an empty watch flags empty=true", parseResult.empty === true);
+
+    // 2. A non-empty watch flags empty=false.
+    const nonEmpty = parseAgentBusCtlWatchOutput(JSON.stringify({ message_id: "bus-9", text: "x" }));
+    check("a non-empty watch flags empty=false", nonEmpty.empty === false && nonEmpty.messages.length === 1);
+
+    // 2a. Cursor extraction: a message's cursor id is its message_id (the stable
+    //     <bus-id>-<seq> position); it falls back to `seq`, and yields nothing
+    //     when neither is present.
+    check("cursor id is extracted from message_id", extractCursorId({ message_id: "bus-1", seq: 1 }) === "bus-1");
+    check("cursor id falls back to seq", extractCursorId({ seq: 42 }) === "42");
+    check("no cursor id when neither field is present", extractCursorId({ text: "x" } as any) === undefined);
+
+    // 2b. Cursor capture advances to the LAST message in a batch and updates the
+    //     in-process cursor.
+    const cursorCapture = captureAndPersistCursor([
+        { message_id: "bus-1" },
+        { message_id: "bus-2" },
+        { seq: 99 },
+    ] as AgentBusCtlWatchRecord[]);
+    check("capturing a batch advances to the last message's cursor", getLastCursorId() === "99");
+
+    // 2c. Cursor persistence: saveCursor writes to a state file (atomic
+    //     temp+rename) and loadCursor reads it back; a missing file yields no
+    //     cursor and a malformed file yields a warning, never a throw.
+    const cursorFile = join(dir, "bus-cursor.json");
+    check("defaultBusCursorFilePath resolves beside the repo root", defaultBusCursorFilePath(dir) === cursorFile);
+    check("saveCursor persists without diagnostic", saveCursor(cursorFile, "bus-77") === undefined);
+    const loaded = loadCursor(cursorFile);
+    check("loadCursor reads back the persisted cursor", loaded.cursor === "bus-77" && loaded.warnings.length === 0);
+    check("loadCursor on a missing file yields no cursor", loadCursor(join(dir, "nope-cursor.json")).cursor === undefined);
+    const malformedCursor = join(dir, "bad-cursor.json");
+    writeFileSync(malformedCursor, "{ not json", "utf-8");
+    const badLoad = loadCursor(malformedCursor);
+    check(
+        "loadCursor on a malformed file yields a warning, not a throw",
+        badLoad.cursor === undefined && badLoad.warnings.length === 1 && /not valid JSON/.test(badLoad.warnings[0]),
+    );
+
+    // 2d. captureAndPersistCursor with a cursorFilePath both updates the
+    //     in-process cursor AND persists it; persistence failures are surfaced
+    //     as a diagnostic string, never thrown (in-memory tracking still works).
+    const captureFile = join(dir, "persist-cursor.json");
+    const persistDiag = captureAndPersistCursor([{ message_id: "bus-5" }] as AgentBusCtlWatchRecord[], captureFile);
+    check("capture+p: no diagnostic on success", persistDiag === undefined);
+    check("capture+p: persisted cursor is readable", loadCursor(captureFile).cursor === "bus-5");
+    check("capture+p: in-memory cursor matches", getLastCursorId() === "bus-5");
+    // A parent that is an existing FILE makes the recursive mkdir fail
+    // (ENOTDIR), driving the fail-soft diagnostic path.
+    const fileAsDir = join(dir, "not-a-dir");
+    writeFileSync(fileAsDir, "x", "utf-8");
+    const unwritable = join(fileAsDir, "cursor.json");
+    const unwritableDiag = saveCursor(unwritable, "bus-6");
+    check(
+        "saveCursor surfaces an unwritable path as a diagnostic, not a throw",
+        typeof unwritableDiag === "string" && /could not persist bus cursor/.test(unwritableDiag),
+    );
+
+    // 2e. A real watch pass that receives messages persists the cursor id when a
+    //     cursorFilePath is supplied (the close handler wires cursor capture).
+    const stubCursor = writeStubCtl(
+        "ctl-cursor",
+        [JSON.stringify({ message_id: "bus-1" }), JSON.stringify({ message_id: "bus-2" })].join("\n"),
+        0,
+    );
+    const cursorWatchFile = join(dir, "watch-cursor.json");
+    const cursorWatchResult = await watchAgentBusOnce({
+        binary: stubCursor,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+        cursorFilePath: cursorWatchFile,
+    });
+    check(
+        "a watch that receives messages persists the last message's cursor",
+        !cursorWatchResult.error &&
+            Array.isArray(cursorWatchResult.body) &&
+            (cursorWatchResult.body as AgentBusCtlWatchRecord[]).length === 2 &&
+            loadCursor(cursorWatchFile).cursor === "bus-2",
+    );
+
+    // 3. Roster loading reads non-secret busUrl/identityStore and tolerates
+    //    camelCase and snake_case keys.
+    const rosterStore = join(dir, ".agent-bus.local");
+    writeFileSync(
+        rosterStore,
+        `${JSON.stringify({ busUrl: "https://127.0.0.1:18090", identityStore: join(dir, "ident"), busFingerprint: "a".repeat(64) })}\n`,
+    );
+    const roster = loadAgentBusRoster(rosterStore);
+    check("roster busUrl is read", roster.busUrl === "https://127.0.0.1:18090");
+    check("roster identityStore is read", roster.identityStore === join(dir, "ident"));
+    check("roster busFingerprint is read", roster.busFingerprint === "a".repeat(64));
+    check("a missing roster yields no defaults", loadAgentBusRoster(join(dir, "nope.json")).busUrl === undefined);
+
+    // 4. The module never requires AGENT_BUS_ACCESS_TOKEN: invoking a stub that
+    //    emits an empty watch (exit 8) without any token env resolves to an
+    //    empty body (normal idle), not an error.
+    const stubEmpty = writeStubCtl(
+        "ctl-empty",
+        JSON.stringify({ ok: false, kind: "empty", exit_code: 8 }),
+        8,
+    );
+    const emptyResult = await watchAgentBusOnce({
+        binary: stubEmpty,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check("empty watch -> empty body and no error", emptyResult.error === undefined && Array.isArray(emptyResult.body) && emptyResult.body.length === 0);
+
+    // 5. A stub that emits real message records surfaces them as the body.
+    const stubMessages = writeStubCtl(
+        "ctl-messages",
+        [
+            JSON.stringify({ message_id: "bus-1", text: "plan-change", body: "cGxhbi1jaGFuZ2U=" }),
+        ].join("\n"),
+        0,
+    );
+    const messagesResult = await watchAgentBusOnce({
+        binary: stubMessages,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check(
+        "real records surface as the message body",
+        Array.isArray(messagesResult.body) &&
+            (messagesResult.body as AgentBusCtlWatchRecord[]).length === 1 &&
+            messagesResult.body[0].text === "plan-change",
+    );
+
+    // 5a. CURSOR RESUME — in-memory cursor: after a poll that captured a cursor
+    //     id in memory (getLastCursorId()), the NEXT poll must pass `--cursor
+    //     <id>` to `agent-busctl watch` so it resumes rather than re-reading the
+    //     retained window. A stub that records its argv proves the flag is
+    //     supplied. The in-memory cursor was set to "bus-1" by test 5 above.
+    const argvRecorder = join(dir, "ctl-argv-capture");
+    writeFileSync(
+        argvRecorder,
+        [
+            "#!/usr/bin/env node",
+            "const fs = require('node:fs');",
+            `fs.writeFileSync(${JSON.stringify(join(dir, "captured-args.json"))}, JSON.stringify(process.argv.slice(2)));`,
+            // Emit the bounded-watch empty failure object so the read is a clean
+            // "no messages" outcome (not a soft transport error) while the real
+            // signal under test is the captured argv (--cursor flag).
+            `process.stdout.write(${JSON.stringify(JSON.stringify({ ok: false, kind: "empty", exit_code: 8 }))} + "\\n");`,
+            "process.exit(8);",
+        ].join("\n"),
+        { mode: 0o755 },
+    );
+    chmodSync(argvRecorder, 0o755);
+    // Reset to a known in-memory cursor for an unambiguous assertion.
+    captureAndPersistCursor([{ message_id: "resume-42" }] as AgentBusCtlWatchRecord[]);
+    const resumeResult = await watchAgentBusOnce({
+        binary: argvRecorder,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    const capturedArgs = JSON.parse(
+        (await import("node:fs")).readFileSync(join(dir, "captured-args.json"), "utf-8"),
+    ) as string[];
+    check(
+        "subsequent poll passes --cursor with the in-memory cursor id",
+        !resumeResult.error &&
+            capturedArgs.includes("--cursor") &&
+            capturedArgs[capturedArgs.indexOf("--cursor") + 1] === "resume-42",
+    );
+
+    // 5b. CURSOR RESUME — persisted cursor file: with NO in-memory cursor but a
+    //     cursorFilePath that holds a saved cursor, the poll loads it and passes
+    //     `--cursor <id>`. A missing file yields NO --cursor flag (first run).
+    //     Reset the in-memory cursor to undefined to isolate the file source.
+    clearInMemoryCursor();
+    const resumeFile = join(dir, "resume-cursor.json");
+    saveCursor(resumeFile, "resume-file-7");
+    const resumeFileResult = await watchAgentBusOnce({
+        binary: argvRecorder,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+        cursorFilePath: resumeFile,
+    });
+    const capturedFromFile = JSON.parse(
+        (await import("node:fs")).readFileSync(join(dir, "captured-args.json"), "utf-8"),
+    ) as string[];
+    check(
+        "a poll with a persisted cursor file passes --cursor from the file",
+        !resumeFileResult.error &&
+            capturedFromFile.includes("--cursor") &&
+            capturedFromFile[capturedFromFile.indexOf("--cursor") + 1] === "resume-file-7",
+    );
+
+    // 5c. CURSOR RESUME — no cursor anywhere: when neither an in-memory cursor
+    //     nor a persisted cursor exists, the poll must NOT pass --cursor.
+    clearInMemoryCursor();
+    const freshCursorFile = join(dir, "fresh-cursor.json"); // does not exist -> no cursor
+    const noCursorResult = await watchAgentBusOnce({
+        binary: argvRecorder,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+        cursorFilePath: freshCursorFile,
+    });
+    const capturedNoCursor = JSON.parse(
+        (await import("node:fs")).readFileSync(join(dir, "captured-args.json"), "utf-8"),
+    ) as string[];
+    check(
+        "a poll with no cursor anywhere omits the --cursor flag",
+        !noCursorResult.error && !capturedNoCursor.includes("--cursor"),
+    );
+
+    // 5d. resolveStartCursorId precedence: in-memory cursor wins over a
+    //     persisted file cursor; a persisted file cursor is used when there is
+    //     no in-memory cursor; and "none" when neither exists.
+    captureAndPersistCursor([{ message_id: "mem-wins" }] as AgentBusCtlWatchRecord[]);
+    const memVsFile = resolveStartCursorId(resumeFile);
+    check(
+        "resolveStartCursorId prefers the in-memory cursor over the file cursor",
+        memVsFile.cursor === "mem-wins" && memVsFile.source === "memory",
+    );
+    clearInMemoryCursor();
+    const fileOnly = resolveStartCursorId(resumeFile);
+    check(
+        "resolveStartCursorId uses the file cursor when no in-memory cursor",
+        fileOnly.cursor === "resume-file-7" && fileOnly.source === "file",
+    );
+    const noneOnly = resolveStartCursorId(freshCursorFile);
+    check(
+        "resolveStartCursorId yields none when no cursor is available",
+        noneOnly.cursor === undefined && noneOnly.source === "none",
+    );
+    // Re-establish a known in-memory cursor for the remaining tests (which rely
+    // on the last captured cursor being bus-1 is not required downstream, but a
+    // definite value keeps later assertions deterministic).
+    captureAndPersistCursor([{ message_id: "bus-1" }] as AgentBusCtlWatchRecord[]);
+
+    // 6. Missing bus URL is an actionable soft error (no access token mention).
+    const noBus = await watchAgentBusOnce({
+        binary: stubMessages,
+        identityStore: join(dir, "ident"),
+    });
+    check("missing bus URL yields a soft error", typeof noBus.error === "string" && /--bus/.test(noBus.error));
+
+    // 7. Missing identity store is an actionable soft error.
+    const noIdent = await watchAgentBusOnce({
+        binary: stubMessages,
+        busUrl: "https://127.0.0.1:18090",
+    });
+    check("missing identity store yields a soft error", typeof noIdent.error === "string" && /--identity/.test(noIdent.error));
+
+    // 8. NO-TIMEOUT: the CLI watch is long-lived by nature, so a stub that takes
+    //    longer than the old (removed) 2s external watchdog would have allowed
+    //    must still be parsed successfully and reported with its messages — not
+    //    killed early with a "timed out" error. There is no watchdog timer
+    //    wrapping the sub-process; shutdown is owned by the caller.
+    const slowBin = join(dir, "ctl-slow");
+    writeFileSync(
+        slowBin,
+        [
+            "#!/usr/bin/env node",
+            `const line = ${JSON.stringify(JSON.stringify({ message_id: "bus-slow", text: "late-arrival" }))};`,
+            'setTimeout(() => { process.stdout.write(line + "\\n"); process.exit(0); }, 60);',
+        ].join("\n"),
+        { mode: 0o755 },
+    );
+    chmodSync(slowBin, 0o755);
+    const slowResult = await watchAgentBusOnce({
+        binary: slowBin,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check(
+        "a watch that completes after the old timeout window is still honored (no watchdog timeout)",
+        !slowResult.error &&
+            Array.isArray(slowResult.body) &&
+            (slowResult.body as AgentBusCtlWatchRecord[]).length === 1 &&
+            slowResult.body[0].text === "late-arrival",
+    );
+
+    // 8b. An unexpected non-zero process exit still surfaces as an error (the
+    //     removed watchdog must not suppress real transport failures).
+    const crashBin = join(dir, "ctl-crash");
+    writeFileSync(
+        crashBin,
+        '#!/usr/bin/env node\nprocess.stderr.write("boom\\n");\nprocess.exit(3);\n',
+        { mode: 0o755 },
+    );
+    chmodSync(crashBin, 0o755);
+    const crashResult = await watchAgentBusOnce({
+        binary: crashBin,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check(
+        "an unexpected process exit is surfaced as an error (not swallowed by a timer)",
+        typeof crashResult.error === "string" && /exit 3/.test(crashResult.error),
+    );
+
+    // 9. resolveAgentBusCtlBinary prefers an explicit AGENT_BUSCTL env and
+    //    falls back to a cwd-relative agent-busctl; never requires a token.
+    const explicitBin = join(dir, "explicit-ctl");
+    writeFileSync(explicitBin, "#!/usr/bin/env node\n", { mode: 0o755 });
+    check("resolveAgentBusCtlBinary honors the AGENT_BUSCTL env var", resolveAgentBusCtlBinary(undefined, explicitBin, dir) === explicitBin);
+    const localBin = join(dir, "agent-busctl");
+    writeFileSync(localBin, "#!/usr/bin/env node\n", { mode: 0o755 });
+    const local = resolveAgentBusCtlBinary(undefined, undefined, dir);
+    check("resolveAgentBusCtlBinary finds a cwd-relative agent-busctl", local === localBin);
+
+    try {
+        rmSync(dir, { recursive: true, force: true });
+    } catch {
+        // best-effort cleanup
+    }
+    for (const key of Object.keys(savedEnv)) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+    }
+
+    if (failures === 0) {
+        console.log("\nAll loop-busctl-read tests passed.");
+        process.exit(0);
+    } else {
+        console.error(`\n${failures} loop-busctl-read test(s) failed.`);
+        process.exit(1);
+    }
+}
+
+main();

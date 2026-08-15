@@ -6,6 +6,22 @@ Send coordination messages or retrieve Agent Bus status and handoff feeds with
 Bearer authentication. Use it to announce work before acting and to report
 verification results afterwards.
 
+> **Loop-mode polling does NOT use this tool.** Loop-mode Agent Bus reads (the
+> pre-planning poll, between-step polls, and the idle loop) shell out to the
+> `agent-busctl` CLI (`loop-busctl-read.ts`) and authenticate with the enrolled
+> identity via `--bus` + `--identity` — **no `AGENT_BUS_ACCESS_TOKEN`** is
+> required there. This `AgentBus` tool is a general authenticated HTTP client
+> for explicit send/status calls that choose to use a Bearer token.
+>
+> **Loop-mode `watch` cursor resume (no timeout).** Each loop-mode poll is a
+> fresh `agent-busctl watch` with **no external watchdog timeout** (the CLI watch
+> is long-lived by nature; shutdown is owned by the caller). To keep reads moving
+> forward, `loop-busctl-read.ts` captures the last message's `message_id` as a
+> cursor, persists it to the git-ignored `bus-cursor.json` state file, and passes
+> it back on the **next** poll via the CLI's `--cursor <id>` flag (omitted when no
+> cursor exists yet). The CLI accepts `--cursor` without any access token — only
+> `--bus` + `--identity` are needed.
+
 ## When to use
 
 Use `AgentBus` to announce work, report blockers or verification results, and
@@ -63,9 +79,11 @@ enrolled defaults.
 - Read with `loadAgentBusLocalConfig`: a missing or malformed store is treated as "no
   defaults" rather than failing the call, so the client stays usable when everything is
   configured via the environment.
-- Only the non-secret `busUrl` and `agentId` keys are read; secrets are never read from or
-  written to this file.
-- The tool never reads `data.json` or any secret store; it reads only the two non-secret
+- Only the non-secret `busUrl`, `agentId`, and `identityStore` keys are read; secrets are
+  never read from or written to this file. `identityStore` is read solely to make the
+  "missing access token" error actionable — it is the path of the `agent-busctl` identity
+  store that owns the bearer, and it is never opened or read for the credential itself.
+- The tool never reads `data.json` or any secret store; it reads only the non-secret
   roster keys above.
 
 **Never commit `.agent-bus.local`.** It is added to `.gitignore`; keep it out of the
@@ -86,9 +104,10 @@ reveals enrollment layout and should stay local and mode 0600.
 }
 ```
 
-`AgentBus` reads only the `busUrl` and `agentId` fields (accepting the synonymous keys
-`bus_url`/`bus` and `agent_id`/`id`). It never reads `data.json` or any secret store for
-these defaults.
+`AgentBus` reads non-secret `busUrl` and `agentId` fields (accepting the synonymous keys
+`bus_url`/`bus` and `agent_id`/`id`), plus `identityStore` (or `identity_store`) to enrich
+the missing-token diagnostic. It never reads `data.json` or any secret store for these
+defaults, and it never follows `identityStore` to read the bearer credential.
 
 ## Zero-configuration use for an enrolled agent
 
