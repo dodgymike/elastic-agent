@@ -133,7 +133,55 @@ async function main(): Promise<void> {
     });
     check("missing identity store yields a soft error", typeof noIdent.error === "string" && /--identity/.test(noIdent.error));
 
-    // 8. resolveAgentBusCtlBinary prefers an explicit AGENT_BUSCTL env and
+    // 8. NO-TIMEOUT: the CLI watch is long-lived by nature, so a stub that takes
+    //    longer than the old (removed) 2s external watchdog would have allowed
+    //    must still be parsed successfully and reported with its messages — not
+    //    killed early with a "timed out" error. There is no watchdog timer
+    //    wrapping the sub-process; shutdown is owned by the caller.
+    const slowBin = join(dir, "ctl-slow");
+    writeFileSync(
+        slowBin,
+        [
+            "#!/usr/bin/env node",
+            `const line = ${JSON.stringify(JSON.stringify({ message_id: "bus-slow", text: "late-arrival" }))};`,
+            'setTimeout(() => { process.stdout.write(line + "\\n"); process.exit(0); }, 60);',
+        ].join("\n"),
+        { mode: 0o755 },
+    );
+    chmodSync(slowBin, 0o755);
+    const slowResult = await watchAgentBusOnce({
+        binary: slowBin,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check(
+        "a watch that completes after the old timeout window is still honored (no watchdog timeout)",
+        !slowResult.error &&
+            Array.isArray(slowResult.body) &&
+            (slowResult.body as AgentBusCtlWatchRecord[]).length === 1 &&
+            slowResult.body[0].text === "late-arrival",
+    );
+
+    // 8b. An unexpected non-zero process exit still surfaces as an error (the
+    //     removed watchdog must not suppress real transport failures).
+    const crashBin = join(dir, "ctl-crash");
+    writeFileSync(
+        crashBin,
+        '#!/usr/bin/env node\nprocess.stderr.write("boom\\n");\nprocess.exit(3);\n',
+        { mode: 0o755 },
+    );
+    chmodSync(crashBin, 0o755);
+    const crashResult = await watchAgentBusOnce({
+        binary: crashBin,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    check(
+        "an unexpected process exit is surfaced as an error (not swallowed by a timer)",
+        typeof crashResult.error === "string" && /exit 3/.test(crashResult.error),
+    );
+
+    // 9. resolveAgentBusCtlBinary prefers an explicit AGENT_BUSCTL env and
     //    falls back to a cwd-relative agent-busctl; never requires a token.
     const explicitBin = join(dir, "explicit-ctl");
     writeFileSync(explicitBin, "#!/usr/bin/env node\n", { mode: 0o755 });

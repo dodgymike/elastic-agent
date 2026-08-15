@@ -256,9 +256,16 @@ const loopBusMessagesPath = process.env.LOOP_BUS_MESSAGES_PATH ?? "/api/v1/messa
  * the bus URL and identity store from the environment or `.agent-bus.local`,
  * and folds any transport failure into a soft "read failed" outcome instead of
  * letting it propagate into the step loop.
+ *
+ * NO-TIMEOUT: `agent-busctl watch` is a long-lived watch by nature, so
+ * `watchAgentBusOnce` applies no external watchdog timeout; shutdown is owned
+ * by the caller (loop mode aborts/kills the run) and unexpected process exits
+ * are still surfaced. The `requestTimeoutMs` value is used only as the CLI's
+ * `--for` watch window (how long it waits for messages before reporting
+ * idle), not as a SIGKILL bound.
  */
-const loopBusRead: AgentBusRead = async ({ timeoutMs }) => {
-    return watchAgentBusOnce({ timeoutMs, watchWindowMs: loopPollTiming.requestTimeoutMs });
+const loopBusRead: AgentBusRead = async () => {
+    return watchAgentBusOnce({ watchWindowMs: loopPollTiming.requestTimeoutMs });
 };
 
 /**

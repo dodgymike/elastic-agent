@@ -197,21 +197,29 @@ export function parseAgentBusCtlWatchOutput(
 }
 
 /**
- * Invoke `agent-busctl watch` once, bounded by `timeoutMs`, and reduce its
- * NDJSON stream to an `AgentBusMessageReadResult` in the loop-poll `read`
- * contract shape (body = flat message array, error set on failure).
+ * Invoke `agent-busctl watch` once and reduce its NDJSON stream to an
+ * `AgentBusMessageReadResult` in the loop-poll `read` contract shape (body =
+ * flat message array, error set on failure).
+ *
+ * NO-TIMEOUT: the CLI watch is long-lived by nature — it keeps streaming until
+ * its `--for` watch window elapses and it emits its closing `ok:false`
+ * object, then exits cleanly. We deliberately do NOT wrap the sub-process in a
+ * Promise.race/child_process watchdog timeout. Shutdown is instead owned by the
+ * caller (loop mode aborts/kills the run), and any unexpected process exit is
+ * surfaced below through the `close`/`error` handlers rather than being masked
+ * by a timer. The `watchWindowMs` option only tunes how long the CLI itself
+ * waits for messages before reporting "idle" (`--for`), which is the CLI's
+ * natural watch bound — not an external timeout that SIGKILLs the stream.
  */
 export async function watchAgentBusOnce(options: {
   binary?: string;
   busUrl?: string;
   identityStore?: string;
-  timeoutMs?: number;
   watchWindowMs?: number;
   root?: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<AgentBusMessageReadResult> {
   const root = options.root ?? process.cwd();
-  const timeoutMs = options.timeoutMs ?? 2_000;
   const watchWindowMs = options.watchWindowMs ?? DEFAULT_WATCH_WINDOW_MS;
   const env = options.env ?? process.env;
 
@@ -253,18 +261,11 @@ export async function watchAgentBusOnce(options: {
     });
     let stdout = "";
     let stderr = "";
+    // No watchdog timer: the CLI watch is long-lived by nature, and shutdown
+    // is owned by the caller. We settle only when the stream ends or the
+    // process exits (unexpected or clean), which keeps errors from an
+    // unexpected process exit visible instead of masking them with a timer.
     let settled = false;
-
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGKILL");
-      resolveResult({
-        body: null,
-        status: 0,
-        error: `Agent Bus read timed out after ${timeoutMs}ms`,
-      });
-    }, timeoutMs);
 
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
@@ -278,7 +279,6 @@ export async function watchAgentBusOnce(options: {
     child.on("error", (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       const reason = error instanceof Error ? error.message : String(error);
       resolveResult({
         body: null,
@@ -290,7 +290,6 @@ export async function watchAgentBusOnce(options: {
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       const { messages, empty } = parseAgentBusCtlWatchOutput(stdout);
       if (messages.length > 0) {
         // Real messages arrived: surface them as the read body.
