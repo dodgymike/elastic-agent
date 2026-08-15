@@ -18,6 +18,8 @@ dist/
 
 # Transient TypeScript test build output.
 test/.ab-enrol-check/
+test/.agent-bus-build/
+test/.agent-bus-enrol-build/
 
 # Agent execution worktrees; keep the staging copies out of the repository.
 .worktrees/
