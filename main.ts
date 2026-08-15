@@ -8,6 +8,8 @@ import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
+import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
+import type { ToolRenderPhase } from "./tool-renderer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -41,6 +43,9 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
+
+const terminalColor = terminalColorEnabled(process.stdout);
+if (!terminalColor) chalk.level = 0;
 
 const program = new Command();
 program
@@ -343,25 +348,34 @@ function buildToolsAvailablePrompt(tools) {
 
 const toolsAvailable = buildToolsAvailablePrompt(tools);
 
-function truncate(value, maxLength = 240) {
-    const text = String(value).replace(/\s+/g, " ").trim();
-    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
-}
-function stringify(value) { try { return JSON.stringify(value); } catch { return String(value); } }
-function toolCallArgumentSummary(argumentsText) {
-    if (typeof argumentsText !== "string" || !argumentsText.trim()) return "";
-    try { return truncate(stringify(JSON.parse(argumentsText)), 160); }
-    catch { return truncate(argumentsText, 160); }
+const TOOL_PHASE_LABEL: Record<ToolRenderPhase, { write: (line: string) => void; label: string }> = {
+    pending: { write: (line) => console.log(line), label: chalk.blue.bold("[TOOL]") },
+    succeeded: { write: (line) => console.log(line), label: chalk.green.bold("[SUCCESS]") },
+    failed: { write: (line) => console.error(line), label: chalk.red.bold("[ERROR]") },
+};
+
+/**
+ * Emit one tool-call phase (pending, succeeded, or failed) through the
+ * tool-specific renderer map. The first rendered line carries the phase's
+ * status label; continuation lines are indented at the same hierarchy level.
+ * Empty renderer output is suppressed entirely.
+ */
+function emitToolPhase(phase: ToolRenderPhase, toolCall, payload) {
+    const lines = renderToolPhase(phase, toolCall, payload, { color: terminalColor });
+    if (lines.length === 0) return;
+    const { write, label } = TOOL_PHASE_LABEL[phase];
+    const prefix = phase === "pending" ? hierarchyIndent("contentInStep") : toolChildIndent;
+    printStatusLine(write, label, lines[0], prefix);
+    for (let index = 1; index < lines.length; index += 1) write(`${prefix}${lines[index]}`);
 }
 function renderToolCallPending(toolCall) {
-    const argumentsSummary = toolCallArgumentSummary(toolCall.arguments);
-    status.tool(`Pending: ${toolCall.name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`, hierarchyIndent("contentInStep"));
+    emitToolPhase("pending", toolCall, undefined);
 }
 function renderToolCallSucceeded(toolCall, result) {
-    status.success(`Succeeded: ${toolCall.name}${result === undefined ? "" : ` → ${truncate(stringify(result), 160)}`}`, toolChildIndent);
+    emitToolPhase("succeeded", toolCall, result);
 }
 function renderToolCallFailed(toolCall, error) {
-    status.error(`Failed: ${toolCall.name}: ${error}`, toolChildIndent);
+    emitToolPhase("failed", toolCall, error);
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
 /**
@@ -811,7 +825,7 @@ function functionCallOutput(toolCall, resultOrError) {
 }
 
 async function executePlanStep(step, index, steps, plan, configData, executionContext) {
-    const color = typeof process.stdout.isTTY === "boolean" && process.stdout.isTTY;
+    const color = terminalColor;
     for (const line of buildPrettyStepLines(index, steps.length, step, { color, remainingSteps: steps.slice(index + 1) })) {
         status.step(line, hierarchyIndent("planStep"));
     }
