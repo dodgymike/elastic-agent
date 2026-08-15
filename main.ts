@@ -12,6 +12,7 @@ import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./to
 import { startToolTimer } from "./tool-timer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, isAbsolute, join } from "node:path";
+import { resolveWorkspaceInit, loadWorkspaceInit, workspaceInitToState, type WorkspaceInit } from "./workspace-init.ts";
 import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
 import Read from "./tools/Read.ts";
@@ -101,6 +102,14 @@ const maxRevisedPlanSteps = 50;
 // attempts so the review step can inspect the staged changes before committing.
 const executionWorktreeBranch = "review-worktree";
 const mainCwd = process.cwd();
+// System initialisation: capture the working directory (pwd) and the canonical
+// (symlink-resolved) path of the starting directory before any agent action
+// that depends on file paths. These values feed CLAUDE.md starting-directory
+// guidance and are provided to the tool classifier as trusted roots. Resolving
+// once here means later process.chdir() calls (e.g. into the review worktree
+// during execution) do not shift what the runtime treats as the authoritative
+// starting directory.
+const workspaceInit: WorkspaceInit = resolveWorkspaceInit(mainCwd);
 let executionWorktreePath: string | null = null;
 let inExecutionPhase = false;
 let activeTaskLifecycle: any = null;
@@ -1343,6 +1352,14 @@ async function main(options: { review?: boolean } = {}): Promise<{ success: bool
     if (!Array.isArray(configData.toolCallTldrs)) configData.toolCallTldrs = [];
     if (!Array.isArray(configData.replanHistory)) configData.replanHistory = [];
     if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
+
+    // System initialisation result is persisted into configData so later steps
+    // (CLAUDE.md starting-directory injection and the tool-classifier trusted
+    // roots) can read it without re-running realpath. Reuse an existing stored
+    // state when present, otherwise record the freshly resolved init.
+    if (!configData.workspaceInit || !configData.workspaceInit.pwd) {
+        configData.workspaceInit = workspaceInitToState(workspaceInit);
+    }
 
     // Resolve Spec Keeper operational defaults once before any planning or
     // execution sync. This loads the local .spec-keeper file (when present) and
