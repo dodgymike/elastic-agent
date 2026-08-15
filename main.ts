@@ -16,6 +16,7 @@ import {
     type LoopReplanBudget,
 } from "./loop-replan.js";
 import { resolveToolSafetyConfig, startDirPathWarning } from "./tool-safety-config.js";
+import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
@@ -1309,18 +1310,14 @@ async function dispatchToolCall(output, configData, goalKey) {
     // failure here fails the call safely instead of running the tool from an
     // unexpected directory. The switch happens before the timer starts so a
     // chdir failure never leaves an instrumented call running.
-    const previousCwd = process.cwd();
     const configuredStartDir = toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
-    let toolCwdChanged = false;
-    if (configuredStartDir !== undefined && previousCwd !== configuredStartDir) {
-        try {
-            process.chdir(configuredStartDir);
-            toolCwdChanged = true;
-        } catch (error) {
-            const message = `Unable to enter --start-dir '${configuredStartDir}': ${error instanceof Error ? error.message : String(error)}`;
-            renderToolCallFailed(output, { error: message });
-            return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
-        }
+    let toolCwdSwitch: ReturnType<typeof switchToStartDir>;
+    try {
+        toolCwdSwitch = switchToStartDir(configuredStartDir);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        renderToolCallFailed(output, { error: message });
+        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
     }
 
     const timer = startToolTimer({ prefix: toolChildIndent, color: terminalColor });
@@ -1344,9 +1341,7 @@ async function dispatchToolCall(output, configData, goalKey) {
         renderToolCallFailed(output, toolResponse);
         return { output, toolArguments, toolResponse, errorMessage: message };
     } finally {
-        if (toolCwdChanged) {
-            process.chdir(previousCwd);
-        }
+        restoreStartDir(toolCwdSwitch);
     }
 }
 
