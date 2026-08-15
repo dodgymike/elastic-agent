@@ -181,6 +181,47 @@ identity is unavailable the read fails **soft** (a `[WARNING]`, then normal
 startup) exactly as an unreachable bus did before. There is no bearer-token
 availability gate.
 
+### Long-lived watch — no external poll timeout
+
+`agent-busctl watch` is a **long-lived watch by nature**: it keeps streaming
+(and, on a busy bus, re-delivering) until it is stopped. `watchAgentBusOnce`
+therefore applies **no external watchdog / child-process timeout** — there is no
+`Promise.race` or `child_process` `timeout` wrapping the CLI. This "removed
+bus-poll timeout" is a deliberate contract:
+
+- The `LOOP_POLL_REQUEST_TIMEOUT_MS` value tunes only the CLI's own `--for`
+  watch window (how long a single poll waits for messages before reporting
+  idle) — it is **not** a SIGKILL bound on the stream.
+- Shutdown is owned by the caller: loop mode aborts/kills the run (Ctrl-C /
+  SIGTERM routes through the normal abort handler), and the sub-process is
+  allowed to live as long as the run needs it.
+- Errors from an **unexpected process exit** are still surfaced (through the
+  `close`/`error` handlers) rather than being masked by a timer.
+
+### Cursor resume across polls
+
+Each loop-mode poll is a fresh `agent-busctl watch` of the bus feed. To keep
+reads moving **forward** instead of re-delivering the retained window, the loop
+tracks a **cursor id** (the `message_id` each watch record carries, or its
+`seq`):
+
+- After a poll that receives messages, `watchAgentBusOnce` captures the last
+  message's cursor id, keeps it in-process via `getLastCursorId()`, and persists
+  it to a **git-ignored** loop-mode state file, `bus-cursor.json` (alongside
+  `bus-queue.json`), via `saveCursor` / `loadCursor`. This is a non-secret
+  position token only — never a secrets store and never `data.json`.
+- Before the **next** poll (pre-planning, between-step, or idle),
+  `resolveStartCursorId` resolves the cursor to resume from — in-process first,
+  then the persisted file — and passes it back to the CLI as
+  `--cursor <id>`. When no cursor exists yet (a normal first run) the flag is
+  omitted and the watch starts naturally.
+- The `agent-busctl` CLI accepts `--cursor` without any access token; the
+  working example needs only `--bus` + `--identity`.
+
+The cursor is an at-least-once position: killing a watch mid-batch re-delivers
+that batch on restart, so loop mode's handlers stay idempotent (dedupe on
+`message_id`) exactly as the CLI documents.
+
 ---
 
 ## Idle listening between plans

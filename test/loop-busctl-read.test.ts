@@ -14,6 +14,7 @@
  */
 import {
     captureAndPersistCursor,
+    clearInMemoryCursor,
     defaultBusCursorFilePath,
     extractCursorId,
     getLastCursorId,
@@ -21,6 +22,7 @@ import {
     loadCursor,
     parseAgentBusCtlWatchOutput,
     resolveAgentBusCtlBinary,
+    resolveStartCursorId,
     saveCursor,
     watchAgentBusOnce,
     type AgentBusCtlWatchRecord,
@@ -198,6 +200,110 @@ async function main(): Promise<void> {
             (messagesResult.body as AgentBusCtlWatchRecord[]).length === 1 &&
             messagesResult.body[0].text === "plan-change",
     );
+
+    // 5a. CURSOR RESUME — in-memory cursor: after a poll that captured a cursor
+    //     id in memory (getLastCursorId()), the NEXT poll must pass `--cursor
+    //     <id>` to `agent-busctl watch` so it resumes rather than re-reading the
+    //     retained window. A stub that records its argv proves the flag is
+    //     supplied. The in-memory cursor was set to "bus-1" by test 5 above.
+    const argvRecorder = join(dir, "ctl-argv-capture");
+    writeFileSync(
+        argvRecorder,
+        [
+            "#!/usr/bin/env node",
+            "const fs = require('node:fs');",
+            `fs.writeFileSync(${JSON.stringify(join(dir, "captured-args.json"))}, JSON.stringify(process.argv.slice(2)));`,
+            // Emit the bounded-watch empty failure object so the read is a clean
+            // "no messages" outcome (not a soft transport error) while the real
+            // signal under test is the captured argv (--cursor flag).
+            `process.stdout.write(${JSON.stringify(JSON.stringify({ ok: false, kind: "empty", exit_code: 8 }))} + "\\n");`,
+            "process.exit(8);",
+        ].join("\n"),
+        { mode: 0o755 },
+    );
+    chmodSync(argvRecorder, 0o755);
+    // Reset to a known in-memory cursor for an unambiguous assertion.
+    captureAndPersistCursor([{ message_id: "resume-42" }] as AgentBusCtlWatchRecord[]);
+    const resumeResult = await watchAgentBusOnce({
+        binary: argvRecorder,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+    });
+    const capturedArgs = JSON.parse(
+        (await import("node:fs")).readFileSync(join(dir, "captured-args.json"), "utf-8"),
+    ) as string[];
+    check(
+        "subsequent poll passes --cursor with the in-memory cursor id",
+        !resumeResult.error &&
+            capturedArgs.includes("--cursor") &&
+            capturedArgs[capturedArgs.indexOf("--cursor") + 1] === "resume-42",
+    );
+
+    // 5b. CURSOR RESUME — persisted cursor file: with NO in-memory cursor but a
+    //     cursorFilePath that holds a saved cursor, the poll loads it and passes
+    //     `--cursor <id>`. A missing file yields NO --cursor flag (first run).
+    //     Reset the in-memory cursor to undefined to isolate the file source.
+    clearInMemoryCursor();
+    const resumeFile = join(dir, "resume-cursor.json");
+    saveCursor(resumeFile, "resume-file-7");
+    const resumeFileResult = await watchAgentBusOnce({
+        binary: argvRecorder,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+        cursorFilePath: resumeFile,
+    });
+    const capturedFromFile = JSON.parse(
+        (await import("node:fs")).readFileSync(join(dir, "captured-args.json"), "utf-8"),
+    ) as string[];
+    check(
+        "a poll with a persisted cursor file passes --cursor from the file",
+        !resumeFileResult.error &&
+            capturedFromFile.includes("--cursor") &&
+            capturedFromFile[capturedFromFile.indexOf("--cursor") + 1] === "resume-file-7",
+    );
+
+    // 5c. CURSOR RESUME — no cursor anywhere: when neither an in-memory cursor
+    //     nor a persisted cursor exists, the poll must NOT pass --cursor.
+    clearInMemoryCursor();
+    const freshCursorFile = join(dir, "fresh-cursor.json"); // does not exist -> no cursor
+    const noCursorResult = await watchAgentBusOnce({
+        binary: argvRecorder,
+        busUrl: "https://127.0.0.1:18090",
+        identityStore: join(dir, "ident"),
+        cursorFilePath: freshCursorFile,
+    });
+    const capturedNoCursor = JSON.parse(
+        (await import("node:fs")).readFileSync(join(dir, "captured-args.json"), "utf-8"),
+    ) as string[];
+    check(
+        "a poll with no cursor anywhere omits the --cursor flag",
+        !noCursorResult.error && !capturedNoCursor.includes("--cursor"),
+    );
+
+    // 5d. resolveStartCursorId precedence: in-memory cursor wins over a
+    //     persisted file cursor; a persisted file cursor is used when there is
+    //     no in-memory cursor; and "none" when neither exists.
+    captureAndPersistCursor([{ message_id: "mem-wins" }] as AgentBusCtlWatchRecord[]);
+    const memVsFile = resolveStartCursorId(resumeFile);
+    check(
+        "resolveStartCursorId prefers the in-memory cursor over the file cursor",
+        memVsFile.cursor === "mem-wins" && memVsFile.source === "memory",
+    );
+    clearInMemoryCursor();
+    const fileOnly = resolveStartCursorId(resumeFile);
+    check(
+        "resolveStartCursorId uses the file cursor when no in-memory cursor",
+        fileOnly.cursor === "resume-file-7" && fileOnly.source === "file",
+    );
+    const noneOnly = resolveStartCursorId(freshCursorFile);
+    check(
+        "resolveStartCursorId yields none when no cursor is available",
+        noneOnly.cursor === undefined && noneOnly.source === "none",
+    );
+    // Re-establish a known in-memory cursor for the remaining tests (which rely
+    // on the last captured cursor being bus-1 is not required downstream, but a
+    // definite value keeps later assertions deterministic).
+    captureAndPersistCursor([{ message_id: "bus-1" }] as AgentBusCtlWatchRecord[]);
 
     // 6. Missing bus URL is an actionable soft error (no access token mention).
     const noBus = await watchAgentBusOnce({

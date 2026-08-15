@@ -12,6 +12,15 @@ verification results afterwards.
 > identity via `--bus` + `--identity` — **no `AGENT_BUS_ACCESS_TOKEN`** is
 > required there. This `AgentBus` tool is a general authenticated HTTP client
 > for explicit send/status calls that choose to use a Bearer token.
+>
+> **Loop-mode `watch` cursor resume (no timeout).** Each loop-mode poll is a
+> fresh `agent-busctl watch` with **no external watchdog timeout** (the CLI watch
+> is long-lived by nature; shutdown is owned by the caller). To keep reads moving
+> forward, `loop-busctl-read.ts` captures the last message's `message_id` as a
+> cursor, persists it to the git-ignored `bus-cursor.json` state file, and passes
+> it back on the **next** poll via the CLI's `--cursor <id>` flag (omitted when no
+> cursor exists yet). The CLI accepts `--cursor` without any access token — only
+> `--bus` + `--identity` are needed.
 
 ## When to use
 

@@ -17,7 +17,7 @@ import {
     initialLoopReplanBudget,
     type LoopReplanBudget,
 } from "./loop-replan.js";
-import { watchAgentBusOnce } from "./loop-busctl-read.js";
+import { defaultBusCursorFilePath, watchAgentBusOnce } from "./loop-busctl-read.js";
 import { resolveToolSafetyConfig } from "./tool-safety-config.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
@@ -236,6 +236,17 @@ const loopPollTiming = resolveLoopPollTiming();
 const loopQueueFilePath = defaultBusQueueFilePath(mainCwd);
 
 /**
+ * The loop-mode bus cursor state file path: `bus-cursor.json` in the project
+ * root (git-ignored, alongside `bus-queue.json`). Each poll that receives
+ * messages persists the last message's cursor id here, and the next poll
+ * resumes from it (or from the in-process cursor) so a restart — or the next
+ * pre-planning/between-step/idle poll — keeps reading forward instead of
+ * re-delivering the retained window. Never a secrets store and never
+ * `data.json`; see loop-busctl-read.ts.
+ */
+const loopBusCursorFilePath = defaultBusCursorFilePath(mainCwd);
+
+/**
  * Feed path read from the Agent Bus during loop mode. The default is the
  * deployment's messages route; operators may override it via
  * `LOOP_BUS_MESSAGES_PATH`.
@@ -265,7 +276,16 @@ const loopBusMessagesPath = process.env.LOOP_BUS_MESSAGES_PATH ?? "/api/v1/messa
  * idle), not as a SIGKILL bound.
  */
 const loopBusRead: AgentBusRead = async () => {
-    return watchAgentBusOnce({ watchWindowMs: loopPollTiming.requestTimeoutMs });
+    // cursorFilePath: enables cursor RESUME — after a poll that receives
+    // messages, the last message's cursor id is persisted to bus-cursor.json
+    // and the next poll (pre-planning, between-step, or idle) passes it back
+    // via `--cursor` so reads keep moving forward across restarts. When no
+    // cursor exists yet (a first run), no --cursor flag is passed and the
+    // watch starts naturally. See loop-busctl-read.ts resolveStartCursorId.
+    return watchAgentBusOnce({
+        watchWindowMs: loopPollTiming.requestTimeoutMs,
+        cursorFilePath: loopBusCursorFilePath,
+    });
 };
 
 /**
