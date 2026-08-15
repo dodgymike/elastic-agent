@@ -216,16 +216,18 @@ const tools = [
     {
         type: "function", name: "Edit",
         usage_prompt: "tools/edit-usage.md",
-        description: "Edit a file in place using replacement operations. Provide the read_hash returned by the last Read (or Write/Edit) of this file so an edit only applies when the file is unchanged. Pass either a single { old_string, new_string } replacement or an ordered edits array; each old_string must appear exactly once.",
+        description: "Edit a file in place using replacement operations. Provide the read_hash returned by the last Read (or Write/Edit) of this file so an edit only applies when the file is unchanged. Use either string replacement (a single old_string/new_string pair or an ordered edits array, each old_string appearing exactly once) or line-range mode (line_range plus content replaces exactly those inclusive 1-based lines).",
         parameters: {
             type: "object",
             properties: {
                 path: { type: "string" }, read_hash: { type: "string" },
                 old_string: { type: "string" }, new_string: { type: "string" },
                 edits: { type: "array", items: { type: "object", properties: { old_string: { type: "string" }, new_string: { type: "string" } }, required: ["old_string", "new_string"] } },
+                line_range: { type: "string", description: "Optional inclusive 1-based line range such as '100-200' (or '100' for a single line). Use with content to replace exactly those lines. Cannot be combined with old_string/new_string/edits." },
+                content: { type: "string", description: "Replacement text for line_range mode. Use an empty string to delete the selected lines. Valid only together with line_range." },
             }, required: ["path", "read_hash"],
         },
-        exec_handler: ({ path, read_hash, old_string, new_string, edits }) => Edit({ path, read_hash, old_string, new_string, edits }),
+        exec_handler: ({ path, read_hash, old_string, new_string, edits, line_range, content }) => Edit({ path, read_hash, old_string, new_string, edits, line_range, content }),
     },
     {
         type: "function", name: "Http",
