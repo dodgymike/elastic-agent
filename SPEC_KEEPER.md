@@ -92,12 +92,146 @@ and the resolved secret store for credentials.
 4. **During work**, keep task status and relevant plan/decision records current in Spec Keeper. Record blockers and handoff information promptly.
 5. **After verification**, update the server record with the outcome, evidence, changed files, follow-up work, and final status. Do not mark work complete until verification has succeeded.
 
+## Task-mode CLI (`--task-id`)
+
+The agent can start from an existing Spec Keeper task instead of a free-form
+prompt. Task mode fetches the task by id, claims it, and uses the normalized
+work order (id, title, description, acceptance criteria, status, and related
+epic) as the input for the normal plan-then-execute or direct execution flow.
+
+### Running task mode
+
+Build first, then run `dist/main.js`:
+
+```bash
+npm run build
+node --env-file-if-exists=.env dist/main.js --task-id EA-42
+```
+
+Or through the npm start script:
+
+```bash
+npm start -- --task-id EA-42
+```
+
+`--task-id` accepts a task key or `public_id` made of URL-safe characters
+(letters, numbers, `.`, `_`, and `-`; it must start with a letter or number).
+Examples: `EA-42`, `TASK-7`, or a UUID public_id.
+
+Argument rules:
+
+- `<prompt>` and `--task-id` are mutually exclusive; supplying both is a usage
+  error.
+- Omitting both is a usage error.
+- A missing, empty, or malformed `--task-id` is a usage error.
+
+Usage errors print the exact problem and exit with status 1 before any runtime
+work starts. Other options still apply in task mode: `--review` runs the
+review stage after execution, and `--provider <provider-id>` overrides
+`LLM_PROVIDER`.
+
+### Required Spec Keeper configuration
+
+Task mode uses the same project-scoped SpecKeeper client as the rest of the
+agent:
+
+- **Project and API base**: resolved by `specKeeperConfig.ts` from
+  `.spec-keeper`, then `SPEC_KEEPER_PROJECT_SLUG` / `SPEC_KEEPER_API_BASE`,
+  then the documented built-in defaults (`elastic-agent`,
+  `https://api.spec.elasticninja.com`).
+- **Credentials**: loaded from the local secret store (`.spec.local.json`, or
+  the path named by `SPEC_KEEPER_CONFIG_PATH` or `.spec-keeper`
+  `credentialStore`). The store must contain the Cognito username, password,
+  region, and client ID so the tool can mint a short-lived access token.
+- `.spec-keeper` is non-secret and safe to commit; it must never contain
+  tokens, passwords, or client IDs.
+
+Task mode calls `GET /api/v1/projects/<projectSlug>/tasks/<task-id>` and then
+`PATCH /api/v1/projects/<projectSlug>/tasks/<task-id>`. If project
+configuration or credentials are missing or invalid, task mode fails with a
+clear configuration diagnostic and exits with status 1.
+
+### Lifecycle update behavior
+
+Once the task is fetched, task mode keeps that same Spec Keeper task current as
+the work advances. All updates use the project-scoped routes
+`/api/v1/projects/<projectSlug>/tasks/<task-id>` and
+`/api/v1/projects/<projectSlug>/tasks/<task-id>/notes`.
+
+1. **Claim**: task mode checks the fetched status and fails closed when the
+   task is already claimed (`in_progress`, `claimed`, `assigned`, review
+   states), terminal or blocked (`done`, `completed`, `cancelled`, `closed`,
+   `blocked`, `on_hold`, ...), or has an unknown status. A claimable task
+   (`todo`, `open`, `backlog`, `ready`, `new`, `unassigned`, `unclaimed`,
+   `not_started`, ...) transitions to `in_progress` via PATCH, and the claim
+   result is recorded as a task note.
+2. **Plan produced**: PATCH status `in_progress` with a status note, plus a
+   progress note.
+3. **Execution started / step completed / checks run**: progress notes are
+   posted at each meaningful point.
+4. **Review completed**: on a passing review the task is finalized as
+   completed with review and commit evidence; on a failing review it is marked
+   blocked or failed with the review reasons.
+5. **Completed**: PATCH status `done`, a completion note, and a proof artifact
+   containing commit or test evidence. When the deployed schema does not
+   support a proof field, the proof is attached as a note instead.
+6. **Failed**: PATCH status `blocked` (or `failed`) with a bounded diagnostic,
+   a note, and a diagnostic proof artifact.
+
+Progress note, status update, and proof attachment failures are best-effort:
+they are surfaced as `[WARNING]` diagnostics and never abort the run. Fetch
+and claim failures are fatal and stop the run before execution.
+
+### Failure behavior and exit codes
+
+- **Usage errors** (missing/malformed `--task-id`, no prompt and no
+  `--task-id`, or prompt plus `--task-id`): usage diagnostic, exit status 1.
+- **Fetch failures** (not found, configuration, permission, network, or an
+  unrecognized response): `[ERROR] Task mode could not be started: ...`, exit
+  status 1.
+- **Claim failures** (already claimed, not claimable, unknown status, or a
+  server-side 409/423 conflict): fail closed with a clear diagnostic, exit
+  status 1. There is no CLI `forceClaim` option.
+- **Execution failures**: the task is marked blocked or failed with a bounded
+  diagnostic and the process exits with status 1.
+- **Final update failures**: emitted as `[WARNING]` diagnostics; they never
+  change the CLI exit code because the run outcome has already been decided.
+
+The CLI exits 0 only when task mode completed successfully (or review passed
+when `--review` is used).
+
+### Examples
+
+```bash
+# Claim and execute an existing task
+node --env-file-if-exists=.env dist/main.js --task-id EA-42
+
+# Task mode with the review stage
+node --env-file-if-exists=.env dist/main.js --task-id EA-42 --review
+
+# Prompt mode (unchanged)
+node --env-file-if-exists=.env dist/main.js "Refactor the worktree cleanup"
+
+# Invalid: prompt and --task-id together
+node --env-file-if-exists=.env dist/main.js "do work" --task-id EA-42
+# -> Usage: <prompt> and --task-id cannot be used together...
+#    exit status 1
+
+# Invalid: missing --task-id value or no input at all
+node --env-file-if-exists=.env dist/main.js --task-id
+node --env-file-if-exists=.env dist/main.js
+# -> usage diagnostic; exit status 1
+```
+
 ## Verification
 
 Run `npm run test:spec-keeper-config` and `npm run test:spec-keeper-routes`
 after changing config or route handling, plus
 `npm run test:spec-keeper-epic-flow` and `npm run test:spec-keeper-task-flow`
-for the sync flows. Manual/dry-run output must include a startup line such as:
+for the sync flows. Run `npm run test:spec-keeper-task-mode` after changing
+task-mode CLI parsing, fetch, claim, prompt seeding, lifecycle updates, or
+completion/failure handling. Manual/dry-run output must include a startup line
+such as:
 
     [SPEC KEEPER] defaults loaded: projectSlug=elastic-agent (source: spec-keeper), apiBase=https://api.spec.elasticninja.com (source: spec-keeper), credentialStore=.spec.local.json (source: spec-keeper)
 
