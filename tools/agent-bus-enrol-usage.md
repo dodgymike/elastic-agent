@@ -49,6 +49,51 @@ On success the tool also writes `.agent-bus.local` (mode 0600) with only
 non-secret metadata: `busUrl`, `busFingerprint`, `agentId`, `name`,
 `identityStore`, and `enrolledAt`.
 
+## Invite format
+
+The invite is an operator-minted, **single-use** bearer credential in a JSON file named
+`agent-bus-invite-*.json` (default discovery requires exactly one such file in the repo
+root). Recognized fields across the common synonyms:
+
+- Bus URL — `url`, `busUrl`, or `bus` (required).
+- TLS certificate fingerprint of the bus — `fingerprint` or `busFingerprint`
+  (required; must be 64 lowercase hex characters).
+- Enrollment/bearer credential — `token` or `invite` (required; consumed by
+  `agent-busctl`, never read into the tool output or store).
+- Agent name — `name` or `agentName` (optional; used as the default `--name`).
+- Expiry — `expiresAt`, `expiry`, or numeric `exp` (optional).
+
+```json
+{
+  "url": "https://bus.example.com",
+  "fingerprint": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "token": "<single-use-bearer-credential>",
+  "name": "planner"
+}
+```
+
+## Validation rules
+
+The tool validates the invite before running `agent-busctl` and aborts without writing
+anything on failure:
+
+- The file must be valid JSON containing a JSON object.
+- The path must resolve inside the workspace root; an explicit `inviteFile` cannot point
+  outside the repo.
+- The path must not name the runtime's protected data store (`data.json`) or the roster
+  (`.agent-bus.local`); those are never read as invites.
+- The bus URL, fingerprint, and credential fields must all be present.
+- The fingerprint must be exactly 64 lowercase hex characters.
+- The URL/fingerprint must not contain control characters.
+- If an expiry is provided, it must be a valid future date/time; an expired invite is
+  refused.
+- A name must resolve (from `name` option or the invite's `name`/`agentName`); otherwise
+  the tool refuses rather than guessing.
+- Default discovery refuses when zero or multiple `agent-bus-invite-*.json` files exist.
+
+On any validation failure the tool throws an actionable `Error` and does **not** write
+`.agent-bus.local`.
+
 ## Formatted terminal output
 
 The runtime first announces the call as `AgentBusEnrol(...)`. While the
