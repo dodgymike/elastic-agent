@@ -17,10 +17,7 @@ import {
     initialLoopReplanBudget,
     type LoopReplanBudget,
 } from "./loop-replan.js";
-import {
-    missingTokenPollDiagnostic,
-    resolveAgentBusTokenAvailability,
-} from "./loop-bus-guard.js";
+import { watchAgentBusOnce } from "./loop-busctl-read.js";
 import { resolveToolSafetyConfig } from "./tool-safety-config.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
@@ -246,24 +243,22 @@ const loopQueueFilePath = defaultBusQueueFilePath(mainCwd);
 const loopBusMessagesPath = process.env.LOOP_BUS_MESSAGES_PATH ?? "/api/v1/messages";
 
 /**
- * Wrap the real AgentBus client so it satisfies the `AgentBusRead` contract
- * used by pollLoopBusOnce: a bounded single GET of the messages route that
- * normalizes success/transport failure into a non-throwing result (the bus
- * client itself may throw when unconfigured — we capture that as a soft
- * "read failed" outcome instead of letting it propagate into the step loop).
+ * Wrap the `agent-busctl watch` shell-out so it satisfies the `AgentBusRead`
+ * contract used by pollLoopBusOnce: a single bounded read of the Agent Bus
+ * feed that normalizes success/transport failure into a non-throwing result.
+ *
+ * This deliberately does NOT use the raw authenticated HTTP client
+ * (`tools/AgentBus.ts`), which required a bearer credential
+ * (`options.accessToken` / `AGENT_BUS_ACCESS_TOKEN`). The real Agent Bus
+ * authenticates through the enrolled identity held by `agent-busctl` and
+ * driven with `--bus` and `--identity` — no access token is involved (see
+ * loop-busctl-read.ts). `watchAgentBusOnce` shells out to that CLI, resolves
+ * the bus URL and identity store from the environment or `.agent-bus.local`,
+ * and folds any transport failure into a soft "read failed" outcome instead of
+ * letting it propagate into the step loop.
  */
-const loopBusRead: AgentBusRead = async ({ path, timeoutMs }) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        const result = await AgentBus({ path, method: "GET" });
-        return { body: result.body, status: result.status };
-    } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return { body: null, status: 0, error: reason };
-    } finally {
-        clearTimeout(timer);
-    }
+const loopBusRead: AgentBusRead = async ({ timeoutMs }) => {
+    return watchAgentBusOnce({ timeoutMs, watchWindowMs: loopPollTiming.requestTimeoutMs });
 };
 
 /**
@@ -335,25 +330,15 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
  * distinct helper from `pollLoopBusBetweenSteps` (which only returns a boolean)
  * because the caller needs the message object itself to seed the prompt.
  *
- * Token-availability guard: this pre-planning poll runs before planning begins,
- * which is before any later enrollment/initialization step that provisions the
- * bearer credential. To avoid a startup-time "Agent Bus needs
- * options.accessToken…" failure (transport failures here would otherwise be a
- * soft no-op), we check availability *before* reading the bus. When no bearer
- * credential is available we skip the poll entirely and emit exactly ONE clear,
- * actionable diagnostic (naming the identity store from `.agent-bus.local` and
- * directing the operator to export `AGENT_BUS_ACCESS_TOKEN`). Fail-safe:
- * startup continues without a prior bus message — the same behavior as an idle
- * or unreachable bus. The diagnostic never contains the token value.
+ * No bearer-token gate: this poll goes through `loopBusRead`, which shells out
+ * to the `agent-busctl` CLI (see loop-busctl-read.ts). Authentication is
+ * handled by the enrolled identity (`--bus` + `--identity`), so no
+ * `AGENT_BUS_ACCESS_TOKEN` (or per-call accessToken) is required. When the CLI
+ * is unavailable or the bus is unreachable the read fails soft (yields
+ * `undefined`) exactly like an idle or unreachable bus.
  */
 async function pollAgentBus(): Promise<{ text?: string } | undefined> {
     if (!options.loop) return undefined;
-
-    const tokenAvailability = resolveAgentBusTokenAvailability();
-    if (!tokenAvailability.available) {
-        status.warning(missingTokenPollDiagnostic(tokenAvailability), hierarchyIndent("plan"));
-        return undefined;
-    }
 
     const planId = runMode.mode === "task" ? runMode.taskId : undefined;
     const result = await pollLoopBusOnce({

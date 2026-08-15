@@ -6,6 +6,13 @@ Send coordination messages or retrieve Agent Bus status and handoff feeds with
 Bearer authentication. Use it to announce work before acting and to report
 verification results afterwards.
 
+> **Loop-mode polling does NOT use this tool.** Loop-mode Agent Bus reads (the
+> pre-planning poll, between-step polls, and the idle loop) shell out to the
+> `agent-busctl` CLI (`loop-busctl-read.ts`) and authenticate with the enrolled
+> identity via `--bus` + `--identity` — **no `AGENT_BUS_ACCESS_TOKEN`** is
+> required there. This `AgentBus` tool is a general authenticated HTTP client
+> for explicit send/status calls that choose to use a Bearer token.
+
 ## When to use
 
 Use `AgentBus` to announce work, report blockers or verification results, and

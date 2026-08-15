@@ -154,33 +154,32 @@ than crashing a step boundary. During the idle wait an unreachable bus is a
 soft no-op: loop mode keeps polling instead of crashing, so a temporarily
 unavailable bus never kills the agent.
 
-### Pre-planning poll and the launch token requirement
+### Pre-planning poll and authentication (no access token required)
 
 In addition to the between-step and idle polls, loop mode performs **one**
 non-blocking Agent Bus poll before planning begins (in `main.ts`,
 `pollAgentBus`) so a coordination message that arrived before startup becomes
-the plan's work order instead of being queued. That poll runs before any later
-enrollment/initialization step that may provision the credential, so **the
-bearer token must be available at launch** for it to succeed.
+the plan's work order instead of being queued.
 
-The credential must come from the environment (`AGENT_BUS_ACCESS_TOKEN`) or a
-per-call `accessToken`; it is **never** stored in `.agent-bus.local` (which
-carries only non-secret metadata such as the bus URL and identity). Launch loop
-mode with the token exported:
+Every loop-mode bus read — the pre-planning poll, the between-step polls, and
+the idle loop — goes through `loopBusRead`, which shells out to the
+`agent-busctl` CLI (`loop-busctl-read.ts`, `watchAgentBusOnce`) instead of using
+a raw authenticated HTTP client. Authentication is handled by the **enrolled
+identity** the CLI reads from its credential store, driven with `--bus` and
+`--identity`. **No `AGENT_BUS_ACCESS_TOKEN` (or per-call `accessToken`) is
+required.** The CLI is invoked like:
 
 ```sh
-export AGENT_BUS_ACCESS_TOKEN="$(agent-busctl credential ...)"  # your secret manager
-elastic-agent --loop "implement the payment retry"
+./agent-busctl --bus https://127.0.0.1:18090 --identity tmp/elastic-identity/ watch --for 600ms --json
 ```
 
-When the token is not available at the pre-planning poll, the runtime does not
-fail. It **skips** that single pre-planning poll and emits exactly ONE
-actionable `[WARNING]` — naming the identity store from `.agent-bus.local` (when
-enrolled) and directing you to export `AGENT_BUS_ACCESS_TOKEN` — then continues
-normal startup. This keeps the failure mode the same as an idle or unreachable
-bus (fail **open**), so a missing pre-planning credential never blocks the run;
-it just means no prior bus message is used as the work order. The warning never
-contains the token value.
+The bus URL and identity store resolve from `AGENT_BUS_URL`/`AGENT_BUS_BASE_URL`
+and `AGENT_BUS_IDENTITY`, then from the non-secret `.agent-bus.local` roster
+(the enrolled `busUrl` and `identityStore`). An empty bounded watch ("no
+messages arrived") is a normal idle outcome, not an error; if the CLI, bus, or
+identity is unavailable the read fails **soft** (a `[WARNING]`, then normal
+startup) exactly as an unreachable bus did before. There is no bearer-token
+availability gate.
 
 ---
 
@@ -261,6 +260,7 @@ finishes or aborts.
 | Between-step poll | `loop-poll.ts` | `main.ts` |
 | Idle listening loop | `loop-poll.ts` | `main.ts` (`runAgentReplanLoop`) |
 | Re-plan prompt + safety | `loop-replan.ts` | `main.ts` |
+| Bus read via agent-busctl | `loop-busctl-read.ts` | `main.ts` (`loopBusRead`) |
 
 ## Tests
 
@@ -271,12 +271,13 @@ Agent Bus is mocked — no network is touched):
 - `npm run test:loop-queue`
 - `npm run test:loop-poll`
 - `npm run test:loop-replan`
-- `npm run test:loop-bus-guard`
+- `npm run test:loop-busctl-read`
 
 They cover classification of relevant vs. queued messages, queue save/load,
 restart draining (including the fail-safe undrained tail), re-plan invocation
 on a relevant message, the idle-loop primitive
 (`pollLoopBusUntilMessage`: waiting for a relevant message, respecting the
-idle-poll cap, and stopping on abort), and the pre-planning token-availability
-guard (`test:loop-bus-guard`: a missing token skips the poll with an actionable
-diagnostic; a valid mock token lets the first poll succeed before planning).
+idle-poll cap, and stopping on abort), and the `agent-busctl` read
+(`test:loop-busctl-read`: NDJSON parsing, an empty watch as a normal idle
+outcome, missing bus/identity soft errors, and roster resolution — with **no
+`AGENT_BUS_ACCESS_TOKEN` anywhere**).
