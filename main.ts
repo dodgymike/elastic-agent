@@ -6,7 +6,7 @@ import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
-import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary } from "./worktree.js";
+import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -39,6 +39,7 @@ import type { TaskWorkOrder } from "./specKeeperTaskFetch.ts";
 import { claimSpecKeeperTask, describeClaimedSpecKeeperTask } from "./specKeeperTaskClaim.ts";
 import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperTaskPrompt.ts";
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
+import { completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
 
 const program = new Command();
@@ -93,6 +94,7 @@ const executionWorktreeBranch = "review-worktree";
 const mainCwd = process.cwd();
 let executionWorktreePath: string | null = null;
 let inExecutionPhase = false;
+let activeTaskLifecycle: any = null;
 // Prompts are loaded from external files under /elastic-agent/prompts/
 // (relative to the process working directory, which is the repository root).
 const planningSuffix = readFileSync("prompts/planning-suffix.txt", "utf-8");
@@ -490,6 +492,43 @@ async function specKeeperTaskProof(taskLifecycle: any, proof: any): Promise<any>
         status.warning(`Spec Keeper task ${taskLifecycle.taskId} proof not attached: ${result.error ?? "unknown error"}.`);
     }
     return result;
+}
+
+/**
+ * Log finalization diagnostics without exposing request or response bodies.
+ */
+function logTaskFinalizationDiagnostics(taskId: string, result: { diagnostics: string[] }): void {
+    for (const diagnostic of result.diagnostics) {
+        status.warning(`Spec Keeper task ${taskId} final update diagnostic: ${diagnostic}`);
+    }
+}
+
+/**
+ * Mark the active task-mode Spec Keeper task complete with a note, status done,
+ * and the supplied proof artifact. The proof should include commit or test
+ * evidence when available. Finalization is best-effort and never throws; each
+ * failed update is surfaced as a [WARNING].
+ */
+async function finalizeTaskModeSuccess(taskLifecycle: any, proof: any): Promise<void> {
+    if (!taskLifecycle || taskLifecycle.finalized) return;
+    taskLifecycle.finalized = true;
+    const result = await completeSpecKeeperTask(taskLifecycle.taskId, proof, taskLifecycle.options);
+    logTaskFinalizationDiagnostics(taskLifecycle.taskId, result);
+    status.specKeeper(`task ${taskLifecycle.taskId} completed (status=${result.status}, note=${result.noteRecorded ? "recorded" : "failed"}, proof=${result.proofMethod}).`);
+}
+
+/**
+ * Mark the active task-mode Spec Keeper task failed or blocked with the
+ * supplied diagnostic. The diagnostic is written as a note, status note, and
+ * proof payload. Finalization is best-effort and never throws; each failed
+ * update is surfaced as a [WARNING].
+ */
+async function finalizeTaskModeFailure(taskLifecycle: any, diagnostic: string): Promise<void> {
+    if (!taskLifecycle || taskLifecycle.finalized) return;
+    taskLifecycle.finalized = true;
+    const result = await failSpecKeeperTask(taskLifecycle.taskId, diagnostic, taskLifecycle.options);
+    logTaskFinalizationDiagnostics(taskLifecycle.taskId, result);
+    status.specKeeper(`task ${taskLifecycle.taskId} ${result.status} (note=${result.noteRecorded ? "recorded" : "failed"}, proof=${result.proofMethod}).`);
 }
 
 /**
@@ -1090,11 +1129,10 @@ async function runSingleStep(
                     const directStatusNote = reviewMode
                         ? "Direct execution complete; commit deferred to review."
                         : "Direct execution complete and committed.";
-                    await specKeeperTaskStatus(taskLifecycle, "done", "done", directStatusNote);
-                    await specKeeperTaskNote(taskLifecycle, "note (completed)", "Direct execution completed.");
-                    await specKeeperTaskProof(taskLifecycle, {
+                    await finalizeTaskModeSuccess(taskLifecycle, {
                         outcome: "completed",
                         mode: "direct",
+                        commitEvidence: latestCommitEvidence(mainCwd),
                         note: directStatusNote,
                     });
                 }
@@ -1113,9 +1151,7 @@ async function runSingleStep(
         }
         if (taskLifecycle) {
             const reason = error instanceof Error ? error.message : String(error);
-            await specKeeperTaskStatus(taskLifecycle, "blocked", "blocked", `Direct execution failed: ${reason}`);
-            await specKeeperTaskNote(taskLifecycle, "note (failed)", `Direct execution failed: ${reason}`);
-            await specKeeperTaskProof(taskLifecycle, { outcome: "failed", mode: "direct", reason });
+            await finalizeTaskModeFailure(taskLifecycle, `Direct execution failed: ${reason}`);
         }
         throw error;
     } finally {
@@ -1123,7 +1159,7 @@ async function runSingleStep(
     }
 }
 
-async function main(options: { review?: boolean } = {}) {
+async function main(options: { review?: boolean } = {}): Promise<{ success: boolean }> {
     client = new MultiTurnLlmRuntime(await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }), modelConfiguration.model);
     let configData = readData();
     if (!configData) configData = { responseIds: [] };
@@ -1166,6 +1202,7 @@ async function main(options: { review?: boolean } = {}) {
                 taskId: taskWorkOrder.id,
                 options: taskModeOptions,
             };
+            activeTaskLifecycle = taskLifecycle;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             status.error(`Task mode could not be started: ${message}`);
@@ -1202,7 +1239,7 @@ async function main(options: { review?: boolean } = {}) {
         const totals = totalUsage(configData.tokenUsage);
         status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
         status.success(isTaskMode ? "Task-mode direct execution complete. Stopping." : "Direct execution complete. Stopping.");
-        return;
+        return { success: true };
     }
 
     // Epic-first Spec Keeper coordination for prompt mode: always pull epics,
@@ -1330,6 +1367,7 @@ async function main(options: { review?: boolean } = {}) {
     // does NOT commit. After maxReviewAttempts failures, an explicit error is
     // thrown and the work is left uncommitted.
     let reviewAttempt = 0;
+    let reviewOutcome: "passed" | "failed" | null = null;
     let executionContext = "(none)";
 
     if (taskLifecycle) {
@@ -1384,11 +1422,11 @@ async function main(options: { review?: boolean } = {}) {
                         mode: "plan",
                         reviewAttempt,
                         reviewSummary: summarizeReview(review),
+                        commitEvidence: latestCommitEvidence(mainCwd),
                     };
-                    await specKeeperTaskNote(taskLifecycle, "note (review completed)", `Review completed: passed on attempt ${reviewAttempt}.`);
-                    await specKeeperTaskStatus(taskLifecycle, "done", "done", `Review passed on attempt ${reviewAttempt}.`);
-                    await specKeeperTaskProof(taskLifecycle, reviewProof);
+                    await finalizeTaskModeSuccess(taskLifecycle, reviewProof);
                 }
+                reviewOutcome = "passed";
                 break;
             }
 
@@ -1408,15 +1446,9 @@ async function main(options: { review?: boolean } = {}) {
             }
             if (taskLifecycle) {
                 const reviewReasons = (review.reasons ?? []).join("; ") || "no reasons provided";
-                await specKeeperTaskNote(taskLifecycle, "note (review failed)", `Review completed: failed (${reviewReasons}).`);
-                await specKeeperTaskStatus(taskLifecycle, "blocked", "blocked", `Review failed: ${reviewReasons}`);
-                await specKeeperTaskProof(taskLifecycle, {
-                    outcome: "failed",
-                    mode: "plan",
-                    reviewAttempt,
-                    reasons: review.reasons ?? [],
-                });
+                await finalizeTaskModeFailure(taskLifecycle, `Review failed: ${reviewReasons}`);
             }
+            reviewOutcome = "failed";
             break;
         }
     } else {
@@ -1433,20 +1465,26 @@ async function main(options: { review?: boolean } = {}) {
             await specKeeperSync("epic done", async () => updateEpicStatus(specKeeperState.epic, "done", skClientOptions));
         }
         if (taskLifecycle) {
-            await specKeeperTaskStatus(taskLifecycle, "done", "done", "Plan execution complete and committed.");
-            await specKeeperTaskNote(taskLifecycle, "note (completed)", "Plan execution complete and committed.");
-            await specKeeperTaskProof(taskLifecycle, {
+            await finalizeTaskModeSuccess(taskLifecycle, {
                 outcome: "completed",
                 mode: "plan",
                 steps: activeSteps.length,
+                commitEvidence: latestCommitEvidence(mainCwd),
             });
         }
+    }
+
+    if (reviewOutcome === "failed") {
+        status.error("Review did not pass; the work was left uncommitted and the task was marked blocked.");
+        cleanupExecutionWorktree();
+        return { success: false };
     }
 
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
     status.success(isTaskMode ? "Task-mode plan execution complete. Stopping." : "Plan complete. Stopping.");
     cleanupExecutionWorktree();
+    return { success: true };
 }
 
 // Remove the execution worktree and its branch once the run finishes (or fails),
@@ -1462,7 +1500,22 @@ function cleanupExecutionWorktree() {
 }
 
 main(options)
-    .catch((error) => {
+    .then((outcome) => {
         cleanupExecutionWorktree();
-        status.error(error instanceof Error ? error.stack ?? error.message : String(error));
+        if (outcome && outcome.success === false) {
+            process.exitCode = 1;
+        }
+    })
+    .catch(async (error) => {
+        cleanupExecutionWorktree();
+        const message = error instanceof Error ? error.message : String(error);
+        status.error(error instanceof Error ? error.stack ?? message : message);
+        if (activeTaskLifecycle && !activeTaskLifecycle.finalized) {
+            try {
+                await finalizeTaskModeFailure(activeTaskLifecycle, message);
+            } catch (finalizeError) {
+                status.warning(`Spec Keeper task failure update skipped: ${finalizeError instanceof Error ? finalizeError.message : String(finalizeError)}`);
+            }
+        }
+        process.exitCode = 1;
     });

@@ -123,6 +123,21 @@ export function committedChangesSummary(worktreePath: string, maxPatchChars = 60
   return `COMMITTED WORK (latest commit on the worktree branch, since nothing is staged):\n  - ${commit}\n\nSTAT:\n${stat || "(no stat available)"}\n\nPATCH:\n${truncatedPatch || "(no patch available)"}`;
 }
 
+/**
+ * Return the latest commit hash and subject for a checkout, for attaching to a
+ * task-mode proof as commit evidence. This is intentionally best-effort: it
+ * returns a clear "(no commit evidence available)" marker instead of throwing
+ * when the checkout has no commits or git cannot be run.
+ */
+export function latestCommitEvidence(repoRoot = process.cwd()): string {
+  const result = spawnSync("git", ["log", "-1", "--format=%H %s"], {
+    cwd: repoRoot,
+    encoding: "utf-8",
+  });
+  if (result.status !== 0) return "(no commit evidence available)";
+  return (result.stdout ?? "").trim() || "(no commit evidence available)";
+}
+
 /** Commit the staged changes inside the worktree with the given message. */
 export function commitInWorktree(worktreePath: string, message: string): void {
   if (!message || typeof message !== "string") {
