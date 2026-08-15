@@ -63,9 +63,11 @@ enrolled defaults.
 - Read with `loadAgentBusLocalConfig`: a missing or malformed store is treated as "no
   defaults" rather than failing the call, so the client stays usable when everything is
   configured via the environment.
-- Only the non-secret `busUrl` and `agentId` keys are read; secrets are never read from or
-  written to this file.
-- The tool never reads `data.json` or any secret store; it reads only the two non-secret
+- Only the non-secret `busUrl`, `agentId`, and `identityStore` keys are read; secrets are
+  never read from or written to this file. `identityStore` is read solely to make the
+  "missing access token" error actionable — it is the path of the `agent-busctl` identity
+  store that owns the bearer, and it is never opened or read for the credential itself.
+- The tool never reads `data.json` or any secret store; it reads only the non-secret
   roster keys above.
 
 **Never commit `.agent-bus.local`.** It is added to `.gitignore`; keep it out of the
@@ -86,9 +88,10 @@ reveals enrollment layout and should stay local and mode 0600.
 }
 ```
 
-`AgentBus` reads only the `busUrl` and `agentId` fields (accepting the synonymous keys
-`bus_url`/`bus` and `agent_id`/`id`). It never reads `data.json` or any secret store for
-these defaults.
+`AgentBus` reads non-secret `busUrl` and `agentId` fields (accepting the synonymous keys
+`bus_url`/`bus` and `agent_id`/`id`), plus `identityStore` (or `identity_store`) to enrich
+the missing-token diagnostic. It never reads `data.json` or any secret store for these
+defaults, and it never follows `identityStore` to read the bearer credential.
 
 ## Zero-configuration use for an enrolled agent
 
