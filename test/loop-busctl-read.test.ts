@@ -122,6 +122,45 @@ async function main(): Promise<void> {
         }) === "djJ8YnVzLW1hdHY2eHU3cm9udmRxN28uZWxhc3RpYy1hZ2VudC0xfDEwMA==",
     );
 
+    // 2a-2b. DEFENSIVE bus_path TYPE GUARD: bus_path arrives via parsed NDJSON,
+    //     so it may be a non-string value (a number, null, undefined, even an
+    //     object). The extractor must never call .trim() on a non-string —
+    //     which would throw a TypeError — and must silently fall back to the
+    //     bus id derived from message_id. A string bus_path is trimmed, then
+    //     used directly.
+    // A numeric bus_path must not blow up: it is ignored and the message_id
+    //       derived bus id (`bus`) is used.
+    check(
+        "a numeric bus_path is ignored (no throw) and message_id supplies the bus id",
+        extractCursorId({ message_id: "bus-1", bus_path: 12345 as unknown as string, seq: 1 }) === "djJ8YnVzfDE=",
+    );
+    // A null bus_path is ignored the same way.
+    check(
+        "a null bus_path is ignored and message_id supplies the bus id",
+        extractCursorId({ message_id: "bus-1", bus_path: null as unknown as string, seq: 1 }) === "djJ8YnVzfDE=",
+    );
+    // An undefined bus_path is ignored the same way.
+    check(
+        "an undefined bus_path is ignored and message_id supplies the bus id",
+        extractCursorId({ message_id: "bus-1", bus_path: undefined, seq: 1 }) === "djJ8YnVzfDE=",
+    );
+    // A string bus_path is trimmed and used directly (precedence over
+    //       message_id). Here there is no message_id and seq comes bare.
+    check(
+        "a string bus_path is trimmed and used",
+        extractCursorId({ bus_path: "  abc  ", seq: 1 }) === buildResumeCursor("abc", 1),
+    );
+    // A null/undefined bus_path with no other bus source yields no cursor
+    //       (falls through to the no-id path rather than throwing).
+    check(
+        "a null bus_path alone yields no cursor, not a throw",
+        extractCursorId({ bus_path: null as unknown as string, seq: 1 } as any) === undefined,
+    );
+    check(
+        "an undefined bus_path alone yields no cursor, not a throw",
+        extractCursorId({ bus_path: undefined, seq: 1 } as any) === undefined,
+    );
+
     // 2a-2. Edge cases: a missing bus id OR a missing seq must yield no cursor
     //     (never a malformed token). buildResumeCursor is the shared helper so
     //     these guard both extraction paths.

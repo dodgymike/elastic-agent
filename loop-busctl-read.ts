@@ -304,7 +304,12 @@ export function extractCursorId(record: AgentBusCtlWatchRecord): string | undefi
   const messageId = typeof record.message_id === "string" ? record.message_id.trim() : "";
   const split = messageId ? splitMessageId(messageId) : {};
   const seq = record.seq !== undefined && record.seq !== null ? record.seq : split.seq;
-  const busId = record.bus_path?.trim() || split.busId;
+  // bus_path arrives via parsed NDJSON, so it may not always be a string
+  // (e.g. an object or number). Only call .trim() when it is actually a
+  // string — never on a non-string value, which would throw a TypeError;
+  // otherwise fall back to the bus id derived from message_id.
+  const busId =
+    (typeof record.bus_path === "string" ? record.bus_path.trim() : undefined) || split.busId;
   return buildResumeCursor(busId, seq);
 }
 
