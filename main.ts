@@ -8,7 +8,7 @@ import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { extractPlanJson, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
 import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence } from "./worktree.js";
 import chalk from "chalk";
-import { renderToolPhase, renderToolCommand, toolCommandLabel, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
+import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
 import { startToolTimer } from "./tool-timer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, isAbsolute, join } from "node:path";
@@ -380,30 +380,28 @@ function emitToolLines(lines: string[], prefix = toolChildIndent): void {
 
 /**
  * Emit the pending tool-call label as `ToolName(args)` before argument parsing
- * or execution. The unified label comes from tool-renderer.ts so every tool
- * shares the same heading format without a legacy `[TOOL] Pending:` prefix.
+ * or execution. The label is produced by the per-tool renderer map so every
+ * tool shares the same heading format without a legacy `[TOOL] Pending:`
+ * prefix, while a tool can still customize or suppress its pending line.
  */
 function renderToolCallPending(toolCall) {
-    const label = toolCommandLabel(toolCall);
-    if (!label) return;
-    console.log(`${hierarchyIndent("contentInStep")}${label}`);
+    const lines = renderToolPhase("pending", toolCall, undefined, { color: terminalColor });
+    for (const line of lines) console.log(`${hierarchyIndent("contentInStep")}${line}`);
 }
 
 /**
- * Render a completed tool call through the shared tool-command helper first so
- * command-like results follow the circle/stdout/stderr rules. Non-command
- * results fall back to the per-tool renderer map, still without any legacy
- * [SUCCESS] label.
+ * Render a completed tool call through the per-tool renderer map first so
+ * specialized result views (the Edit diff, Git structured status, and
+ * redacted secret-carrying tools) are used when intended. Command-shaped tools
+ * (ExecuteCommand and the non-status Git modes) delegate to the shared
+ * tool-command helper inside their own renderers, so the circle/stdout/stderr
+ * rules stay exactly the same. No legacy [SUCCESS]/[ERROR] prefix is emitted.
  */
 function renderToolCallSucceeded(toolCall, result) {
-    const lines = renderToolCommand(toolCall, result, { color: terminalColor });
-    if (lines) { emitToolLines(lines); return; }
     emitToolLines(renderToolPhase("succeeded", toolCall, result, { color: terminalColor }));
 }
 
 function renderToolCallFailed(toolCall, error) {
-    const lines = renderToolCommand(toolCall, error, { color: terminalColor });
-    if (lines) { emitToolLines(lines); return; }
     emitToolLines(renderToolPhase("failed", toolCall, error, { color: terminalColor }));
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }

@@ -10,9 +10,9 @@ const source = readFileSync("main.ts", "utf8");
 // argument parsing or execution.
 assert.ok(
   source.includes(
-    'import { renderToolPhase, renderToolCommand, toolCommandLabel, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";',
+    'import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";',
   ),
-  "main.ts must import the shared render helper and tool-renderer dispatcher",
+  "main.ts must import the tool-renderer dispatcher and display helpers",
 );
 assert.ok(source.includes("function renderToolCallPending(toolCall)"), "main.ts must retain the pending wrapper");
 assert.ok(source.includes("function renderToolCallSucceeded(toolCall, result)"), "main.ts must retain the succeeded wrapper");
@@ -41,6 +41,27 @@ assert.ok(!dispatch.includes("[SUCCESS]"), "dispatchToolCall must not emit [SUCC
 assert.ok(!dispatch.includes("[ERROR]"), "dispatchToolCall must not emit [ERROR]");
 assert.ok(successAt > executeAt, "successful calls must render terminal success after execution");
 assert.ok(failureAt > executeAt, "failed calls must render terminal failure from the execution catch path");
+
+// The wrappers route every phase through the per-tool renderer map first so
+// specialized views (the Git structured status, Edit diff, and redacted
+// secret-carrying tools) are used when intended. Command-shaped tools delegate
+// to the shared helper inside their own renderers, so no legacy prefix is used.
+const pendingStart = source.indexOf("function renderToolCallPending(toolCall) {");
+const succeededStart = source.indexOf("function renderToolCallSucceeded(toolCall, result) {", pendingStart);
+const failedStart = source.indexOf("function renderToolCallFailed(toolCall, error) {", succeededStart);
+const appendHistoryAt = source.indexOf("function appendHistory(history, value) {", failedStart);
+assert.ok(pendingStart >= 0 && succeededStart > pendingStart && failedStart > succeededStart, "tool rendering wrappers must be defined in order");
+assert.ok(appendHistoryAt > failedStart, "failed wrapper must have a following function boundary");
+
+const pendingWrapper = source.slice(pendingStart, succeededStart);
+const succeededWrapper = source.slice(succeededStart, failedStart);
+const failedWrapper = source.slice(failedStart, appendHistoryAt);
+assert.ok(pendingWrapper.includes('renderToolPhase("pending"'), "pending wrapper must dispatch through the per-tool renderer map");
+assert.ok(!pendingWrapper.includes("Pending:"), "pending wrapper must not emit a legacy Pending: prefix");
+assert.ok(succeededWrapper.includes('renderToolPhase("succeeded"'), "succeeded wrapper must dispatch through the per-tool renderer map");
+assert.ok(!succeededWrapper.includes("renderToolCommand(toolCall, result"), "succeeded wrapper must not preempt per-tool renderers with the shared helper");
+assert.ok(failedWrapper.includes('renderToolPhase("failed"'), "failed wrapper must dispatch through the per-tool renderer map");
+assert.ok(!failedWrapper.includes("renderToolCommand(toolCall, error"), "failed wrapper must not preempt per-tool renderers with the shared helper");
 
 // The in-place timer starts after the safety check and before execution, and
 // stops once execution completes or throws.

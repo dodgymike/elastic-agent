@@ -293,7 +293,7 @@ function renderGenericSucceeded(toolCall: ToolCallDescriptor, result: unknown, o
 function renderGenericFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] {
     const label = toolCommandLabel(toolCall);
     const circle = ansiHelpers(options.color).red("●");
-    const message = String(error).trim();
+    const message = redactSecretText(toolCommandErrorText(error));
     return message ? [`${label} ${circle} ${message}`] : [`${label} ${circle}`];
 }
 
