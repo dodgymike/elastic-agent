@@ -103,10 +103,10 @@ const colored = { color: true };
     const coloredHelpers = ansiHelpers(true);
     assert.strictEqual(plainHelpers.green("ok"), "ok");
     assert.strictEqual(plainHelpers.redBold("bad"), "bad");
-    assert.strictEqual(plainHelpers.orange("pending"), "pending");
+    assert.strictEqual(plainHelpers.blue("pending"), "pending");
     assert.ok(!plainHelpers.green("ok").includes("\u001b"), "plain helpers must not emit ANSI");
     assert.ok(coloredHelpers.green("ok").includes("\u001b"), "colored helpers must emit ANSI");
-    assert.ok(coloredHelpers.orange("pending").includes("\u001b"), "colored orange helper must emit ANSI");
+    assert.ok(coloredHelpers.blue("pending").includes("\u001b"), "colored blue helper must emit ANSI");
     assert.notStrictEqual(coloredHelpers.green("ok"), "ok");
 }
 
@@ -472,13 +472,13 @@ const colored = { color: true };
     assert.ok(errorLines[0].includes("\u001b"), "error circle must be colored red");
 }
 
-// 28b. The pending tool-call label is colored orange, and the generic
+// 28b. The pending tool-call label is colored blue, and the generic
 // succeeded/failed phases color the status circle green/red by execution status.
 {
     const ch = ansiHelpers(true);
     const pending = renderToolPhase("pending", { name: "Read" }, undefined, colored);
-    assertLines(pending, [ch.orange("Read")]);
-    assert.ok(pending[0].includes("\u001b"), "pending label must be colored orange");
+    assertLines(pending, [ch.blue("Read")]);
+    assert.ok(pending[0].includes("\u001b"), "pending label must be colored blue");
 
     const succeeded = renderToolPhase("succeeded", { name: "Read" }, { content: "x" }, colored);
     assertLines(succeeded, [` ${ch.green("●")} {"content":"x"}`]);
@@ -488,13 +488,13 @@ const colored = { color: true };
     assertLines(failed, [` ${ch.red("●")} access denied`]);
     assert.ok(failed[0].includes("\u001b"), "failed circle must be colored red");
 
-    // Git and ExecuteCommand pending labels follow the same orange rule.
+    // Git and ExecuteCommand pending labels follow the same blue rule.
     assertLines(renderToolPhase("pending", { name: "Git", arguments: '{"action":"list"}' }, undefined, colored), [
-        ch.orange("Git('list')"),
+        ch.blue("Git('list')"),
     ]);
     assertLines(
         renderToolPhase("pending", { name: "ExecuteCommand", arguments: '{"command":"ls"}' }, undefined, colored),
-        [ch.orange("ExecuteCommand('ls')")],
+        [ch.blue("ExecuteCommand('ls')")],
     );
 }
 
