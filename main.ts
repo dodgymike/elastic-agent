@@ -647,7 +647,7 @@ const tools = [
     {
         type: "function", name: "ExecuteCommand",
         usage_prompt: "tools/execute-command-usage.md",
-        description: "Run a Bash command and return its exit code, standard output, and standard error. Parameters are safely supplied as positional arguments.",
+        description: "Run a Bash command and return its exit code, standard output, and standard error. Parameters are safely supplied as positional arguments. Refuses all agent-bus actions (agent-busctl/agentbus/agent-bus); use the AgentBus or AgentBusEnrol tool instead.",
         parameters: {
             type: "object",
             properties: { command: { type: "string" }, parameters: { type: "array", items: { type: "string" } } },

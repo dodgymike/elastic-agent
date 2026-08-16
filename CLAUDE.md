@@ -46,8 +46,8 @@ console.
 
 # Starting directory
 
-The runtime started in the canonical directory `/elastic-agent`
-(initial working directory `/elastic-agent`).
+The runtime started in the canonical directory `/mnt/sdb4/mike/mike/source/elastic-agent`
+(initial working directory `/mnt/sdb4/mike/mike/source/elastic-agent`).
 
 Prefix every relative path in your tool calls and reasoning with the 
 starting directory name `elastic-agent/` (for example `elastic-agent/main.ts`)
