@@ -1117,11 +1117,15 @@ function classifyIntegrationTool(toolName: string, parameters: Record<string, un
 /**
  * Static classification for `AgentBus`, which talks to the bus through the
  * local `agent-busctl` CLI as an explicit inter-agent communication channel.
- * It whitelists the `whoami`, `watch` (long-poll wait), and `send` actions,
- * along with the `--identity`, `--persist-session`, `--for`, `--count`,
+ * It whitelists the `whoami`, `watch` (long-poll wait), `send`, `agents` (list
+ * registered agents), `logout` (clear the session), and `help` (CLI usage)
+ * actions, along with the `--identity`, `--persist-session`, `--for`, `--count`,
  * `--json`, `--verify`, and `--bus` flags. Messages sent between agents are
  * agent-to-agent coordination traffic, never store exfiltration: a `send`
- * message that embeds protected store contents is refused.
+ * message that embeds protected store contents is refused. `enrol` is
+ * intentionally handled by `AgentBusEnrol` (not here), and `broadcast` is not a
+ * real subcommand (it is only a `watch` message attribute), so neither is
+ * whitelisted.
  */
 function classifyAgentBus(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
   const actionParam = stringValue(parameters.action);
@@ -1139,9 +1143,10 @@ function classifyAgentBus(parameters: Record<string, unknown>, roots: readonly s
     action = "whoami";
   }
 
-  if (action !== "whoami" && action !== "watch" && action !== "send") {
+  const supported = new Set(["whoami", "watch", "send", "agents", "logout", "help"]);
+  if (!supported.has(action)) {
     return unsafe(
-      `AgentBus action '${action}' is not a supported agent-busctl subcommand (whoami, watch, send); refusing to execute.`,
+      `AgentBus action '${action}' is not a supported agent-busctl subcommand (whoami, watch, send, agents, logout, help); refusing to execute.`,
     );
   }
 

@@ -280,6 +280,26 @@ async function main(): Promise<void> {
       "AgentBus send refuses a recipient with control characters",
       staticVerdict("AgentBus", { action: "send", to: "bus-a.agent-2\n", message: "x" }).decision === "unsafe",
     );
+    check(
+      "AgentBus agents (list registered agents) is allowed",
+      staticVerdict("AgentBus", { action: "agents" }).decision === "safe",
+    );
+    check(
+      "AgentBus logout (clear session) is allowed",
+      staticVerdict("AgentBus", { action: "logout" }).decision === "safe",
+    );
+    check(
+      "AgentBus help (show CLI usage) is allowed",
+      staticVerdict("AgentBus", { action: "help" }).decision === "safe",
+    );
+    check(
+      "AgentBus refuses the enrol action (kept in AgentBusEnrol)",
+      staticVerdict("AgentBus", { action: "enrol" }).decision === "unsafe",
+    );
+    check(
+      "AgentBus refuses broadcast (not a real subcommand)",
+      staticVerdict("AgentBus", { action: "broadcast" }).decision === "unsafe",
+    );
 
     // ------------------------------------------------------------------
     // 1b. Harmless shell no-ops are allowed statically.

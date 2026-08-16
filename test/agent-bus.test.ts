@@ -1,8 +1,9 @@
 // Regression tests for tools/AgentBus.ts: the tool now talks to the bus ONLY
 // through the local `./agent-busctl` CLI for whoami / watch (long-poll wait) /
-// send. There is no HTTP/fetch path at all. These tests drive a fake
-// `agent-busctl` executable and assert:
-//   1. the tool invokes the CLI for each action (whoami / watch / send);
+// send / agents / logout / help. There is no HTTP/fetch path at all. These
+// tests drive a fake `agent-busctl` executable and assert:
+//   1. the tool invokes the CLI for each action (whoami / watch / send /
+//      agents / logout / help);
 //   2. the default flags `--identity <dir>` and `--persist-session` are always
 //      prepended (and can be overridden);
 //   3. no HTTP request is ever made (the tool never constructs a fetch/HTTP
@@ -57,6 +58,18 @@ function makeFakeAgentBusctl(outputByAction: Record<string, string>): { binary: 
     'elif printf "%s\\n" "$@" | grep -q "send"; then',
     '  cat <<\'EOF\'',
     outputByAction.send ?? '{"ok":true,"message_id":"abc123"}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "agents"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.agents ?? '{"agents":[{"agent_id":"bus-a.agent-1"},{"agent_id":"bus-a.agent-2"}]}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "logout"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.logout ?? '{"ok":true,"session":"cleared"}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "help"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.help ?? "Usage: agent-busctl <command>  Commands: whoami watch send agents logout help",
     "EOF",
     'else',
     "  echo 'no action' >&2",
@@ -164,6 +177,71 @@ async function main(): Promise<void> {
     );
     check("send returns the CLI success output", (sendResult.stdout ?? "").includes('"ok":true'));
     check("send produces no parsed messages", sendResult.messages.length === 0);
+
+    // ---- 2b. agents ---------------------------------------------------------
+    const agents = makeFakeAgentBusctl({});
+    const agentsResult = await agentBus({
+      action: "agents",
+      binary: agents.binary,
+      root: dir,
+      identity: "tmp/elastic-identity",
+    });
+    const agentsCalls = readCallLog(agents.log);
+    check("agents invokes exactly one agent-busctl process", agentsCalls.length === 1);
+    check(
+      "agents argv carries defaults plus the agents subcommand and --json",
+      sameArgs(agentsCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "agents",
+        "--json",
+      ]),
+    );
+    check("agents returns the CLI stdout", (agentsResult.stdout ?? "").includes("bus-a.agent-2"));
+    check("agents produces no parsed messages", agentsResult.messages.length === 0);
+
+    // ---- 2c. logout ---------------------------------------------------------
+    const logout = makeFakeAgentBusctl({});
+    const logoutResult = await agentBus({
+      action: "logout",
+      binary: logout.binary,
+      root: dir,
+      identity: "tmp/elastic-identity",
+    });
+    const logoutCalls = readCallLog(logout.log);
+    check("logout invokes exactly one agent-busctl process", logoutCalls.length === 1);
+    check(
+      "logout argv carries defaults plus the logout subcommand and --json",
+      sameArgs(logoutCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "logout",
+        "--json",
+      ]),
+    );
+    check("logout returns the CLI success output", (logoutResult.stdout ?? "").includes('"ok":true'));
+    check("logout produces no parsed messages", logoutResult.messages.length === 0);
+
+    // ---- 2d. help -----------------------------------------------------------
+    const help = makeFakeAgentBusctl({});
+    const helpResult = await agentBus({
+      action: "help",
+      binary: help.binary,
+      root: dir,
+      identity: "tmp/elastic-identity",
+    });
+    const helpCalls = readCallLog(help.log);
+    check("help invokes exactly one agent-busctl process", helpCalls.length === 1);
+    check(
+      "help argv carries defaults plus the help subcommand and no --json",
+      sameArgs(helpCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "help",
+      ]),
+    );
+    check("help returns the CLI usage text", (helpResult.stdout ?? "").includes("Usage: agent-busctl"));
+    check("help produces no parsed messages", helpResult.messages.length === 0);
 
     // ---- 3. default flags: identity default + --persist-session -------------
     const defaulted = makeFakeAgentBusctl({});

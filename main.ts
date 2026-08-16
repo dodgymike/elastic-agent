@@ -684,7 +684,7 @@ const tools = [
         parameters: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["whoami", "watch", "send"], description: "Which agent-busctl action to run; inferred when omitted (to -> send, a wait bound -> watch, otherwise whoami)." },
+                action: { type: "string", enum: ["whoami", "watch", "send", "agents", "logout", "help"], description: "Which agent-busctl action to run; inferred when omitted (to -> send, a wait bound -> watch, otherwise whoami). enrol lives in AgentBusEnrol and broadcast is not a real subcommand." },
                 verify: { type: "boolean", description: "[whoami] authenticate against the bus (--verify)." },
                 forDuration: { type: "string", description: "[watch] how long to wait for a message, e.g. \"30s\" (--for <dur>)." },
                 count: { type: "number", description: "[watch] stop after N messages (--count N)." },
@@ -1453,7 +1453,8 @@ async function dispatchToolCall(output, configData, goalKey) {
     //
     // Agent-bus commands are refused here (before the safety classifier, which
     // makes LLM/HTTP calls) because all agent-bus activity is owned by the
-    // dedicated AgentBus (whoami/watch/send) and AgentBusEnrol (enroll) tools.
+    // dedicated AgentBus (whoami/watch/send/agents/logout/help) and
+    // AgentBusEnrol (enroll) tools.
     // `detectAgentBusCommand` is pure string logic with no I/O, so this guard
     // runs safely before any file/identity read or HTTP call. See
     // tools/agent-bus-detect.ts for the exact matching rules.

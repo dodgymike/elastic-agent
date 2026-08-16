@@ -1,9 +1,17 @@
 /**
  * Agent Bus tool — talks to the bus ONLY through the local `./agent-busctl`
- * CLI for three actions: `whoami`, long-poll `watch` (wait for a message), and
- * `send`. It never issues a raw HTTP request and never reads a bearer/access
- * token — the `agent-busctl` credential store owns all secret material, and we
- * only pass it the non-secret `--identity <dir>` path.
+ * CLI for its subcommands: `whoami`, long-poll `watch` (wait for a message),
+ * `send`, `agents` (list registered agents), `logout` (clear the session), and
+ * `help` (show the CLI usage). It never issues a raw HTTP request and never
+ * reads a bearer/access token — the `agent-busctl` credential store owns all
+ * secret material, and we only pass it the non-secret `--identity <dir>` path.
+ *
+ * NOT in this tool
+ * - `enrol` is intentionally separate and lives in the `AgentBusEnrol` tool; it
+ *   is deliberately NOT exposed here (it writes an identity + roster).
+ * - `broadcast` is NOT a real `agent-busctl` subcommand — it is only a boolean
+ *   attribute on `watch` message records (whether a message was broadcast), so
+ *   there is no `broadcast` action to implement here.
  *
  * SECURITY POSTURE
  * - No `fetch`/`Http`/network client is ever constructed. Communication with
@@ -32,8 +40,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
-/** The three actions this tool can perform through `agent-busctl`. */
-export type AgentBusAction = "whoami" | "watch" | "send";
+/**
+ * The actions this tool can perform through `agent-busctl`. `enrol` is
+ * intentionally NOT here (it lives in `AgentBusEnrol`), and `broadcast` is not
+ * a real subcommand (it is only a `watch` message attribute).
+ */
+export type AgentBusAction = "whoami" | "watch" | "send" | "agents" | "logout" | "help";
 
 export interface AgentBusOptions {
   /**
@@ -210,13 +222,15 @@ function parseWatchMessages(stdout: string): readonly Record<string, unknown>[] 
 
 /** Confirm a requested action maps to a real `agent-busctl` subcommand; fail fast otherwise. */
 function ensureSupportedAction(action: AgentBusAction, binary: string): void {
-  // The three actions are the only ones this tool implements, and all three are
-  // real `agent-busctl` subcommands. If the binary is missing entirely, the
-  // spawn below fails; this guard exists so an unsupported action can never
-  // silently fall back to any HTTP transport.
-  if (action !== "whoami" && action !== "watch" && action !== "send") {
+  // The actions below are the only ones this tool implements, and all are real
+  // `agent-busctl` subcommands. `enrol` is intentionally separate (AgentBusEnrol)
+  // and `broadcast` is not a subcommand, so neither is accepted here. If the
+  // binary is missing entirely, the spawn below fails; this guard exists so an
+  // unsupported action can never silently fall back to any HTTP transport.
+  const supported: readonly AgentBusAction[] = ["whoami", "watch", "send", "agents", "logout", "help"];
+  if (!supported.includes(action)) {
     throw new Error(
-      `AgentBus action '${String(action)}' is not supported by agent-busctl (supported: whoami, watch, send). ` +
+      `AgentBus action '${String(action)}' is not supported by agent-busctl (supported: ${supported.join(", ")}). ` +
         "Refusing to fall back to any HTTP path.",
     );
   }
@@ -273,6 +287,19 @@ function buildArgs(
         args.push(options.message);
       }
       if (options.json ?? true) args.push("--json");
+      break;
+    case "agents":
+      args.push("agents");
+      if (options.json ?? true) args.push("--json");
+      break;
+    case "logout":
+      args.push("logout");
+      if (options.json ?? true) args.push("--json");
+      break;
+    case "help":
+      // `help` lists the CLI's subcommands as plain usage text; it does not
+      // accept `--json` (the listing is interactive help, not data).
+      args.push("help");
       break;
   }
   return args;
@@ -338,16 +365,20 @@ function runAgentBusCtl(
 }
 
 /**
- * Send a coordination message or retrieve Agent Bus status/handoff feeds,
- * exclusively through the local `agent-busctl` CLI.
+ * Run a coordination / Agent Bus operation, exclusively through the local
+ * `agent-busctl` CLI.
  *
  *   - whoami  -> `agent-busctl --identity <dir> [--persist-session] whoami`
  *   - watch   -> `agent-busctl --identity <dir> [--persist-session] watch [--for <dur>]`
  *   - send    -> `agent-busctl --identity <dir> [--persist-session] send <to> <body>`
+ *   - agents  -> `agent-busctl --identity <dir> [--persist-session] agents`
+ *   - logout  -> `agent-busctl --identity <dir> [--persist-session] logout`
+ *   - help    -> `agent-busctl --identity <dir> [--persist-session] help`
  *
- * The default flags `--identity <dir>` and `--persist-session` are always
- * prepended; explicit options override them. The tool never creates an HTTP
- * client and never sends or reads secret-store contents.
+ * `enrol` is intentionally NOT here (see `AgentBusEnrol`); `broadcast` is not a
+ * real subcommand. The default flags `--identity <dir>` and `--persist-session`
+ * are always prepended; explicit options override them. The tool never creates
+ * an HTTP client and never sends or reads secret-store contents.
  */
 export default async function agentBus(options: AgentBusOptions = {}): Promise<AgentBusResult> {
   if (!options || typeof options !== "object" || Array.isArray(options)) {

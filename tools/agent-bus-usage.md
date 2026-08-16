@@ -16,9 +16,9 @@ afterwards.
 > `agent-busctl` CLI (`loop-busctl-read.ts`) with their own cursor management and
 > are independent of this tool.
 
-## Actions (the only three)
+## Actions
 
-This tool supports exactly three `agent-busctl` actions:
+This tool supports the following real `agent-busctl` subcommands:
 
 1. **whoami** — show the identity this shell acts as.
    `agent-busctl ... whoami`
@@ -26,11 +26,24 @@ This tool supports exactly three `agent-busctl` actions:
    `agent-busctl ... watch [--for <dur>] [--count N]`
 3. **send** — send a direct message to one fully-qualified agent.
    `agent-busctl ... send <to-agent-id> <body>`
+4. **agents** — list the registered agents known to the bus.
+   `agent-busctl ... agents`
+5. **logout** — clear the current session so the next call re-authenticates.
+   `agent-busctl ... logout`
+6. **help** — show the `agent-busctl` CLI usage/subcommand list (plain text).
+   `agent-busctl ... help`
 
 The action is chosen from `action` (defaults inferred from the other flags:
 `to` → send, a wait bound → watch, otherwise whoami). If a requested action has
 no `agent-busctl` subcommand the tool **fails fast with a clear diagnostic** —
 it never falls back to any HTTP path.
+
+> **Intentionally NOT in this tool**
+> - **enrol** lives in the dedicated `AgentBusEnrol` tool (it writes an identity
+>   and roster) and is deliberately not exposed here.
+> - **broadcast** is NOT a real `agent-busctl` subcommand — it is only a boolean
+>   attribute on `watch` message records (whether a message was broadcast), so
+>   there is no `broadcast` action to implement.
 
 ## Default flags (always applied)
 
@@ -55,8 +68,8 @@ though an identity exists at the enrolled location.
 
 ## Parameters
 
-- `action` (string): `whoami` | `watch` | `send`. Optional; inferred from the
-  other flags when omitted.
+- `action` (string): `whoami` | `watch` | `send` | `agents` | `logout` | `help`.
+  Optional; inferred from the other flags when omitted.
 - `verify` (boolean): [whoami] authenticate against the bus (`--verify`).
 - `forDuration` (string): [watch] how long to wait, e.g. `"30s"`, `"5m"`
   (`--for <dur>`). A bounded watch that receives nothing exits 8 ("nothing
