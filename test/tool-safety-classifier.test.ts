@@ -15,7 +15,16 @@ import {
 } from "../tool-safety-classifier.js";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "../llm/multi-turn-runtime.js";
 import type { ToolSafetyClassification } from "../tool-safety-classifier.js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -645,7 +654,83 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
-    // 5d. Docker prompt-variant selection: the runtime's isDocker flag (or
+    // 5d. Canonical, symlinked, and cwd-relative path forms. This mirrors the
+    //     real workspace layout where the logical working directory is a
+    //     symlink alias of the canonical starting directory (for example
+    //     /home -> /mnt/sdb4). The trusted roots match workspace-init's wiring:
+    //     workspaceRoot is the logical pwd (the symlinked alias) while
+    //     allowedDirectories carries the canonical/real starting-directory
+    //     path. We build an actual symlink on disk so the symlink-aware
+    //     realpath resolution in the classifier is exercised (the section 5b
+    //     checks above use a non-existent canonical root and therefore only
+    //     cover the lexical fallback path).
+    // ------------------------------------------------------------------
+    const canonicalWs = join(tmpDir, "canonical", "workspace");
+    mkdirSync(canonicalWs, { recursive: true });
+    // The probed target file must exist on disk: fs.realpathSync only resolves
+    // symlink components that are present, so a non-existent leaf would fall
+    // back to the lexical path and fail through the symlink alias. This mirrors
+    // production, where the file genuinely exists inside the canonical dir.
+    writeFileSync(join(canonicalWs, "package.json"), "{}", "utf8");
+    const aliasDir = join(tmpDir, "home");
+    let aliasWs = canonicalWs;
+    let symlinkResolves = false;
+    try {
+      symlinkSync(join(tmpDir, "canonical"), aliasDir, "dir");
+      aliasWs = join(aliasDir, "workspace");
+      symlinkResolves = realpathSync(aliasWs) === canonicalWs;
+    } catch {
+      // Symlinks unsupported or already present: fall back to the canonical
+      // path so the remaining checks still run (the symlink-alias sub-checks
+      // are skipped rather than failed).
+      aliasWs = canonicalWs;
+    }
+    // Trusted roots: logical pwd (the alias) plus the canonical start dir,
+    // exactly as workspace-init resolves them.
+    const canonicalPathOptions = {
+      workspaceRoot: aliasWs,
+      allowedDirectories: [canonicalWs],
+    };
+
+    // (a) Canonical absolute path inside the canonical start dir is allowed.
+    check(
+      "canonical absolute path under the start dir is allowed",
+      classifyToolCallStatically("Read", { path: join(canonicalWs, "package.json") }, canonicalPathOptions).decision === "safe",
+    );
+    // The workspaceRoot (logical pwd) itself must resolve inside the canonical
+    // start dir once canonicalized — the precondition for all the alias checks.
+    check(
+      "logical cwd resolves inside the canonical start dir",
+      !symlinkResolves || realpathSync(aliasWs) === canonicalWs,
+    );
+
+    // (b) A symlinked absolute path realpath-resolves into the canonical start
+    //     dir and is therefore allowed (the core regression this guards).
+    check(
+      "symlinked absolute path resolving into the start dir is allowed",
+      !symlinkResolves
+        || classifyToolCallStatically("Read", { path: join(aliasWs, "package.json") }, canonicalPathOptions).decision === "safe",
+    );
+
+    // (c) A path relative to cwd resolves against the trusted roots and stays
+    //     inside them, so it is allowed.
+    check(
+      "cwd-relative path is allowed",
+      classifyToolCallStatically("Read", { path: "package.json" }, canonicalPathOptions).decision === "safe",
+    );
+
+    // (d) A path clearly outside every trusted root stays blocked.
+    check(
+      "path clearly outside every trusted root stays blocked",
+      classifyToolCallStatically("Read", { path: "/tmp/outside.txt" }, canonicalPathOptions).decision === "unsafe",
+    );
+    check(
+      "symlinked alias cannot smuggle a realpath that escapes the start dir",
+      classifyToolCallStatically("Read", { path: join(tmpDir, "outside.txt") }, canonicalPathOptions).decision === "unsafe",
+    );
+
+    // ------------------------------------------------------------------
+    // 5e. Docker prompt-variant selection: the runtime's isDocker flag (or
     //     AGENT_IN_DOCKER) selects the Docker or non-Docker filesystem-policy
     //     addendum, which is composed with the shared base prompt and included
     //     in actual classifier LLM calls.
@@ -762,7 +847,7 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
-    // 5e. Tool-safety regression: filesystem operations outside the
+    // 5f. Tool-safety regression: filesystem operations outside the
     //     startup directory under Docker and non-Docker modes. Docker mode
     //     relaxes the workspace boundary for container-local access while
     //     keeping data.json, protected files, the edit/write gate, and

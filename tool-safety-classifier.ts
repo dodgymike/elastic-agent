@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { RunAbortError } from "./llm/run-abort.js";
@@ -318,18 +318,43 @@ function resolvesOutsideSingleRoot(absolute: string, root: string): boolean {
 }
 
 /**
- * Build the de-duplicated, absolute set of trusted roots for path checks:
- * `workspaceRoot` always first, then any additional `allowedDirectories` (the
- * canonical/real starting-directory path from workspace-init). The list is
- * never empty; an empty `allowedDirectories` simply degrades to the workspace
- * root alone, preserving the legacy single-root behavior.
+ * Resolve `target` to its canonical absolute form. Relative targets are
+ * joined against `cwd` (defaulting to the process working directory) first,
+ * then normalized with `resolve`. The resulting absolute path is then
+ * symlink-resolved with `fs.realpathSync` so a path that is reachable through
+ * a symlink alias (for example `/home` -> `/mnt/sdb4`) is compared by its real
+ * location rather than its lexical spelling. When realpath fails (a missing
+ * file, a virtual/overlay mount, or a path not yet created) we fall back to
+ * the normalized resolved path so the boundary check still runs in a
+ * fail-closed manner — a fallback path can only ever be *more* restrictive,
+ * never less, because without a realpath the file cannot be resolved to a
+ * different root and the normalized form stays lexically within its root.
+ */
+function canonicalAbsolutePath(target: string, cwd = process.cwd()): string {
+  const absolute = isAbsolute(target) ? resolve(target) : resolve(cwd, target);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+/**
+ * Build the de-duplicated, canonical, absolute set of trusted roots for path
+ * checks: `workspaceRoot` always first, then any additional
+ * `allowedDirectories` (the canonical/real starting-directory path from
+ * workspace-init). Every root is symlink-resolved (with a fail-closed fallback
+ * to the normalized form) so roots are compared in the same canonical space as
+ * the targets validated below. The list is never empty; an empty
+ * `allowedDirectories` simply degrades to the workspace root alone, preserving
+ * the legacy single-root behavior.
  */
 function trustedRoots(workspaceRoot: string, allowedDirectories: readonly string[] | undefined): string[] {
-  const roots: string[] = [resolve(workspaceRoot)];
+  const roots: string[] = [canonicalAbsolutePath(workspaceRoot)];
   if (allowedDirectories && allowedDirectories.length > 0) {
     for (const dir of allowedDirectories) {
       if (typeof dir === "string" && dir.trim() !== "") {
-        roots.push(resolve(workspaceRoot, dir));
+        roots.push(canonicalAbsolutePath(resolve(workspaceRoot, dir)));
       }
     }
   }
@@ -338,24 +363,28 @@ function trustedRoots(workspaceRoot: string, allowedDirectories: readonly string
 
 /**
  * True when `target` escapes *every* trusted root. `target` may be relative
- * (then resolved against each root in turn) or absolute. A target counts as
- * inside the workspace when it stays within at least one trusted root, so the
- * canonical starting-directory path is accepted as "local" even when it
- * differs from `workspaceRoot` (for example under a symlink).
+ * (then resolved against each root in turn, mirroring how bare tool paths are
+ * resolved against the runtime working directory) or absolute. Each candidate
+ * is canonicalized with `canonicalAbsolutePath` so symlink aliases compare
+ * equal to their real location. A target counts as inside the workspace when
+ * it stays within at least one trusted root, so the canonical
+ * starting-directory path is accepted as "local" even when it differs from
+ * `workspaceRoot` (for example under a symlink).
  */
 function resolvesOutsideAllTrustedRoots(target: string, roots: readonly string[]): boolean {
   if (roots.length === 0) return true;
-  const absolute = isAbsolute(target) ? resolve(target) : (() => {
-    // For a relative target it is only inside if it stays under at least one
-    // root; resolve against each root and keep the first result that is inside.
+  // For an absolute target, canonicalize once and check against every root.
+  // For a relative target, resolve against each root (as a candidate cwd),
+  // canonicalize that candidate, and allow when any candidate stays inside the
+  // corresponding root — this mirrors how cwd-relative tool paths are handled,
+  // now compared in the canonical (symlink-resolved) space.
+  const candidates = isAbsolute(target)
+    ? [canonicalAbsolutePath(target, roots[0])]
+    : roots.map((root) => canonicalAbsolutePath(resolve(root, target), root));
+  for (const candidate of candidates) {
     for (const root of roots) {
-      const candidate = resolve(root, target);
-      if (!resolvesOutsideSingleRoot(candidate, root)) return candidate;
+      if (!resolvesOutsideSingleRoot(candidate, root)) return false;
     }
-    return resolve(roots[0], target);
-  })();
-  for (const root of roots) {
-    if (!resolvesOutsideSingleRoot(absolute, root)) return false;
   }
   return true;
 }
