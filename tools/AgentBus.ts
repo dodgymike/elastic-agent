@@ -17,14 +17,19 @@
  *
  * DEFAULT FLAGS
  * Every invocation is prefixed with the default flags `--identity <dir>` and
- * `--persist-session`, where `<dir>` defaults to `<root>/tmp/elastic-identity`
- * (the enrolled identity store). An explicit `identity`, `persistSession`, or
- * `busUrl` option overrides the corresponding default. The tool fails fast
- * (throwing a clear diagnostic) rather than falling back to any HTTP path when
- * a requested action has no `agent-busctl` subcommand.
+ * `--persist-session`. The `--identity` store is resolved, highest precedence
+ * first: an explicit `identity` option, the `AGENT_BUS_IDENTITY` env, the
+ * enrolled `identityStore` recorded in `.agent-bus.local` (written by
+ * `AgentBusEnrol`), then `<root>/tmp/elastic-identity`. Preferring the roster's
+ * `identityStore` keeps `--identity` pointing at the store the identity was
+ * actually enrolled into, avoiding `no identity has been enrolled` (exit 3)
+ * misfires. An explicit `identity`, `persistSession`, or `busUrl` option
+ * overrides the corresponding default. The tool fails fast (throwing a clear
+ * diagnostic) rather than falling back to any HTTP path when a requested action
+ * has no `agent-busctl` subcommand.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
 /** The three actions this tool can perform through `agent-busctl`. */
@@ -123,7 +128,15 @@ function resolvePath(p: string, root: string): string {
 /**
  * Resolve the `--identity` credential-store directory. Precedence: explicit
  * option > `AGENT_BUS_IDENTITY` env > `AGENT_BUS_STORE` roster's identityStore
- * > `<root>/tmp/elastic-identity` default.
+ * (enrolled via `AgentBusEnrol`, recorded in `.agent-bus.local`) >
+ * `<root>/tmp/elastic-identity` default.
+ *
+ * Consulting the roster matters because `AgentBusEnrol` (and the loop-mode
+ * reader) store the enrolled identity under the roster's `identityStore`, which
+ * is not always the `<root>/tmp/elastic-identity` default. Pointing `--identity`
+ * at a store that has no enrolled identity yields `no identity has been
+ * enrolled` even though an identity exists elsewhere, so we prefer the enrolled
+ * location when one is recorded.
  */
 function resolveDefaultIdentity(
   identity: string | undefined,
@@ -133,7 +146,36 @@ function resolveDefaultIdentity(
   if (identity && identity.trim()) return resolvePath(identity.trim(), root);
   const envIdentity = env.AGENT_BUS_IDENTITY?.trim();
   if (envIdentity) return resolvePath(envIdentity, root);
+  const rosterIdentity = loadRosterIdentityStore(root);
+  if (rosterIdentity) return rosterIdentity;
   return join(root, DEFAULT_IDENTITY_SUBDIR);
+}
+
+/**
+ * Read the non-secret enrolled identity-store directory from `.agent-bus.local`
+ * (written by `AgentBusEnrol`). Returns an absolute path, or undefined when the
+ * roster is missing/malformed or records no `identityStore`. Never reads secret
+ * material: the roster holds only non-secret metadata (bus URL, fingerprint,
+ * agent id, identity-store path).
+ */
+function loadRosterIdentityStore(root: string): string | undefined {
+  const storeFile = join(root, ".agent-bus.local");
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(storeFile, "utf8"));
+  } catch {
+    return undefined; // missing/malformed roster — fall through to the default
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const candidate =
+    (typeof record["identityStore"] === "string" && record["identityStore"].trim()) ||
+    (typeof record["identity_store"] === "string" && record["identity_store"].trim());
+  if (!candidate) return undefined;
+  // Roster paths are typically absolute (AgentBusEnrol writes the resolved
+  // identity store), but resolve any relative value against the same root so
+  // the tool stays usable when run from a subdirectory.
+  return resolvePath(candidate, root);
 }
 
 /** Resolve the `agent-busctl` binary path: explicit > `AGENT_BUSCTL` env > root-local > PATH. */

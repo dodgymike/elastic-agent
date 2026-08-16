@@ -11,7 +11,7 @@
 //
 // Compiled and executed standalone by the `test:agent-bus` npm script.
 import agentBus from "../tools/AgentBus.js";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, chmodSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -170,9 +170,41 @@ async function main(): Promise<void> {
     await agentBus({ action: "whoami", binary: defaulted.binary, root: dir });
     const defaultedCalls = readCallLog(defaulted.log);
     check(
-      "default identity resolves to <root>/tmp/elastic-identity",
+      "default identity resolves to <root>/tmp/elastic-identity when no roster exists",
       sameArgs(defaultedCalls[0]?.slice(0, 2) ?? [], [
         "--identity", abs(dir, "tmp/elastic-identity"),
+      ]),
+    );
+
+    // ---- 3b. an enrolled .agent-bus.local identityStore is preferred over the
+    //          default, so the tool never points --identity at a store that has
+    //          no enrolled identity (the root cause of `whoami` exit 3).
+    const rosterDir = join(dir, "roster-root");
+    mkdirSync(rosterDir, { recursive: true });
+    writeFileSync(
+      join(rosterDir, ".agent-bus.local"),
+      JSON.stringify({ busUrl: "https://127.0.0.1:18090", identityStore: "tmp/enrolled-store" }),
+    );
+    const rosterPreferred = makeFakeAgentBusctl({});
+    await agentBus({ action: "whoami", binary: rosterPreferred.binary, root: rosterDir });
+    const rosterCalls = readCallLog(rosterPreferred.log);
+    check(
+      "default identity prefers .agent-bus.local identityStore over <root>/tmp/elastic-identity",
+      sameArgs(rosterCalls[0]?.slice(0, 2) ?? [], [
+        "--identity", abs(rosterDir, "tmp/enrolled-store"),
+      ]),
+    );
+    const explicitOverride = makeFakeAgentBusctl({});
+    await agentBus({
+      action: "whoami",
+      binary: explicitOverride.binary,
+      root: rosterDir,
+      identity: "explicit-store",
+    });
+    check(
+      "explicit identity still overrides the roster identityStore",
+      sameArgs(readCallLog(explicitOverride.log)[0]?.slice(0, 2) ?? [], [
+        "--identity", abs(rosterDir, "explicit-store"),
       ]),
     );
 

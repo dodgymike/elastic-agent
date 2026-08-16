@@ -691,7 +691,7 @@ const tools = [
                 to: { type: "string", description: "[send] fully-qualified recipient <bus-id>.<agent-id>; a bare name is refused by agent-busctl." },
                 message: { type: "string", description: "[send] the message body, sent verbatim as a single argument. Must never carry secret-store or data.json contents." },
                 json: { type: "boolean", description: "machine-readable output (--json); defaults true." },
-                identity: { type: "string", description: "override the default --identity <dir> credential-store directory; default <root>/tmp/elastic-identity." },
+                identity: { type: "string", description: "override the default --identity <dir> credential-store directory; default <root>/tmp/elastic-identity, or the enrolled identityStore in .agent-bus.local when present." },
                 persistSession: { type: "boolean", description: "apply --persist-session to reuse the session token across processes; defaults true." },
                 busUrl: { type: "string", description: "override the --bus <url>; when omitted the CLI resolves it from its own store." },
                 binary: { type: "string", description: "path to the agent-busctl binary; default <root>/agent-busctl." },
