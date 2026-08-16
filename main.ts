@@ -78,7 +78,7 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
-import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
+import { classifyToolCall, createToolSafetyLogger, toolRiskLevel } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
 
@@ -1492,7 +1492,11 @@ async function dispatchToolCall(output, configData, goalKey) {
             // threaded into the classifier so its edit/write policy and
             // bypass behavior follow the user's configuration.
             toolSafetyConfig,
-            promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
+            // Docker/container detection selects the classifier prompt
+            // variant: Docker uses the relaxed filesystem-policy addendum,
+            // non-Docker keeps the strict start/working-directory boundary.
+            isDocker: runtimeConfig.isDocker,
+            promptDirectory: mainCwd,
             logger: createToolSafetyLogger(toolChildIndent),
         });
     } catch (error) {
