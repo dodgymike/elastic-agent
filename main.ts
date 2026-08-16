@@ -1535,7 +1535,16 @@ async function dispatchToolCall(output, configData, goalKey) {
     // failure here fails the call safely instead of running the tool from an
     // unexpected directory. The switch happens before the timer starts so a
     // chdir failure never leaves an instrumented call running.
-    const configuredStartDir = toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
+    //
+    // The AgentBus tool is excluded from this start-dir injection. agent-busctl
+    // resolves its workspace root, binary location, and enrolled credential
+    // store relative to the process it was launched from (default
+    // <root>/tmp/elastic-identity / <root>/agent-busctl), so running it from
+    // --start-dir (for example a review worktree) could point it at the wrong
+    // root. It therefore runs from the process working directory, keeping the
+    // injected start-directory switch from altering agent-bus behavior.
+    const isAgentBusTool = output.name === "AgentBus";
+    const configuredStartDir = !isAgentBusTool && toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
     let toolCwdSwitch: ReturnType<typeof switchToStartDir>;
     try {
         toolCwdSwitch = switchToStartDir(configuredStartDir);
