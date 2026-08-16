@@ -80,6 +80,7 @@ import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from 
 import { Command } from "commander";
 import { classifyToolCall, createToolSafetyLogger, toolRiskLevel } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
+import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
 import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
 
 const terminalColor = terminalColorEnabled(process.stdout);
@@ -658,7 +659,7 @@ const tools = [
     {
         type: "function", name: "ExecuteCommand",
         usage_prompt: "tools/execute-command-usage.md",
-        description: "Run a Bash command and return its exit code, standard output, and standard error. Parameters are safely supplied as positional arguments.",
+        description: "Run a Bash command and return its exit code, standard output, and standard error. Parameters are safely supplied as positional arguments. Refuses all agent-bus actions (agent-busctl/agentbus/agent-bus); use the AgentBus or AgentBusEnrol tool instead.",
         parameters: {
             type: "object",
             properties: { command: { type: "string" }, parameters: { type: "array", items: { type: "string" } } },
@@ -695,14 +696,14 @@ const tools = [
         parameters: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["whoami", "watch", "send"], description: "Which agent-busctl action to run; inferred when omitted (to -> send, a wait bound -> watch, otherwise whoami)." },
+                action: { type: "string", enum: ["whoami", "watch", "send", "agents", "logout", "help"], description: "Which agent-busctl action to run; inferred when omitted (to -> send, a wait bound -> watch, otherwise whoami). enrol lives in AgentBusEnrol and broadcast is not a real subcommand." },
                 verify: { type: "boolean", description: "[whoami] authenticate against the bus (--verify)." },
                 forDuration: { type: "string", description: "[watch] how long to wait for a message, e.g. \"30s\" (--for <dur>)." },
                 count: { type: "number", description: "[watch] stop after N messages (--count N)." },
                 to: { type: "string", description: "[send] fully-qualified recipient <bus-id>.<agent-id>; a bare name is refused by agent-busctl." },
                 message: { type: "string", description: "[send] the message body, sent verbatim as a single argument. Must never carry secret-store or data.json contents." },
                 json: { type: "boolean", description: "machine-readable output (--json); defaults true." },
-                identity: { type: "string", description: "override the default --identity <dir> credential-store directory; default <root>/tmp/elastic-identity." },
+                identity: { type: "string", description: "override the default --identity <dir> credential-store directory; default <root>/tmp/elastic-identity, or the enrolled identityStore in .agent-bus.local when present." },
                 persistSession: { type: "boolean", description: "apply --persist-session to reuse the session token across processes; defaults true." },
                 busUrl: { type: "string", description: "override the --bus <url>; when omitted the CLI resolves it from its own store." },
                 binary: { type: "string", description: "path to the agent-busctl binary; default <root>/agent-busctl." },
@@ -1461,10 +1462,24 @@ async function dispatchToolCall(output, configData, goalKey) {
     // refused with an actionable Git tool suggestion before the general safety
     // classifier runs; unclear mappings are sent to the git-command router LLM
     // and its refusal is respected here.
+    //
+    // Agent-bus commands are refused here (before the safety classifier, which
+    // makes LLM/HTTP calls) because all agent-bus activity is owned by the
+    // dedicated AgentBus (whoami/watch/send/agents/logout/help) and
+    // AgentBusEnrol (enroll) tools.
+    // `detectAgentBusCommand` is pure string logic with no I/O, so this guard
+    // runs safely before any file/identity read or HTTP call. See
+    // tools/agent-bus-detect.ts for the exact matching rules.
     if (output.name === "ExecuteCommand") {
         const command = toolArguments && typeof toolArguments === "object" && !Array.isArray(toolArguments)
             ? toolArguments.command
             : undefined;
+        const commandText = typeof command === "string" ? command : "";
+        const agentBusDetection = detectAgentBusCommand(commandText);
+        if (agentBusDetection.action === "refuse") {
+            renderToolCallFailed(output, { error: agentBusDetection.reason });
+            return { output, toolArguments, toolResponse: { error: agentBusDetection.reason }, errorMessage: agentBusDetection.reason };
+        }
         const routing = await routeGitExecuteCommand(command, {
             runtime: client,
             promptPath: isAbsolute(GIT_COMMAND_ROUTER_PROMPT_PATH)
@@ -1537,7 +1552,16 @@ async function dispatchToolCall(output, configData, goalKey) {
     // failure here fails the call safely instead of running the tool from an
     // unexpected directory. The switch happens before the timer starts so a
     // chdir failure never leaves an instrumented call running.
-    const configuredStartDir = toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
+    //
+    // The AgentBus tool is excluded from this start-dir injection. agent-busctl
+    // resolves its workspace root, binary location, and enrolled credential
+    // store relative to the process it was launched from (default
+    // <root>/tmp/elastic-identity / <root>/agent-busctl), so running it from
+    // --start-dir (for example a review worktree) could point it at the wrong
+    // root. It therefore runs from the process working directory, keeping the
+    // injected start-directory switch from altering agent-bus behavior.
+    const isAgentBusTool = output.name === "AgentBus";
+    const configuredStartDir = !isAgentBusTool && toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
     let toolCwdSwitch: ReturnType<typeof switchToStartDir>;
     try {
         toolCwdSwitch = switchToStartDir(configuredStartDir);

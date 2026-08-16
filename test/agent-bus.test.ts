@@ -1,8 +1,9 @@
 // Regression tests for tools/AgentBus.ts: the tool now talks to the bus ONLY
 // through the local `./agent-busctl` CLI for whoami / watch (long-poll wait) /
-// send. There is no HTTP/fetch path at all. These tests drive a fake
-// `agent-busctl` executable and assert:
-//   1. the tool invokes the CLI for each action (whoami / watch / send);
+// send / agents / logout / help. There is no HTTP/fetch path at all. These
+// tests drive a fake `agent-busctl` executable and assert:
+//   1. the tool invokes the CLI for each action (whoami / watch / send /
+//      agents / logout / help);
 //   2. the default flags `--identity <dir>` and `--persist-session` are always
 //      prepended (and can be overridden);
 //   3. no HTTP request is ever made (the tool never constructs a fetch/HTTP
@@ -11,7 +12,7 @@
 //
 // Compiled and executed standalone by the `test:agent-bus` npm script.
 import agentBus from "../tools/AgentBus.js";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, chmodSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -57,6 +58,18 @@ function makeFakeAgentBusctl(outputByAction: Record<string, string>): { binary: 
     'elif printf "%s\\n" "$@" | grep -q "send"; then',
     '  cat <<\'EOF\'',
     outputByAction.send ?? '{"ok":true,"message_id":"abc123"}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "agents"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.agents ?? '{"agents":[{"agent_id":"bus-a.agent-1"},{"agent_id":"bus-a.agent-2"}]}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "logout"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.logout ?? '{"ok":true,"session":"cleared"}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "help"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.help ?? "Usage: agent-busctl <command>  Commands: whoami watch send agents logout help",
     "EOF",
     'else',
     "  echo 'no action' >&2",
@@ -165,14 +178,111 @@ async function main(): Promise<void> {
     check("send returns the CLI success output", (sendResult.stdout ?? "").includes('"ok":true'));
     check("send produces no parsed messages", sendResult.messages.length === 0);
 
+    // ---- 2b. agents ---------------------------------------------------------
+    const agents = makeFakeAgentBusctl({});
+    const agentsResult = await agentBus({
+      action: "agents",
+      binary: agents.binary,
+      root: dir,
+      identity: "tmp/elastic-identity",
+    });
+    const agentsCalls = readCallLog(agents.log);
+    check("agents invokes exactly one agent-busctl process", agentsCalls.length === 1);
+    check(
+      "agents argv carries defaults plus the agents subcommand and --json",
+      sameArgs(agentsCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "agents",
+        "--json",
+      ]),
+    );
+    check("agents returns the CLI stdout", (agentsResult.stdout ?? "").includes("bus-a.agent-2"));
+    check("agents produces no parsed messages", agentsResult.messages.length === 0);
+
+    // ---- 2c. logout ---------------------------------------------------------
+    const logout = makeFakeAgentBusctl({});
+    const logoutResult = await agentBus({
+      action: "logout",
+      binary: logout.binary,
+      root: dir,
+      identity: "tmp/elastic-identity",
+    });
+    const logoutCalls = readCallLog(logout.log);
+    check("logout invokes exactly one agent-busctl process", logoutCalls.length === 1);
+    check(
+      "logout argv carries defaults plus the logout subcommand and --json",
+      sameArgs(logoutCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "logout",
+        "--json",
+      ]),
+    );
+    check("logout returns the CLI success output", (logoutResult.stdout ?? "").includes('"ok":true'));
+    check("logout produces no parsed messages", logoutResult.messages.length === 0);
+
+    // ---- 2d. help -----------------------------------------------------------
+    const help = makeFakeAgentBusctl({});
+    const helpResult = await agentBus({
+      action: "help",
+      binary: help.binary,
+      root: dir,
+      identity: "tmp/elastic-identity",
+    });
+    const helpCalls = readCallLog(help.log);
+    check("help invokes exactly one agent-busctl process", helpCalls.length === 1);
+    check(
+      "help argv carries defaults plus the help subcommand and no --json",
+      sameArgs(helpCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "help",
+      ]),
+    );
+    check("help returns the CLI usage text", (helpResult.stdout ?? "").includes("Usage: agent-busctl"));
+    check("help produces no parsed messages", helpResult.messages.length === 0);
+
     // ---- 3. default flags: identity default + --persist-session -------------
     const defaulted = makeFakeAgentBusctl({});
     await agentBus({ action: "whoami", binary: defaulted.binary, root: dir });
     const defaultedCalls = readCallLog(defaulted.log);
     check(
-      "default identity resolves to <root>/tmp/elastic-identity",
+      "default identity resolves to <root>/tmp/elastic-identity when no roster exists",
       sameArgs(defaultedCalls[0]?.slice(0, 2) ?? [], [
         "--identity", abs(dir, "tmp/elastic-identity"),
+      ]),
+    );
+
+    // ---- 3b. an enrolled .agent-bus.local identityStore is preferred over the
+    //          default, so the tool never points --identity at a store that has
+    //          no enrolled identity (the root cause of `whoami` exit 3).
+    const rosterDir = join(dir, "roster-root");
+    mkdirSync(rosterDir, { recursive: true });
+    writeFileSync(
+      join(rosterDir, ".agent-bus.local"),
+      JSON.stringify({ busUrl: "https://127.0.0.1:18090", identityStore: "tmp/enrolled-store" }),
+    );
+    const rosterPreferred = makeFakeAgentBusctl({});
+    await agentBus({ action: "whoami", binary: rosterPreferred.binary, root: rosterDir });
+    const rosterCalls = readCallLog(rosterPreferred.log);
+    check(
+      "default identity prefers .agent-bus.local identityStore over <root>/tmp/elastic-identity",
+      sameArgs(rosterCalls[0]?.slice(0, 2) ?? [], [
+        "--identity", abs(rosterDir, "tmp/enrolled-store"),
+      ]),
+    );
+    const explicitOverride = makeFakeAgentBusctl({});
+    await agentBus({
+      action: "whoami",
+      binary: explicitOverride.binary,
+      root: rosterDir,
+      identity: "explicit-store",
+    });
+    check(
+      "explicit identity still overrides the roster identityStore",
+      sameArgs(readCallLog(explicitOverride.log)[0]?.slice(0, 2) ?? [], [
+        "--identity", abs(rosterDir, "explicit-store"),
       ]),
     );
 
