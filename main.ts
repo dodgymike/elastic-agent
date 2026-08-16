@@ -79,6 +79,7 @@ import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from 
 import { Command } from "commander";
 import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
+import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
 import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
 
 const terminalColor = terminalColorEnabled(process.stdout);
@@ -1449,10 +1450,23 @@ async function dispatchToolCall(output, configData, goalKey) {
     // refused with an actionable Git tool suggestion before the general safety
     // classifier runs; unclear mappings are sent to the git-command router LLM
     // and its refusal is respected here.
+    //
+    // Agent-bus commands are refused here (before the safety classifier, which
+    // makes LLM/HTTP calls) because all agent-bus activity is owned by the
+    // dedicated AgentBus (whoami/watch/send) and AgentBusEnrol (enroll) tools.
+    // `detectAgentBusCommand` is pure string logic with no I/O, so this guard
+    // runs safely before any file/identity read or HTTP call. See
+    // tools/agent-bus-detect.ts for the exact matching rules.
     if (output.name === "ExecuteCommand") {
         const command = toolArguments && typeof toolArguments === "object" && !Array.isArray(toolArguments)
             ? toolArguments.command
             : undefined;
+        const commandText = typeof command === "string" ? command : "";
+        const agentBusDetection = detectAgentBusCommand(commandText);
+        if (agentBusDetection.action === "refuse") {
+            renderToolCallFailed(output, { error: agentBusDetection.reason });
+            return { output, toolArguments, toolResponse: { error: agentBusDetection.reason }, errorMessage: agentBusDetection.reason };
+        }
         const routing = await routeGitExecuteCommand(command, {
             runtime: client,
             promptPath: isAbsolute(GIT_COMMAND_ROUTER_PROMPT_PATH)
