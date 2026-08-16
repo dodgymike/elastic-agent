@@ -39,6 +39,26 @@ agent-facing operating instructions are not part of this extraction.
 | `review-prompt.txt`             | `reviewPromptTemplate`                 | `main.ts`     |
 | `json-retry-hint.txt`           | `JSON_RETRY_HINT`                      | `llm/deepseek-v4-adapter.ts` |
 
+## Tool safety classifier prompts
+
+The tool-safety classifier (`tool-safety-classifier.ts`) loads its LLM prompt
+through `TOOL_SAFETY_PROMPT_PATH`, which defaults to
+`prompts/tool-safety-classifier.md`. The prompt has been split into a shared
+base and two filesystem-policy addenda so the runtime can select a strict
+(non-Docker) or relaxed (Docker) policy from startup detection:
+
+| File                                      | Purpose                                                                 |
+|-------------------------------------------|-------------------------------------------------------------------------|
+| `tool-safety-classifier.base.md`          | Shared classifier rules: JSON contract, data-loss/exfiltration/secret/destructive/injection denials, the edit/write gate, read-only allow patterns, and the AgentBus allowance. No filesystem-boundary policy and no TOOL CALL footer. |
+| `tool-safety-classifier.non-docker.md`    | Strict filesystem addendum: reads and writes must stay inside the working/startup directory and configured trusted directories. Ends with the TOOL CALL footer. |
+| `tool-safety-classifier.docker.md`        | Relaxed filesystem addendum: for a detected Docker container session, filesystem access outside the working/startup directory is permitted while data.json, credentials, secrets, and unsafe commands remain forbidden. Ends with the TOOL CALL footer. |
+| `tool-safety-classifier.md`               | Assembled non-Docker variant (base + non-docker addendum). This remains the runtime default until startup-based variant selection is wired into the classifier loader. |
+
+An assembled variant is always `base` followed by exactly one policy addendum;
+the addendum supplies the `TOOL CALL:` footer so the footer stays at the end of
+the assembled prompt. The loader appends the tool name and normalized
+parameters after the footer.
+
 ## Loading mechanism
 
 All seven files are read synchronously at module load with Node's `readFileSync`,
