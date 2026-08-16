@@ -15,7 +15,9 @@ import type { ToolSafetyConfig } from "./tool-safety-config.js";
  *      /tmp/data.json, which is the runtime's internal state file and is
  *      never a legitimate tool target);
  *    - protected files (.env, SSH keys, credential/token stores);
- *    - path traversal and absolute paths that escape the workspace;
+ *    - path traversal and absolute paths that escape the workspace (the
+ *      workspace boundary is relaxed in Docker mode, where container-local
+ *      filesystem access outside the startup directory is permitted);
  *    - destructive filesystem/database/host commands;
  *    - file/secret exfiltration commands;
  *    - command-injection shells;
@@ -403,12 +405,16 @@ function fileEditPolicyVerdict(
   target: string | null,
   config: ToolSafetyConfig,
   roots: readonly string[],
+  allowOutsideWorkspace: boolean,
 ): StaticToolSafetyVerdict | null {
   if (target === null || target.trim() === "") return null;
   if (!config.allowAgentSourceModifications) {
     return unsafe(`${toolName} modifies files, which is denied because --allow-agent-source-modifications is not set.`);
   }
-  if (!isInsideAnyBoundary(target, roots)) {
+  // Docker mode relaxes the editable-directory boundary: writes are permitted
+  // anywhere in the running container session. The edit/write gate above and
+  // the protected-file checks in classifyFileTool still apply.
+  if (!allowOutsideWorkspace && !isInsideAnyBoundary(target, roots)) {
     return unsafe(`${toolName} target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
   }
   return null;
@@ -512,7 +518,12 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
   }
 }
 
-function classifyFileTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
+function classifyFileTool(
+  toolName: string,
+  parameters: Record<string, unknown>,
+  roots: readonly string[],
+  allowOutsideWorkspace: boolean,
+): StaticToolSafetyVerdict {
   const pathKey = toolName === "ListDirectory" ? "directory" : "path";
   const target = stringValue(parameters[pathKey]);
   if (target === null || target.trim() === "") {
@@ -525,11 +536,17 @@ function classifyFileTool(toolName: string, parameters: Record<string, unknown>,
   const protectedReason = protectedPathReason(target);
   if (protectedReason) return unsafe(protectedReason);
 
-  if (hasPathTraversal(target)) {
-    return unsafe(`${toolName} path '${target}' contains '..' path traversal.`);
-  }
-  if (resolvesOutsideAllTrustedRoots(target, roots)) {
-    return unsafe(`${toolName} path '${target}' resolves outside the workspace.`);
+  // Docker mode relaxes the workspace boundary and traversal to the container
+  // boundary: container-local reads/writes outside the startup directory are
+  // permitted for the running container session. The protected-file and
+  // data.json checks above still apply in both modes.
+  if (!allowOutsideWorkspace) {
+    if (hasPathTraversal(target)) {
+      return unsafe(`${toolName} path '${target}' contains '..' path traversal.`);
+    }
+    if (resolvesOutsideAllTrustedRoots(target, roots)) {
+      return unsafe(`${toolName} path '${target}' resolves outside the workspace.`);
+    }
   }
 
   // Write/Edit content can persist credentials or secret-store material.
@@ -560,7 +577,11 @@ function classifyFileTool(toolName: string, parameters: Record<string, unknown>,
     }
   }
 
-  return safe(`${toolName} target '${target}' stays within the workspace and is not a protected file.`);
+  return safe(
+    allowOutsideWorkspace
+      ? `${toolName} target '${target}' is permitted for this container session and is not a protected file.`
+      : `${toolName} target '${target}' stays within the workspace and is not a protected file.`,
+  );
 }
 
 /** Split a shell command into words while separating redirection operators. */
@@ -661,11 +682,16 @@ function executeCommandEditPolicyVerdict(
   command: string,
   config: ToolSafetyConfig,
   roots: readonly string[],
+  allowOutsideWorkspace: boolean,
 ): StaticToolSafetyVerdict | null {
   if (!isFileModifyingCommand(command)) return null;
   if (!config.allowAgentSourceModifications) {
     return unsafe("ExecuteCommand modifies files, which is denied because --allow-agent-source-modifications is not set.");
   }
+  // Docker mode relaxes the editable-directory boundary; the remaining static
+  // checks (destructive commands, exfiltration, injection, protected files)
+  // still run after this policy gate.
+  if (allowOutsideWorkspace) return null;
   const targets = fileModificationTargets(command);
   if (targets.length === 0) {
     return unsafe("ExecuteCommand modifies files but its target paths could not be determined for the configured editable directories.");
@@ -681,6 +707,7 @@ function executeCommandEditPolicyVerdict(
 function classifyExecuteCommand(
   parameters: Record<string, unknown>,
   roots: readonly string[],
+  allowOutsideWorkspace: boolean,
   config?: ToolSafetyConfig,
   editRoots?: readonly string[],
 ): StaticToolSafetyVerdict {
@@ -714,7 +741,7 @@ function classifyExecuteCommand(
     return unsafe("ExecuteCommand accesses a protected credential file.");
   }
 
-  const destructiveCheck = destructiveCommandCheck(command, roots);
+  const destructiveCheck = destructiveCommandCheck(command, roots, allowOutsideWorkspace);
   if (destructiveCheck?.severity === "unsafe") return unsafe(`ExecuteCommand is destructive: ${destructiveCheck.reason}`);
   if (destructiveCheck?.severity === "ambiguous") return ambiguous(`ExecuteCommand may delete data: ${destructiveCheck.reason}`);
 
@@ -729,12 +756,14 @@ function classifyExecuteCommand(
   }
 
   if (config) {
-    const policyVerdict = executeCommandEditPolicyVerdict(command, config, editRoots ?? editableRoots(config));
+    const policyVerdict = executeCommandEditPolicyVerdict(command, config, editRoots ?? editableRoots(config), allowOutsideWorkspace);
     if (policyVerdict) return policyVerdict;
   }
 
-  const outsideReason = absolutePathEscapeReason(command, roots);
-  if (outsideReason) return unsafe(`ExecuteCommand accesses a path outside the workspace: ${outsideReason}`);
+  if (!allowOutsideWorkspace) {
+    const outsideReason = absolutePathEscapeReason(command, roots);
+    if (outsideReason) return unsafe(`ExecuteCommand accesses a path outside the workspace: ${outsideReason}`);
+  }
 
   if (isHarmlessNoOp(command)) {
     return safe("ExecuteCommand is a harmless no-op that reads or writes nothing outside /dev/null.");
@@ -757,7 +786,11 @@ interface DestructiveCommandCheck {
   readonly reason: string;
 }
 
-function destructiveCommandCheck(command: string, roots: readonly string[]): DestructiveCommandCheck | null {
+function destructiveCommandCheck(
+  command: string,
+  roots: readonly string[],
+  allowOutsideWorkspace: boolean,
+): DestructiveCommandCheck | null {
   const lower = command.toLowerCase();
 
   if (/\bmkfs(\.[a-z]+)?\b/.test(lower)) return { severity: "unsafe", reason: "mkfs creates a filesystem and destroys existing data." };
@@ -787,7 +820,12 @@ function destructiveCommandCheck(command: string, roots: readonly string[]): Des
         return { severity: "unsafe", reason: `rm -rf target '${target}' would delete the filesystem root, home, or the workspace itself.` };
       }
       if (/^[A-Za-z]:[\\/]/.test(target)) return { severity: "unsafe", reason: `rm -rf target '${target}' is an absolute Windows path.` };
-      if (hasPathTraversal(target) || resolvesOutsideAllTrustedRoots(target, roots)) {
+      // Path traversal stays unsafe in both modes: a '..' rm target cannot be
+      // safely distinguished from deleting the workspace or container root.
+      // Docker mode relaxes only the absolute outside-workspace denial, so a
+      // container-local absolute rm target falls through to LLM review rather
+      // than being statically allowed.
+      if (hasPathTraversal(target) || (!allowOutsideWorkspace && resolvesOutsideAllTrustedRoots(target, roots))) {
         return { severity: "unsafe", reason: `rm -rf target '${target}' resolves outside the workspace.` };
       }
     }
@@ -1331,6 +1369,14 @@ export function classifyToolCallStatically(
     readonly workspaceRoot?: string;
     readonly allowedDirectories?: readonly string[];
     readonly toolSafetyConfig?: ToolSafetyConfig;
+    /**
+     * Docker/container detection result. When true, filesystem reads and
+     * writes outside the workspace/startup directory are permitted for the
+     * running container session, while data.json, credential/secret files, and
+     * unsafe commands remain protected. Defaults to false (strict boundary)
+     * so callers opt in with the same flag that selects the Docker prompt.
+     */
+    readonly isDocker?: boolean;
   } = {},
 ): StaticToolSafetyVerdict {
   if (typeof toolName !== "string" || toolName.trim() === "") {
@@ -1341,6 +1387,7 @@ export function classifyToolCallStatically(
     : {};
   const roots = trustedRoots(options.workspaceRoot ?? process.cwd(), options.allowedDirectories);
   const config = options.toolSafetyConfig;
+  const allowOutsideWorkspace = options.isDocker === true;
 
   // --disable-classifier bypasses all safety classification. The returned
   // safe verdict is silent by contract, so no safety response is rendered.
@@ -1355,20 +1402,20 @@ export function classifyToolCallStatically(
     case "Read":
     case "FileSize":
     case "ListDirectory":
-      return classifyFileTool(toolName, record, roots);
+      return classifyFileTool(toolName, record, roots, allowOutsideWorkspace);
     case "Write":
     case "Edit":
     case "Delete": {
       if (config) {
         const target = stringValue(record.path);
-        const policyVerdict = fileEditPolicyVerdict(toolName, target, config, policyRoots);
+        const policyVerdict = fileEditPolicyVerdict(toolName, target, config, policyRoots, allowOutsideWorkspace);
         if (policyVerdict) return policyVerdict;
-        return classifyFileTool(toolName, record, policyRoots);
+        return classifyFileTool(toolName, record, policyRoots, allowOutsideWorkspace);
       }
-      return classifyFileTool(toolName, record, roots);
+      return classifyFileTool(toolName, record, roots, allowOutsideWorkspace);
     }
     case "ExecuteCommand":
-      return classifyExecuteCommand(record, combinedRoots, config, policyRoots);
+      return classifyExecuteCommand(record, combinedRoots, allowOutsideWorkspace, config, policyRoots);
     case "Http":
       return classifyHttp(record);
     case "HttpRequest":
@@ -1522,6 +1569,7 @@ export async function classifyToolCall(
     workspaceRoot: options.workspaceRoot,
     allowedDirectories: options.allowedDirectories,
     toolSafetyConfig: options.toolSafetyConfig,
+    isDocker: options.isDocker ?? isDockerFromEnvironment(process.env),
   });
 
   if (staticVerdict.decision === "safe") {
