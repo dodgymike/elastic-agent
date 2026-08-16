@@ -6,8 +6,11 @@ import {
   classifyToolCall,
   classifyToolCallStatically,
   createToolSafetyLogger,
+  isDockerFromEnvironment,
   normalizeToolParameters,
   parseToolSafetyClassification,
+  resolveToolSafetyPrompt,
+  resolveToolSafetyPromptVariant,
   toolRiskLevel,
 } from "../tool-safety-classifier.js";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "../llm/multi-turn-runtime.js";
@@ -81,6 +84,21 @@ type TestToolSafetyConfig = {
 /** Like staticVerdict but with a resolved tool-safety CLI config. */
 function staticVerdictWithConfig(toolName: string, parameters: unknown, toolSafetyConfig: TestToolSafetyConfig) {
   return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE, toolSafetyConfig });
+}
+
+/** Like staticVerdict but with an explicit Docker/container detection flag. */
+function staticVerdictWithDocker(toolName: string, parameters: unknown, isDocker: boolean) {
+  return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE, isDocker });
+}
+
+/** Like staticVerdictWithConfig but with an explicit Docker/container detection flag. */
+function staticVerdictWithConfigAndDocker(
+  toolName: string,
+  parameters: unknown,
+  toolSafetyConfig: TestToolSafetyConfig,
+  isDocker: boolean,
+) {
+  return classifyToolCallStatically(toolName, parameters, { workspaceRoot: WORKSPACE, toolSafetyConfig, isDocker });
 }
 
 function parseAs(text: string): { valid: true; safe: boolean; reason: string } | null {
@@ -709,6 +727,244 @@ async function main(): Promise<void> {
     check(
       "symlinked alias cannot smuggle a realpath that escapes the start dir",
       classifyToolCallStatically("Read", { path: join(tmpDir, "outside.txt") }, canonicalPathOptions).decision === "unsafe",
+    );
+
+    // ------------------------------------------------------------------
+    // 5e. Docker prompt-variant selection: the runtime's isDocker flag (or
+    //     AGENT_IN_DOCKER) selects the Docker or non-Docker filesystem-policy
+    //     addendum, which is composed with the shared base prompt and included
+    //     in actual classifier LLM calls.
+    // ------------------------------------------------------------------
+    check(
+      "isDocker=true selects the docker classifier-prompt variant",
+      resolveToolSafetyPromptVariant(true) === "docker",
+    );
+    check(
+      "isDocker=false selects the non-docker classifier-prompt variant",
+      resolveToolSafetyPromptVariant(false) === "non-docker",
+    );
+    check(
+      "AGENT_IN_DOCKER=1 opts into the docker variant",
+      isDockerFromEnvironment({ AGENT_IN_DOCKER: "1" }) === true,
+    );
+    check(
+      "AGENT_IN_DOCKER=true opts into the docker variant",
+      isDockerFromEnvironment({ AGENT_IN_DOCKER: "true" }) === true,
+    );
+    check(
+      "AGENT_IN_DOCKER=0 stays non-docker",
+      isDockerFromEnvironment({ AGENT_IN_DOCKER: "0" }) === false,
+    );
+    check(
+      "missing AGENT_IN_DOCKER stays non-docker",
+      isDockerFromEnvironment({}) === false,
+    );
+
+    const promptRepoRoot = resolve(__dirname, "..", "..", "..");
+    const dockerResolved = resolveToolSafetyPrompt(true, promptRepoRoot, {});
+    const nonDockerResolved = resolveToolSafetyPrompt(false, promptRepoRoot, {});
+    check(
+      "docker prompt resolution composes the base prompt with the docker addendum",
+      dockerResolved.kind === "composed"
+        && dockerResolved.variant === "docker"
+        && dockerResolved.basePath.endsWith("tool-safety-classifier.base.md")
+        && dockerResolved.addendumPath.endsWith("tool-safety-classifier.docker.md"),
+    );
+    check(
+      "non-docker prompt resolution composes the base prompt with the non-docker addendum",
+      nonDockerResolved.kind === "composed"
+        && nonDockerResolved.variant === "non-docker"
+        && nonDockerResolved.basePath.endsWith("tool-safety-classifier.base.md")
+        && nonDockerResolved.addendumPath.endsWith("tool-safety-classifier.non-docker.md"),
+    );
+
+    const dockerAddendumPath = dockerResolved.kind === "composed" ? dockerResolved.addendumPath : "";
+    const nonDockerAddendumPath = nonDockerResolved.kind === "composed" ? nonDockerResolved.addendumPath : "";
+    const dockerAddendumText = dockerAddendumPath ? readFileSync(dockerAddendumPath, "utf8") : "";
+    const nonDockerAddendumText = nonDockerAddendumPath ? readFileSync(nonDockerAddendumPath, "utf8") : "";
+    check(
+      "docker addendum contains the relaxed filesystem-policy wording",
+      dockerAddendumText.includes("Filesystem policy: Docker (relaxed)")
+        && /filesystem reads and writes outside the working\/startup\s+directory are permitted/.test(dockerAddendumText),
+    );
+    check(
+      "non-docker addendum contains the strict filesystem-policy wording",
+      nonDockerAddendumText.includes("Filesystem policy: non-Docker (strict)")
+        && /Reading or writing files outside those directories is a permission violation/.test(nonDockerAddendumText),
+    );
+
+    const fullPromptResolved = resolveToolSafetyPrompt(true, promptRepoRoot, {
+      TOOL_SAFETY_PROMPT_PATH: "prompts/custom-classifier.md",
+    });
+    check(
+      "TOOL_SAFETY_PROMPT_PATH wins as a single full prompt template",
+      fullPromptResolved.kind === "full" && fullPromptResolved.path.endsWith("custom-classifier.md"),
+    );
+
+    // The selected addendum must be part of the actual classifier LLM call.
+    const dockerPromptCapture: string[] = [];
+    const dockerPromptRuntime = mockRuntime(async (input) => {
+      dockerPromptCapture.push(input);
+      return '{"safe":true,"reason":"docker prompt ok"}';
+    });
+    const dockerPromptResult = await classifyToolCall("ExecuteCommand", { command: "mkdir -p ./build" }, {
+      runtime: dockerPromptRuntime,
+      workspaceRoot: WORKSPACE,
+      promptDirectory: promptRepoRoot,
+      isDocker: true,
+      logger: silentLogger,
+    });
+    check(
+      "Docker classifier call composes the Docker (relaxed) filesystem addendum",
+      dockerPromptResult.safe === true
+        && dockerPromptResult.source === "llm"
+        && dockerPromptCapture.length === 1
+        && /Filesystem policy: Docker \(relaxed\)/.test(dockerPromptCapture[0])
+        && /filesystem reads and writes outside the working\/startup\s+directory are permitted/.test(dockerPromptCapture[0])
+        && !/Filesystem policy: non-Docker \(strict\)/.test(dockerPromptCapture[0]),
+    );
+
+    const nonDockerPromptCapture: string[] = [];
+    const nonDockerPromptRuntime = mockRuntime(async (input) => {
+      nonDockerPromptCapture.push(input);
+      return '{"safe":true,"reason":"non-docker prompt ok"}';
+    });
+    const nonDockerPromptResult = await classifyToolCall("ExecuteCommand", { command: "mkdir -p ./build" }, {
+      runtime: nonDockerPromptRuntime,
+      workspaceRoot: WORKSPACE,
+      promptDirectory: promptRepoRoot,
+      isDocker: false,
+      logger: silentLogger,
+    });
+    check(
+      "non-Docker classifier call composes the non-Docker (strict) filesystem addendum",
+      nonDockerPromptResult.safe === true
+        && nonDockerPromptResult.source === "llm"
+        && nonDockerPromptCapture.length === 1
+        && /Filesystem policy: non-Docker \(strict\)/.test(nonDockerPromptCapture[0])
+        && /Reading or writing files outside those directories is a permission violation/.test(nonDockerPromptCapture[0])
+        && !/Filesystem policy: Docker \(relaxed\)/.test(nonDockerPromptCapture[0]),
+    );
+
+    // ------------------------------------------------------------------
+    // 5f. Tool-safety regression: filesystem operations outside the
+    //     startup directory under Docker and non-Docker modes. Docker mode
+    //     relaxes the workspace boundary for container-local access while
+    //     keeping data.json, protected files, the edit/write gate, and
+    //     destructive commands denied.
+    // ------------------------------------------------------------------
+    check(
+      "non-Docker Read outside the workspace is denied",
+      staticVerdictWithDocker("Read", { path: "/etc/hosts" }, false).decision === "unsafe",
+    );
+    const dockerReadOutside = staticVerdictWithDocker("Read", { path: "/etc/hosts" }, true);
+    check(
+      "Docker Read outside the workspace is permitted for the container session",
+      dockerReadOutside.decision === "safe" && /container session/.test(dockerReadOutside.reason),
+    );
+    check(
+      "non-Docker FileSize outside the workspace is denied",
+      staticVerdictWithDocker("FileSize", { path: "/etc/hosts" }, false).decision === "unsafe",
+    );
+    check(
+      "Docker FileSize outside the workspace is permitted",
+      staticVerdictWithDocker("FileSize", { path: "/etc/hosts" }, true).decision === "safe",
+    );
+    check(
+      "non-Docker ListDirectory outside the workspace is denied",
+      staticVerdictWithDocker("ListDirectory", { directory: "/etc" }, false).decision === "unsafe",
+    );
+    check(
+      "Docker ListDirectory outside the workspace is permitted",
+      staticVerdictWithDocker("ListDirectory", { directory: "/etc" }, true).decision === "safe",
+    );
+
+    check(
+      "non-Docker Write outside the configured directories is denied",
+      staticVerdictWithConfigAndDocker("Write", { path: "/etc/agent-notes.md", content: "hello" }, allowEditsConfig, false).decision === "unsafe",
+    );
+    const dockerWriteOutside = staticVerdictWithConfigAndDocker(
+      "Write",
+      { path: "/etc/agent-notes.md", content: "hello" },
+      allowEditsConfig,
+      true,
+    );
+    check(
+      "Docker Write outside the configured directories is permitted for the container session",
+      dockerWriteOutside.decision === "safe" && /container session/.test(dockerWriteOutside.reason),
+    );
+    check(
+      "non-Docker Delete outside the configured directories is denied",
+      staticVerdictWithConfigAndDocker(
+        "Delete",
+        { path: "/etc/agent-notes.md", file_hash: "0".repeat(64), file_size: 5 },
+        allowEditsConfig,
+        false,
+      ).decision === "unsafe",
+    );
+    check(
+      "Docker Delete outside the configured directories is permitted",
+      staticVerdictWithConfigAndDocker(
+        "Delete",
+        { path: "/etc/agent-notes.md", file_hash: "0".repeat(64), file_size: 5 },
+        allowEditsConfig,
+        true,
+      ).decision === "safe",
+    );
+
+    check(
+      "non-Docker ExecuteCommand reading outside the workspace is denied",
+      staticVerdictWithDocker("ExecuteCommand", { command: "cat /etc/hosts" }, false).decision === "unsafe",
+    );
+    check(
+      "Docker ExecuteCommand reading a container-local path is permitted",
+      staticVerdictWithDocker("ExecuteCommand", { command: "cat /etc/hosts" }, true).decision === "safe",
+    );
+    check(
+      "non-Docker file-modifying ExecuteCommand outside the configured directories is denied",
+      staticVerdictWithConfigAndDocker(
+        "ExecuteCommand",
+        { command: "touch /etc/agent-notes.md" },
+        allowEditsConfig,
+        false,
+      ).decision === "unsafe",
+    );
+    check(
+      "Docker file-modifying ExecuteCommand outside the configured directories is not statically denied",
+      staticVerdictWithConfigAndDocker(
+        "ExecuteCommand",
+        { command: "touch /etc/agent-notes.md" },
+        allowEditsConfig,
+        true,
+      ).decision !== "unsafe",
+    );
+
+    // Docker mode relaxes only the workspace boundary; the remaining
+    // protections must keep firing.
+    check(
+      "Docker Read of data.json outside the workspace stays denied",
+      staticVerdictWithDocker("Read", { path: "/tmp/data.json" }, true).decision === "unsafe",
+    );
+    check(
+      "Docker Read of a protected .env file stays denied",
+      staticVerdictWithDocker("Read", { path: "/etc/.env" }, true).decision === "unsafe",
+    );
+    check(
+      "Docker Write outside the configured directories still requires --allow-agent-source-modifications",
+      staticVerdictWithConfigAndDocker(
+        "Write",
+        { path: "/etc/agent-notes.md", content: "hello" },
+        denyEditsConfig,
+        true,
+      ).decision === "unsafe",
+    );
+    check(
+      "Docker rm -rf / stays denied as destructive",
+      staticVerdictWithDocker("ExecuteCommand", { command: "rm -rf /" }, true).decision === "unsafe",
+    );
+    check(
+      "Docker path traversal outside the workspace is permitted for the container session",
+      staticVerdictWithDocker("Read", { path: "../outside.txt" }, true).decision === "safe",
     );
 
     // ------------------------------------------------------------------

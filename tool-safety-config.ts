@@ -113,9 +113,21 @@ export function resolveToolSafetyConfig(
  * so callers can append it to a prompt. When `--start-dir` was not provided
  * (the runtime-cwd default), an empty string is returned so the prompt stays
  * unchanged.
+ *
+ * When `isDocker` is true, a short Docker-only note is appended after the path
+ * line stating that filesystem access outside the start directory is permitted
+ * for the running container session. Protected files and secrets remain
+ * forbidden and are governed by the classifier's filesystem policy.
  */
-export function startDirPathWarning(config: Pick<ToolSafetyConfig, "startDir" | "startDirConfigured">): string {
-  return config.startDirConfigured
-    ? `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${config.startDir}.`
-    : "";
+export function startDirPathWarning(
+  config: Pick<ToolSafetyConfig, "startDir" | "startDirConfigured">,
+  isDocker: boolean = false,
+): string {
+  if (!config.startDirConfigured) {
+    return "";
+  }
+  const baseLine = `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${config.startDir}.`;
+  return isDocker
+    ? `${baseLine}\nDocker/container detected: filesystem access outside this directory is permitted for this running container session.`
+    : baseLine;
 }

@@ -15,13 +15,16 @@ import type { ToolSafetyConfig } from "./tool-safety-config.js";
  *      /tmp/data.json, which is the runtime's internal state file and is
  *      never a legitimate tool target);
  *    - protected files (.env, SSH keys, credential/token stores);
- *    - path traversal and absolute paths that escape the workspace;
+ *    - path traversal and absolute paths that escape the workspace (the
+ *      workspace boundary is relaxed in Docker mode, where container-local
+ *      filesystem access outside the startup directory is permitted);
  *    - destructive filesystem/database/host commands;
  *    - file/secret exfiltration commands;
  *    - command-injection shells;
  *    - secret material embedded in writes, commits, and HTTP requests.
- * 2. LLM classification for ambiguous calls using
- *    prompts/tool-safety-classifier.md.
+ * 2. LLM classification for ambiguous calls using the shared base classifier
+ *    prompt composed with the Docker or non-Docker filesystem-policy addendum
+ *    selected from the runtime's isDocker flag (or AGENT_IN_DOCKER).
  * 3. A fail-closed fallback when the LLM is unavailable or its output cannot
  *    be parsed.
  *
@@ -31,8 +34,82 @@ import type { ToolSafetyConfig } from "./tool-safety-config.js";
  * normalized and redacted parameters.
  */
 
-/** Prompt file loaded from the repository root, matching main.ts prompt loading. */
+/**
+ * Legacy/custom full classifier prompt. When TOOL_SAFETY_PROMPT_PATH is set
+ * in the environment, that single file is used verbatim as the full classifier
+ * prompt. When it is not set, classifyToolCall() composes the shared base
+ * prompt with the Docker or non-Docker filesystem-policy addendum selected
+ * from the runtime's isDocker flag (or AGENT_IN_DOCKER).
+ */
 export const TOOL_SAFETY_PROMPT_PATH = process.env.TOOL_SAFETY_PROMPT_PATH ?? "prompts/tool-safety-classifier.md";
+
+/** Default shared classifier-policy body (no filesystem-policy addendum). */
+export const TOOL_SAFETY_PROMPT_BASE_DEFAULT_PATH = "prompts/tool-safety-classifier.base.md";
+
+/** Default Docker (relaxed) filesystem-policy addendum. */
+export const TOOL_SAFETY_PROMPT_DOCKER_DEFAULT_PATH = "prompts/tool-safety-classifier.docker.md";
+
+/** Default non-Docker (strict) filesystem-policy addendum. */
+export const TOOL_SAFETY_PROMPT_NON_DOCKER_DEFAULT_PATH = "prompts/tool-safety-classifier.non-docker.md";
+
+/** Which filesystem-policy addendum the classifier prompt composes. */
+export type ToolSafetyPromptVariant = "docker" | "non-docker";
+
+/** A resolved classifier-prompt source: one full file, or base + addendum. */
+export type ResolvedToolSafetyPrompt =
+  | { readonly kind: "full"; readonly path: string }
+  | {
+      readonly kind: "composed";
+      readonly variant: ToolSafetyPromptVariant;
+      readonly basePath: string;
+      readonly addendumPath: string;
+    };
+
+/** Select the classifier-prompt variant for a runtime's Docker detection. */
+export function resolveToolSafetyPromptVariant(isDocker: boolean): ToolSafetyPromptVariant {
+  return isDocker ? "docker" : "non-docker";
+}
+
+/**
+ * True when the AGENT_IN_DOCKER environment variable opts into the Docker
+ * classifier prompt variant (accepted values: "1" or "true"). Callers with an
+ * explicit runtimeConfig.isDocker should pass `isDocker` to classifyToolCall
+ * instead of relying on this fallback.
+ */
+export function isDockerFromEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.AGENT_IN_DOCKER === "1" || env.AGENT_IN_DOCKER === "true";
+}
+
+function absolutePromptPath(path: string, promptDirectory: string): string {
+  return isAbsolute(path) ? path : resolve(promptDirectory, path);
+}
+
+/**
+ * Resolve which classifier-prompt files to load for a Docker/non-Docker
+ * runtime. An explicit TOOL_SAFETY_PROMPT_PATH environment variable always
+ * wins and is used as a single full template; otherwise the shared base prompt
+ * is composed with the selected Docker or non-Docker filesystem addendum.
+ */
+export function resolveToolSafetyPrompt(
+  isDocker: boolean,
+  promptDirectory: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedToolSafetyPrompt {
+  if (env.TOOL_SAFETY_PROMPT_PATH) {
+    return { kind: "full", path: absolutePromptPath(env.TOOL_SAFETY_PROMPT_PATH, promptDirectory) };
+  }
+  const variant = resolveToolSafetyPromptVariant(isDocker);
+  const basePath = env.TOOL_SAFETY_PROMPT_BASE_PATH ?? TOOL_SAFETY_PROMPT_BASE_DEFAULT_PATH;
+  const addendumPath = variant === "docker"
+    ? (env.TOOL_SAFETY_PROMPT_DOCKER_PATH ?? TOOL_SAFETY_PROMPT_DOCKER_DEFAULT_PATH)
+    : (env.TOOL_SAFETY_PROMPT_NON_DOCKER_PATH ?? TOOL_SAFETY_PROMPT_NON_DOCKER_DEFAULT_PATH);
+  return {
+    kind: "composed",
+    variant,
+    basePath: absolutePromptPath(basePath, promptDirectory),
+    addendumPath: absolutePromptPath(addendumPath, promptDirectory),
+  };
+}
 
 /** Mirrors the existing review retry limit (one initial request plus two retries). */
 const MAX_TOOL_SAFETY_ATTEMPTS = 3;
@@ -114,6 +191,19 @@ export interface ToolSafetyClassifierOptions {
   readonly toolSafetyConfig?: ToolSafetyConfig;
   /** Override for the classifier prompt path (default prompts/tool-safety-classifier.md). */
   readonly promptPath?: string;
+  /**
+   * Docker/container detection result. When true (and no promptPath is
+   * supplied), the classifier composes the Docker (relaxed) filesystem-policy
+   * addendum with the shared base prompt; when false it uses the strict
+   * non-Docker addendum. Defaults to AGENT_IN_DOCKER=1/true.
+   */
+  readonly isDocker?: boolean;
+  /**
+   * Directory against which relative classifier prompt paths are resolved.
+   * Defaults to process.cwd(). Pass the startup working directory so prompt
+   * resolution stays stable across later process.chdir() calls.
+   */
+  readonly promptDirectory?: string;
   /** Optional logger so tests can silence the default console output. */
   readonly logger?: (level: "info" | "error", message: string) => void;
 }
@@ -344,12 +434,16 @@ function fileEditPolicyVerdict(
   target: string | null,
   config: ToolSafetyConfig,
   roots: readonly string[],
+  allowOutsideWorkspace: boolean,
 ): StaticToolSafetyVerdict | null {
   if (target === null || target.trim() === "") return null;
   if (!config.allowAgentSourceModifications) {
     return unsafe(`${toolName} modifies files, which is denied because --allow-agent-source-modifications is not set.`);
   }
-  if (!isInsideAnyBoundary(target, roots)) {
+  // Docker mode relaxes the editable-directory boundary: writes are permitted
+  // anywhere in the running container session. The edit/write gate above and
+  // the protected-file checks in classifyFileTool still apply.
+  if (!allowOutsideWorkspace && !isInsideAnyBoundary(target, roots)) {
     return unsafe(`${toolName} target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
   }
   return null;
@@ -453,7 +547,12 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
   }
 }
 
-function classifyFileTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
+function classifyFileTool(
+  toolName: string,
+  parameters: Record<string, unknown>,
+  roots: readonly string[],
+  allowOutsideWorkspace: boolean,
+): StaticToolSafetyVerdict {
   const pathKey = toolName === "ListDirectory" ? "directory" : "path";
   const target = stringValue(parameters[pathKey]);
   if (target === null || target.trim() === "") {
@@ -466,11 +565,17 @@ function classifyFileTool(toolName: string, parameters: Record<string, unknown>,
   const protectedReason = protectedPathReason(target);
   if (protectedReason) return unsafe(protectedReason);
 
-  if (hasPathTraversal(target)) {
-    return unsafe(`${toolName} path '${target}' contains '..' path traversal.`);
-  }
-  if (resolvesOutsideAllTrustedRoots(target, roots)) {
-    return unsafe(`${toolName} path '${target}' resolves outside the workspace.`);
+  // Docker mode relaxes the workspace boundary and traversal to the container
+  // boundary: container-local reads/writes outside the startup directory are
+  // permitted for the running container session. The protected-file and
+  // data.json checks above still apply in both modes.
+  if (!allowOutsideWorkspace) {
+    if (hasPathTraversal(target)) {
+      return unsafe(`${toolName} path '${target}' contains '..' path traversal.`);
+    }
+    if (resolvesOutsideAllTrustedRoots(target, roots)) {
+      return unsafe(`${toolName} path '${target}' resolves outside the workspace.`);
+    }
   }
 
   // Write/Edit content can persist credentials or secret-store material.
@@ -501,7 +606,11 @@ function classifyFileTool(toolName: string, parameters: Record<string, unknown>,
     }
   }
 
-  return safe(`${toolName} target '${target}' stays within the workspace and is not a protected file.`);
+  return safe(
+    allowOutsideWorkspace
+      ? `${toolName} target '${target}' is permitted for this container session and is not a protected file.`
+      : `${toolName} target '${target}' stays within the workspace and is not a protected file.`,
+  );
 }
 
 /** Split a shell command into words while separating redirection operators. */
@@ -602,11 +711,16 @@ function executeCommandEditPolicyVerdict(
   command: string,
   config: ToolSafetyConfig,
   roots: readonly string[],
+  allowOutsideWorkspace: boolean,
 ): StaticToolSafetyVerdict | null {
   if (!isFileModifyingCommand(command)) return null;
   if (!config.allowAgentSourceModifications) {
     return unsafe("ExecuteCommand modifies files, which is denied because --allow-agent-source-modifications is not set.");
   }
+  // Docker mode relaxes the editable-directory boundary; the remaining static
+  // checks (destructive commands, exfiltration, injection, protected files)
+  // still run after this policy gate.
+  if (allowOutsideWorkspace) return null;
   const targets = fileModificationTargets(command);
   if (targets.length === 0) {
     return unsafe("ExecuteCommand modifies files but its target paths could not be determined for the configured editable directories.");
@@ -622,6 +736,7 @@ function executeCommandEditPolicyVerdict(
 function classifyExecuteCommand(
   parameters: Record<string, unknown>,
   roots: readonly string[],
+  allowOutsideWorkspace: boolean,
   config?: ToolSafetyConfig,
   editRoots?: readonly string[],
 ): StaticToolSafetyVerdict {
@@ -655,7 +770,7 @@ function classifyExecuteCommand(
     return unsafe("ExecuteCommand accesses a protected credential file.");
   }
 
-  const destructiveCheck = destructiveCommandCheck(command, roots);
+  const destructiveCheck = destructiveCommandCheck(command, roots, allowOutsideWorkspace);
   if (destructiveCheck?.severity === "unsafe") return unsafe(`ExecuteCommand is destructive: ${destructiveCheck.reason}`);
   if (destructiveCheck?.severity === "ambiguous") return ambiguous(`ExecuteCommand may delete data: ${destructiveCheck.reason}`);
 
@@ -670,12 +785,14 @@ function classifyExecuteCommand(
   }
 
   if (config) {
-    const policyVerdict = executeCommandEditPolicyVerdict(command, config, editRoots ?? editableRoots(config));
+    const policyVerdict = executeCommandEditPolicyVerdict(command, config, editRoots ?? editableRoots(config), allowOutsideWorkspace);
     if (policyVerdict) return policyVerdict;
   }
 
-  const outsideReason = absolutePathEscapeReason(command, roots);
-  if (outsideReason) return unsafe(`ExecuteCommand accesses a path outside the workspace: ${outsideReason}`);
+  if (!allowOutsideWorkspace) {
+    const outsideReason = absolutePathEscapeReason(command, roots);
+    if (outsideReason) return unsafe(`ExecuteCommand accesses a path outside the workspace: ${outsideReason}`);
+  }
 
   if (isHarmlessNoOp(command)) {
     return safe("ExecuteCommand is a harmless no-op that reads or writes nothing outside /dev/null.");
@@ -698,7 +815,11 @@ interface DestructiveCommandCheck {
   readonly reason: string;
 }
 
-function destructiveCommandCheck(command: string, roots: readonly string[]): DestructiveCommandCheck | null {
+function destructiveCommandCheck(
+  command: string,
+  roots: readonly string[],
+  allowOutsideWorkspace: boolean,
+): DestructiveCommandCheck | null {
   const lower = command.toLowerCase();
 
   if (/\bmkfs(\.[a-z]+)?\b/.test(lower)) return { severity: "unsafe", reason: "mkfs creates a filesystem and destroys existing data." };
@@ -728,7 +849,12 @@ function destructiveCommandCheck(command: string, roots: readonly string[]): Des
         return { severity: "unsafe", reason: `rm -rf target '${target}' would delete the filesystem root, home, or the workspace itself.` };
       }
       if (/^[A-Za-z]:[\\/]/.test(target)) return { severity: "unsafe", reason: `rm -rf target '${target}' is an absolute Windows path.` };
-      if (hasPathTraversal(target) || resolvesOutsideAllTrustedRoots(target, roots)) {
+      // Path traversal stays unsafe in both modes: a '..' rm target cannot be
+      // safely distinguished from deleting the workspace or container root.
+      // Docker mode relaxes only the absolute outside-workspace denial, so a
+      // container-local absolute rm target falls through to LLM review rather
+      // than being statically allowed.
+      if (hasPathTraversal(target) || (!allowOutsideWorkspace && resolvesOutsideAllTrustedRoots(target, roots))) {
         return { severity: "unsafe", reason: `rm -rf target '${target}' resolves outside the workspace.` };
       }
     }
@@ -1277,6 +1403,14 @@ export function classifyToolCallStatically(
     readonly workspaceRoot?: string;
     readonly allowedDirectories?: readonly string[];
     readonly toolSafetyConfig?: ToolSafetyConfig;
+    /**
+     * Docker/container detection result. When true, filesystem reads and
+     * writes outside the workspace/startup directory are permitted for the
+     * running container session, while data.json, credential/secret files, and
+     * unsafe commands remain protected. Defaults to false (strict boundary)
+     * so callers opt in with the same flag that selects the Docker prompt.
+     */
+    readonly isDocker?: boolean;
   } = {},
 ): StaticToolSafetyVerdict {
   if (typeof toolName !== "string" || toolName.trim() === "") {
@@ -1287,6 +1421,7 @@ export function classifyToolCallStatically(
     : {};
   const roots = trustedRoots(options.workspaceRoot ?? process.cwd(), options.allowedDirectories);
   const config = options.toolSafetyConfig;
+  const allowOutsideWorkspace = options.isDocker === true;
 
   // --disable-classifier bypasses all safety classification. The returned
   // safe verdict is silent by contract, so no safety response is rendered.
@@ -1301,20 +1436,20 @@ export function classifyToolCallStatically(
     case "Read":
     case "FileSize":
     case "ListDirectory":
-      return classifyFileTool(toolName, record, roots);
+      return classifyFileTool(toolName, record, roots, allowOutsideWorkspace);
     case "Write":
     case "Edit":
     case "Delete": {
       if (config) {
         const target = stringValue(record.path);
-        const policyVerdict = fileEditPolicyVerdict(toolName, target, config, policyRoots);
+        const policyVerdict = fileEditPolicyVerdict(toolName, target, config, policyRoots, allowOutsideWorkspace);
         if (policyVerdict) return policyVerdict;
-        return classifyFileTool(toolName, record, policyRoots);
+        return classifyFileTool(toolName, record, policyRoots, allowOutsideWorkspace);
       }
-      return classifyFileTool(toolName, record, roots);
+      return classifyFileTool(toolName, record, roots, allowOutsideWorkspace);
     }
     case "ExecuteCommand":
-      return classifyExecuteCommand(record, combinedRoots, config, policyRoots);
+      return classifyExecuteCommand(record, combinedRoots, allowOutsideWorkspace, config, policyRoots);
     case "Http":
       return classifyHttp(record);
     case "HttpRequest":
@@ -1354,8 +1489,8 @@ function extractJsonCandidate(text: string): string | null {
 }
 
 /**
- * Parse and validate the strict JSON object described in
- * prompts/tool-safety-classifier.md: `{ "safe": boolean, "reason": string }`.
+ * Parse and validate the strict JSON object described in the composed
+ * tool-safety classifier prompt: `{ "safe": boolean, "reason": string }`.
  */
 export function parseToolSafetyClassification(text: string): ToolSafetyParseResult {
   if (!text) return { valid: false, reason: "Tool safety response was empty." };
@@ -1380,25 +1515,45 @@ function fallbackClassification(reason: string): ToolSafetyClassification {
   return { safe: false, reason, source: "fallback" };
 }
 
-function readClassifierPrompt(promptPath: string, logger: NonNullable<ToolSafetyClassifierOptions["logger"]>): string | null {
+function readClassifierPromptFile(path: string, logger: NonNullable<ToolSafetyClassifierOptions["logger"]>): string | null {
   try {
-    return readFileSync(promptPath, "utf-8");
+    return readFileSync(path, "utf-8");
   } catch (error) {
-    logger("error", `[TOOL SAFETY] Could not read classifier prompt '${promptPath}': ${error instanceof Error ? error.message : String(error)}`);
+    logger("error", `[TOOL SAFETY] Could not read classifier prompt '${path}': ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
+}
+
+function describeResolvedToolSafetyPrompt(prompt: ResolvedToolSafetyPrompt): string {
+  return prompt.kind === "full"
+    ? prompt.path
+    : `${prompt.basePath} + ${prompt.addendumPath} (${prompt.variant} filesystem policy)`;
+}
+
+function readClassifierPromptTemplate(
+  prompt: ResolvedToolSafetyPrompt,
+  logger: NonNullable<ToolSafetyClassifierOptions["logger"]>,
+): string | null {
+  if (prompt.kind === "full") {
+    return readClassifierPromptFile(prompt.path, logger);
+  }
+  const base = readClassifierPromptFile(prompt.basePath, logger);
+  if (base === null) return null;
+  const addendum = readClassifierPromptFile(prompt.addendumPath, logger);
+  if (addendum === null) return null;
+  return `${base.replace(/\s+$/, "")}\n\n${addendum.replace(/^\s+/, "")}`;
 }
 
 async function llmClassification(
   toolName: string,
   normalizedParameters: string,
   runtime: MultiTurnLlmRuntime,
-  promptPath: string,
+  prompt: ResolvedToolSafetyPrompt,
   logger: NonNullable<ToolSafetyClassifierOptions["logger"]>,
 ): Promise<ToolSafetyClassification> {
-  const template = readClassifierPrompt(promptPath, logger);
+  const template = readClassifierPromptTemplate(prompt, logger);
   if (template === null) {
-    return fallbackClassification(`Safety classifier prompt '${promptPath}' could not be read; refusing to execute ambiguous call.`);
+    return fallbackClassification(`Safety classifier prompt '${describeResolvedToolSafetyPrompt(prompt)}' could not be read; refusing to execute ambiguous call.`);
   }
   const basePrompt = `${template}\n${toolName}\n${normalizedParameters}\n`;
   let lastFailure: string | null = null;
@@ -1440,11 +1595,15 @@ export async function classifyToolCall(
   options: ToolSafetyClassifierOptions = {},
 ): Promise<ToolSafetyClassification> {
   const logger = options.logger ?? defaultLogger;
-  const promptPath = options.promptPath ?? TOOL_SAFETY_PROMPT_PATH;
+  const promptDirectory = options.promptDirectory ?? process.cwd();
+  const resolvedPrompt: ResolvedToolSafetyPrompt = options.promptPath
+    ? { kind: "full", path: absolutePromptPath(options.promptPath, promptDirectory) }
+    : resolveToolSafetyPrompt(options.isDocker ?? isDockerFromEnvironment(process.env), promptDirectory, process.env);
   const staticVerdict = classifyToolCallStatically(toolName, parameters, {
     workspaceRoot: options.workspaceRoot,
     allowedDirectories: options.allowedDirectories,
     toolSafetyConfig: options.toolSafetyConfig,
+    isDocker: options.isDocker ?? isDockerFromEnvironment(process.env),
   });
 
   if (staticVerdict.decision === "safe") {
@@ -1466,7 +1625,7 @@ export async function classifyToolCall(
   }
 
   const normalizedParameters = normalizeToolParameters(parameters);
-  const classification = await llmClassification(toolName, normalizedParameters, options.runtime, promptPath, logger);
+  const classification = await llmClassification(toolName, normalizedParameters, options.runtime, resolvedPrompt, logger);
   logDecision(toolName, classification, logger);
   return classification;
 }

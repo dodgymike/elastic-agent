@@ -19,6 +19,7 @@ import {
 } from "./loop-replan.js";
 import { defaultBusCursorFilePath, watchAgentBusOnce } from "./loop-busctl-read.js";
 import { resolveToolSafetyConfig, startDirPathWarning } from "./tool-safety-config.js";
+import { detectDocker, describeDockerDetection } from "./docker-detection.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
@@ -77,7 +78,7 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
-import { classifyToolCall, createToolSafetyLogger, toolRiskLevel, TOOL_SAFETY_PROMPT_PATH } from "./tool-safety-classifier.js";
+import { classifyToolCall, createToolSafetyLogger, toolRiskLevel } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
 import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
@@ -188,6 +189,17 @@ const mainCwd = process.cwd();
 // during execution) do not shift what the runtime treats as the authoritative
 // starting directory.
 const workspaceInit: WorkspaceInit = resolveWorkspaceInit(mainCwd);
+
+// Docker/container detection: resolve once at startup so the tool-safety
+// classifier and prompt-building code can choose the right filesystem policy
+// (strict outside the start/working directory on non-Docker hosts, relaxed
+// inside a throwaway container while data.json, credentials, and secrets stay
+// protected). The result is exposed as runtimeConfig.isDocker for the steps
+// that follow, and the evidence that produced it is logged immediately.
+const dockerDetection = detectDocker();
+const runtimeConfig = { isDocker: dockerDetection.isDocker };
+console.log(`[DOCKER] ${describeDockerDetection(dockerDetection)}`);
+
 let executionWorktreePath: string | null = null;
 let inExecutionPhase = false;
 let activeTaskLifecycle: any = null;
@@ -1495,7 +1507,11 @@ async function dispatchToolCall(output, configData, goalKey) {
             // threaded into the classifier so its edit/write policy and
             // bypass behavior follow the user's configuration.
             toolSafetyConfig,
-            promptPath: isAbsolute(TOOL_SAFETY_PROMPT_PATH) ? TOOL_SAFETY_PROMPT_PATH : join(mainCwd, TOOL_SAFETY_PROMPT_PATH),
+            // Docker/container detection selects the classifier prompt
+            // variant: Docker uses the relaxed filesystem-policy addendum,
+            // non-Docker keeps the strict start/working-directory boundary.
+            isDocker: runtimeConfig.isDocker,
+            promptDirectory: mainCwd,
             logger: createToolSafetyLogger(toolChildIndent),
         });
     } catch (error) {
@@ -1587,7 +1603,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
     }
     let previousResponseId;
     let toolOutputs: any[] = [];
-    const startDirWarning = startDirPathWarning(toolSafetyConfig);
+    const startDirWarning = startDirPathWarning(toolSafetyConfig, runtimeConfig.isDocker);
     while (true) {
         throwIfAborted(abortController.signal, "execution", index + 1);
         const request = { tools, abortPhase: "execution" } as any;
@@ -2051,7 +2067,7 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
         // lifecycle. The existing --review flag still controls commit behavior
         // via commitInstruction and the Git commit guard handled by
         // runSingleStep.
-        const directPrompt = `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}${startDirPathWarning(toolSafetyConfig)}`;
+        const directPrompt = `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}${startDirPathWarning(toolSafetyConfig, runtimeConfig.isDocker)}`;
         if (taskLifecycle) {
             await specKeeperTaskNote(taskLifecycle, "note (execution started)", "Task-mode direct execution started.");
         }
