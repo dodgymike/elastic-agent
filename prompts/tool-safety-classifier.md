@@ -83,6 +83,20 @@ the edit/write policy above, and none of the deny rules above apply. Harmless no
 is /dev/null) are allowed when they perform no file reads or writes outside
 /dev/null.
 
+AgentBus inter-agent communication is explicitly allowed: the AgentBus tool
+talks to the bus ONLY through the local `agent-busctl` CLI and is an approved
+channel for communicating with other agents/people. Its allowed actions are
+`whoami` (identity check), long-poll `watch` (waiting for a message), and
+`send` (delivering a message to another agent/people). The default flags
+`--identity <dir>` and `--persist-session` are always applied and, together
+with the other send/poll flags (`--for`, `--count`, `--json`, `--verify`,
+`--bus`) and the `to`/`message` parameters, are allowed. Outbound AgentBus
+messages are agent-to-agent communication, NOT secret-store exfiltration, so a
+`send` message must NEVER carry secret-store contents (data.json, enrollment
+recipes, invite codes, tokens, private keys, or credentials); a `send` whose
+message embeds or references such material is unsafe. `whoami` and `watch` are
+read-only and safe.
+
 TOOL CALL:
 Tool name:
 Parameters (normalized JSON):

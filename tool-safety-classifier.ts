@@ -893,6 +893,9 @@ function classifyIntegrationTool(toolName: string, parameters: Record<string, un
   if (toolName === "SpecKeeperEnroll") {
     return safe("SpecKeeperEnroll redeems a one-time enrollment token for its intended purpose.");
   }
+  if (toolName === "AgentBus") {
+    return classifyAgentBus(parameters, roots);
+  }
   if (toolName === "AgentBusEnrol") {
     return classifyAgentBusEnrol(parameters, roots);
   }
@@ -920,6 +923,74 @@ function classifyIntegrationTool(toolName: string, parameters: Record<string, un
     return safe(`${toolName} ${method ?? "request"} is read-only and carries no protected file content.`);
   }
   return ambiguous(`${toolName} ${method} is mutating and needs LLM safety review.`);
+}
+
+/**
+ * Static classification for `AgentBus`, which talks to the bus through the
+ * local `agent-busctl` CLI as an explicit inter-agent communication channel.
+ * It whitelists the `whoami`, `watch` (long-poll wait), and `send` actions,
+ * along with the `--identity`, `--persist-session`, `--for`, `--count`,
+ * `--json`, `--verify`, and `--bus` flags. Messages sent between agents are
+ * agent-to-agent coordination traffic, never store exfiltration: a `send`
+ * message that embeds protected store contents is refused.
+ */
+function classifyAgentBus(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
+  const actionParam = stringValue(parameters.action);
+  let action: string;
+  if (actionParam !== null && actionParam.trim() !== "") {
+    action = actionParam.trim().toLowerCase();
+  } else if (typeof parameters.to === "string" && parameters.to.trim() !== "") {
+    action = "send";
+  } else if (
+    (typeof parameters.forDuration === "string" && parameters.forDuration.trim() !== "") ||
+    typeof parameters.count === "number"
+  ) {
+    action = "watch";
+  } else {
+    action = "whoami";
+  }
+
+  if (action !== "whoami" && action !== "watch" && action !== "send") {
+    return unsafe(
+      `AgentBus action '${action}' is not a supported agent-busctl subcommand (whoami, watch, send); refusing to execute.`,
+    );
+  }
+
+  for (const key of ["identity", "binary", "root"]) {
+    const value = stringValue(parameters[key]);
+    if (value === null || value === undefined || value.trim() === "") continue;
+    if (/[\r\n\0]/.test(value)) return unsafe(`AgentBus ${key} must not contain control characters.`);
+    const dataJson = dataJsonTargetReason(value);
+    if (dataJson) return unsafe(`AgentBus ${key} is unsafe: ${dataJson}`);
+    const protectedReason = protectedPathReason(value);
+    if (protectedReason) return unsafe(`AgentBus ${key} is unsafe: ${protectedReason}`);
+    if (hasPathTraversal(value)) return unsafe(`AgentBus ${key} '${value}' contains '..' path traversal.`);
+    if (resolvesOutsideAllTrustedRoots(value, roots)) {
+      return unsafe(`AgentBus ${key} '${value}' resolves outside the workspace.`);
+    }
+  }
+
+  const toValue = stringValue(parameters.to);
+  if (toValue !== null && /[\r\n\0]/.test(toValue)) {
+    return unsafe("AgentBus recipient 'to' must not contain control characters.");
+  }
+
+  if (action === "send") {
+    const message = stringValue(parameters.message);
+    if (message !== null && /data\.json/i.test(message)) {
+      return unsafe("AgentBus send message references the protected file data.json.");
+    }
+    if (message !== null) {
+      const flagged = secretTextReason(message);
+      if (flagged) return unsafe(`AgentBus send message is unsafe: ${flagged}`);
+    }
+  }
+
+  return safe(
+    action === "send"
+      ? "AgentBus send is agent-to-agent communication and carries no protected store contents."
+      : `AgentBus ${action} is inter-agent communication over agent-busctl and carries no protected store contents.`,
+  );
 }
 
 /**
