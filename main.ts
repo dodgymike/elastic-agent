@@ -477,6 +477,7 @@ const status = {
     classification: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLANNING NECESSITY]"), message, prefix),
     specKeeper: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[SPEC KEEPER]"), message, prefix),
     abort: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.red.bold("[ABORT]"), message, prefix),
+    tldr: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[TLDR]"), message, prefix),
 };
 
 /**
@@ -1298,6 +1299,100 @@ function applyExecutionFeedback(feedbackEntry, activeSteps, completedStepCount) 
     }
     return result;
 }
+/**
+ * Count classifier-denial goals that reached the "fighting" threshold during
+ * this run. `denialTrackerState` is the serialized DenialTracker (see
+ * denial-tracker.ts): `{ goals: { goalKey: { count, lastTool, lastReason } } }`.
+ * A goal counts as fighting once its consecutive-denial count reaches the
+ * DENIAL_REPLAN_THRESHOLD.
+ */
+function fightingDenialCount(configData): number {
+    const goals = configData?.denialTrackerState?.goals ?? {};
+    const values = typeof goals === "object" && !Array.isArray(goals) ? Object.values(goals) : [];
+    return values.filter((goal: any) => goal && Number.isInteger(goal.count) && goal.count >= DENIAL_REPLAN_THRESHOLD).length;
+}
+
+/**
+ * Build and print a concise end-of-plan summary (the implementation tldr) of
+ * what actually happened during execution, just before the terminal "Plan
+ * complete." line. It surfaces the information the operator most wants from a
+ * finished plan in one place:
+ *   - how many of the plan's steps were completed;
+ *   - every replan that occurred (applied focused replans vs failed ones) plus
+ *     any loop-mode replan directives issued from classifier denials;
+ *   - issues / blockers encountered (replan failures, repeated classifier
+ *     denials, and review learnings/reasons when a review ran);
+ *   - a short, honest evaluation of whether the outcome matched the prompt,
+ *     derived from the recorded outcome (review pass/fail, direct completion).
+ *
+ * All counts are derived from configData that is already persisted and
+ * secret-free; nothing here reads a model response or a file payload. The
+ * output uses the shared status.tldr helper so it fits the existing console
+ * hierarchy (plan-level indent) and degrades gracefully when there is no
+ * detailed state (it falls back to "no issues recorded" rather than throwing).
+ */
+function reportImplementationTldr(
+    configData: any,
+    originalPrompt: string,
+    options: { taskMode?: boolean; direct?: boolean; reviewOutcome?: "passed" | "failed" | null; reviewAttempts?: number } = {},
+): void {
+    const prefix = hierarchyIndent("plan");
+    const completedSteps = Array.isArray(configData?.completedSteps) ? configData.completedSteps : [];
+    const replans = Array.isArray(configData?.replanHistory) ? configData.replanHistory : [];
+    const appliedReplans = replans.filter((entry) => entry && entry.applied === true);
+    const failedReplans = replans.filter((entry) => entry && entry.applied === false);
+
+    const summaryLines: string[] = [];
+    summaryLines.push(`Steps completed: ${completedSteps.length}.`);
+
+    if (appliedReplans.length > 0) {
+        const detail = appliedReplans
+            .map((entry) => truncate(String(entry.reason ?? ""), 120))
+            .filter(Boolean)
+            .join(" | ");
+        summaryLines.push(`Replans applied: ${appliedReplans.length}${detail ? ` — ${detail}` : ""}.`);
+    } else {
+        summaryLines.push("Replans applied: none.");
+    }
+    if (failedReplans.length > 0) {
+        summaryLines.push(`Replans failed: ${failedReplans.length} (${failedReplans.map((entry) => truncate(String(entry.failure ?? entry.reason ?? ""), 100)).filter(Boolean).join(" | ") || "no reason recorded"}).`);
+    }
+
+    // Issues / blockers: classifier-denial "fighting" count plus any recorded
+    // review learnings/reasons. Both are bounded and secret-free.
+    const issues: string[] = [];
+    const fightingCount = fightingDenialCount(configData);
+    if (fightingCount > 0) issues.push(`${fightingCount} goal(s) hit repeated classifier denials (fighting-the-classifier)`);
+    for (const entry of failedReplans) {
+        const reason = truncate(String(entry.failure ?? entry.reason ?? "replan failed"), 100);
+        if (reason) issues.push(`replan failure: ${reason}`);
+    }
+    if (options.reviewOutcome === "failed") {
+        issues.push("review did not pass (work left uncommitted, task blocked)");
+    }
+    if (issues.length > 0) {
+        summaryLines.push(`Issues / blockers: ${issues.slice(0, 5).join("; ")}${issues.length > 5 ? "; ..." : ""}.`);
+    } else {
+        summaryLines.push("Issues / blockers: none recorded.");
+    }
+
+    // Evaluation of whether the outcome matched the prompt.
+    let evaluation: string;
+    if (options.reviewOutcome === "failed") {
+        evaluation = "Outcome did not fully match the prompt: the review failed, so the work was left uncommitted and the task was marked blocked.";
+    } else if (options.direct) {
+        evaluation = "Outcome: single-step (no-plan) execution completed and matched the requested work.";
+    } else if (options.reviewOutcome === "passed") {
+        evaluation = `Outcome: execution completed and the review passed${options.reviewAttempts ? ` on attempt ${options.reviewAttempts}` : ""}; the outcome matches the prompt.`;
+    } else {
+        evaluation = "Outcome: execution completed and the plan was fully executed; the outcome matches the prompt.";
+    }
+    summaryLines.push(`Evaluation: ${evaluation}`);
+
+    status.tldr(summaryLines.join("\n"), prefix);
+    void originalPrompt; // originalPrompt is intentionally accepted for future use; not printed (avoids echoing the full prompt).
+}
+
 function recordUsage(configData, response) {
     const { total, cached, totalMinusCache } = usageSummary(response.usage);
     configData.tokenUsage.push({ response_id: response.id, total_tokens: total, cached_tokens: cached, total_minus_cache: totalMinusCache, input_tokens_details: response.usage?.input_tokens_details ?? {} });
@@ -2275,6 +2370,14 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
 
     const totals = totalUsage(configData.tokenUsage);
     status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+    // End-of-plan tldr: a concise summary of what the implementation actually
+    // did (steps completed, replans, issues/blockers, and an outcome-vs-prompt
+    // evaluation) printed just before the terminal "Plan complete." line.
+    reportImplementationTldr(configData, originalPrompt, {
+        taskMode: isTaskMode,
+        reviewOutcome,
+        reviewAttempts: reviewOutcome === "passed" ? reviewAttempt : undefined,
+    });
     status.success(isTaskMode ? "Task-mode plan execution complete. Stopping." : "Plan complete. Stopping.");
     cleanupExecutionWorktree();
     return { success: true };
