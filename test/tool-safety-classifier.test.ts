@@ -185,6 +185,71 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 1d. AgentBus — explicit inter-agent communication channel over the
+    //     local ./agent-busctl CLI. The whoami / watch (long-poll wait) /
+    //     send actions and the --identity / --persist-session / send flags
+    //     are whitelisted; a send that would carry store contents is refused.
+    // ------------------------------------------------------------------
+    // A stand-in for store/secret material, assembled from parts so the test
+    // never embeds an actual credential- or key-shaped literal in source.
+    const agentBusSecretBody = ["-----BEGIN ", "RSA PRIVATE KEY-----"].join("");
+    check(
+      "AgentBus whoami is allowed",
+      staticVerdict("AgentBus", { action: "whoami" }).decision === "safe",
+    );
+    check(
+      "AgentBus watch (long-poll wait) is allowed with --for and --count",
+      staticVerdict("AgentBus", { action: "watch", forDuration: "30s", count: 5 }).decision === "safe",
+    );
+    check(
+      "AgentBus send to another agent is allowed",
+      staticVerdict("AgentBus", { action: "send", to: "bus-a.agent-2", message: "hello from agent-1" }).decision === "safe",
+    );
+    check(
+      "AgentBus send with --identity and --persist-session is allowed",
+      staticVerdict("AgentBus", {
+        action: "send",
+        to: "bus-a.agent-2",
+        message: "sync complete",
+        identity: "tmp/elastic-identity",
+        persistSession: true,
+        busUrl: "https://bus.example",
+      }).decision === "safe",
+    );
+    check(
+      "AgentBus defaults to whoami when no action is given",
+      staticVerdict("AgentBus", {}).decision === "safe",
+    );
+    check(
+      "AgentBus action is selected from the sender when action is omitted",
+      staticVerdict("AgentBus", { to: "bus-b.agent-3", message: "ping" }).decision === "safe",
+    );
+    check(
+      "AgentBus is whitelisted as a mutating inter-agent tool",
+      toolRiskLevel("AgentBus") === "mutating",
+    );
+    check(
+      "AgentBus send refusing data.json in the message",
+      staticVerdict("AgentBus", { action: "send", to: "bus-a.agent-2", message: "read data.json now" }).decision === "unsafe",
+    );
+    check(
+      "AgentBus send refusing secret-store contents in the message",
+      staticVerdict("AgentBus", { action: "send", to: "bus-a.agent-2", message: agentBusSecretBody }).decision === "unsafe",
+    );
+    check(
+      "AgentBus refuses an unknown action (never falls back to HTTP)",
+      staticVerdict("AgentBus", { action: "frobnicate" }).decision === "unsafe",
+    );
+    check(
+      "AgentBus refuses an identity path outside the workspace",
+      staticVerdict("AgentBus", { action: "whoami", identity: "/opt/secret-store" }).decision === "unsafe",
+    );
+    check(
+      "AgentBus send refuses a recipient with control characters",
+      staticVerdict("AgentBus", { action: "send", to: "bus-a.agent-2\n", message: "x" }).decision === "unsafe",
+    );
+
+    // ------------------------------------------------------------------
     // 1b. Harmless shell no-ops are allowed statically.
     // ------------------------------------------------------------------
     check(
