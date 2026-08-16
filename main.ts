@@ -19,6 +19,7 @@ import {
 } from "./loop-replan.js";
 import { defaultBusCursorFilePath, watchAgentBusOnce } from "./loop-busctl-read.js";
 import { resolveToolSafetyConfig, startDirPathWarning } from "./tool-safety-config.js";
+import { detectDocker, describeDockerDetection } from "./docker-detection.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
@@ -187,6 +188,17 @@ const mainCwd = process.cwd();
 // during execution) do not shift what the runtime treats as the authoritative
 // starting directory.
 const workspaceInit: WorkspaceInit = resolveWorkspaceInit(mainCwd);
+
+// Docker/container detection: resolve once at startup so the tool-safety
+// classifier and prompt-building code can choose the right filesystem policy
+// (strict outside the start/working directory on non-Docker hosts, relaxed
+// inside a throwaway container while data.json, credentials, and secrets stay
+// protected). The result is exposed as runtimeConfig.isDocker for the steps
+// that follow, and the evidence that produced it is logged immediately.
+const dockerDetection = detectDocker();
+const runtimeConfig = { isDocker: dockerDetection.isDocker };
+console.log(`[DOCKER] ${describeDockerDetection(dockerDetection)}`);
+
 let executionWorktreePath: string | null = null;
 let inExecutionPhase = false;
 let activeTaskLifecycle: any = null;
