@@ -92,6 +92,27 @@ try {
     startDirPathWarning(childConfig),
     `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${resolve(sandbox, "child")}.`,
   );
+
+  // Docker mode keeps the required path line and appends a short Docker-only
+  // note stating that outside-directory filesystem access is permitted for the
+  // running container session.
+  const dockerNote =
+    "\nDocker/container detected: filesystem access outside this directory is permitted for this running container session.";
+  assert.equal(
+    startDirPathWarning({ startDir: "/abs/start-dir", startDirConfigured: true }, true),
+    `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO /abs/start-dir.${dockerNote}`,
+  );
+
+  // The Docker note is omitted in non-Docker mode and when --start-dir is
+  // absent (the runtime-cwd default produces no warning at all).
+  assert.equal(
+    startDirPathWarning({ startDir: "/abs/start-dir", startDirConfigured: true }, false),
+    "\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO /abs/start-dir.",
+  );
+  assert.equal(
+    startDirPathWarning({ startDir: resolve(sandbox), startDirConfigured: false }, true),
+    "",
+  );
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }
