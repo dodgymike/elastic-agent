@@ -600,10 +600,11 @@ const tools = [
                 read_length: { type: "number", description: "Maximum number of bytes to return in this page." },
                 read_offset: { type: "number", description: "Zero-based byte offset at which to start reading." },
                 line_range: { type: "string", description: "Optional inclusive 1-based line range such as '100-200' (or '100' for a single line). Alternative to byte paging: Read returns only those lines. When supplied, pass read_offset 0 and read_length file_size so the byte window covers the requested lines." },
+                read_hash: { type: "string", description: "Optional expected SHA-256 of the complete file. When supplied, a mismatch is reported as an error rather than returning unchecked content. The hash is always the hash of the complete file, so it can be passed to Edit or Write even when only a page was read." },
             },
             required: ["path", "file_size", "read_length", "read_offset"],
         },
-        exec_handler: ({ path, file_size, read_length, read_offset, line_range }) => Read({ path, file_size, read_length, read_offset, line_range }),
+        exec_handler: ({ path, file_size, read_length, read_offset, line_range, read_hash }) => Read({ path, file_size, read_length, read_offset, line_range, read_hash }),
     },
     {
         type: "function", name: "FileSize",
@@ -672,7 +673,7 @@ const tools = [
             type: "object",
             properties: {
                 mode: { type: "string", enum: ["status", "log", "diff", "ls-files"] },
-                action: { type: "string", enum: ["stage", "commit"] },
+                action: { type: "string", enum: ["list", "stage", "commit"] },
                 cwd: { type: "string" },
                 format: { type: "string", enum: ["short", "porcelain", "branch"] },
                 branch: { type: "boolean" },
