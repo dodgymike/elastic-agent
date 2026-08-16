@@ -365,3 +365,37 @@ function runGit(command: string[], cwd?: string): Promise<GitCommandResult> {
     });
   });
 }
+
+/**
+ * The input schema the Git tool advertises to the model. This is the single
+ * source of truth that main.ts wires into the native tool definition and that
+ * the schema-vs-handler consistency test checks against the modes/actions the
+ * handler actually branches on. Keeping the schema next to the handler means
+ * the advertised parameters cannot drift from implementation. The `action`
+ * enum intentionally includes the legacy `list` alias retained for backward
+ * compatibility (see `ListGitChangesOptions` and the `action === "list"`
+ * handler branch).
+ */
+export const GitParameters: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    mode: { type: "string", enum: ["status", "log", "diff", "ls-files"] },
+    action: { type: "string", enum: ["list", "stage", "commit"] },
+    cwd: { type: "string" },
+    format: { type: "string", enum: ["short", "porcelain", "branch"] },
+    branch: { type: "boolean" },
+    oneline: { type: "boolean" },
+    stat: { type: "boolean" },
+    maxCount: { type: "integer" },
+    all: { type: "boolean" },
+    revision: { type: "string" },
+    path: { type: "string" },
+    paths: { type: "array", items: { type: "string" } },
+    staged: { type: "boolean" },
+    check: { type: "boolean" },
+    others: { type: "boolean" },
+    excludeStandard: { type: "boolean" },
+    message: { type: "string" },
+  },
+  anyOf: [{ required: ["mode"] }, { required: ["action"] }],
+};

@@ -1,15 +1,17 @@
-// Regression tests for tools/AgentBus.ts: the Agent Bus client resolves its
-// base URL and identity from the enrolled, non-secret `.agent-bus.local`
-// roster when no explicit option or environment variable is supplied, while
-// the access value must always come from an option or the environment (never
-// from the roster).
-//
-// The network call is stubbed by replacing globalThis.fetch, so the tests
-// verify URL and identity resolution and argument building without a live bus.
+// Regression tests for tools/AgentBus.ts: the tool now talks to the bus ONLY
+// through the local `./agent-busctl` CLI for whoami / watch (long-poll wait) /
+// send. There is no HTTP/fetch path at all. These tests drive a fake
+// `agent-busctl` executable and assert:
+//   1. the tool invokes the CLI for each action (whoami / watch / send);
+//   2. the default flags `--identity <dir>` and `--persist-session` are always
+//      prepended (and can be overridden);
+//   3. no HTTP request is ever made (the tool never constructs a fetch/HTTP
+//      client — verified by arming globalThis.fetch to throw);
+//   4. watch NDJSON is parsed into message records.
 //
 // Compiled and executed standalone by the `test:agent-bus` npm script.
 import agentBus from "../tools/AgentBus.js";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,214 +26,238 @@ function check(name: string, cond: boolean): void {
   }
 }
 
-/* Environment variable name and option name are built from pieces so no
-   credential-shaped literal ever appears adjacent in the source. */
-const ENV_TOKEN_KEY = "AGENT_" + "BUS_" + "AC" + "CE" + "SS_" + "TO" + "KEN";
-const OPT_TOKEN_KEY = "ac" + "ces" + "sT" + "ok" + "en";
-
-const ENV_VAL = "alpha" + "-1-bravo";
-const OPTION_VAL = "golf" + "-2-hotel";
-const STORE_FILE = join(dir, ".agent-bus.local");
-
-interface CapturedFetch {
-  url: string;
+/** Assert an observed argv vector equals the expected one, in order. */
+function sameArgs(actual: readonly string[], expected: readonly string[]): boolean {
+  return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
-/** Replace globalThis.fetch with a stub capturing the request and returning 200. */
-function stubFetch(): CapturedFetch[] {
-  const calls: CapturedFetch[] = [];
-  globalThis.fetch = (async (input: any) => {
-    calls.push({ url: String(input) });
-    return new Response('{"ok":true}', { status: 200, statusText: "OK" });
-  }) as typeof fetch;
-  return calls;
+/**
+ * Create a fake `agent-busctl` executable that (a) appends every argv it
+ * receives to FAKE_LOG and (b) prints canned output depending on the
+ * subcommand it recognises. Returns the paths to the binary and the log.
+ */
+function makeFakeAgentBusctl(outputByAction: Record<string, string>): { binary: string; log: string } {
+  const binary = join(dir, `agent-busctl-${Math.random().toString(36).slice(2)}.sh`);
+  const log = join(dir, `calls-${Math.random().toString(36).slice(2)}.log`);
+  const script = [
+    "#!/bin/sh",
+    // Record the whole argv (skipping our own script path at $0).
+    'LOG="' + log + '"',
+    'for a in "$@"; do printf "%s\\n" "$a" >> "$LOG"; done',
+    'printf "\\n" >> "$LOG"',
+    // Decide output from the recognised subcommand string in argv.
+    'if printf "%s\\n" "$@" | grep -q "whoami"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.whoami ?? '{"agent_id":"bus-a.agent-1"}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "watch"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.watch ?? '{"message_id":"m1","from":"bus-a.agent-2","body":"aGk=","seq":1}',
+    "EOF",
+    'elif printf "%s\\n" "$@" | grep -q "send"; then',
+    '  cat <<\'EOF\'',
+    outputByAction.send ?? '{"ok":true,"message_id":"abc123"}',
+    "EOF",
+    'else',
+    "  echo 'no action' >&2",
+    "  exit 3",
+    "fi",
+    "exit 0",
+    "",
+  ].join("\n");
+  writeFileSync(binary, script, { mode: 0o755 });
+  chmodSync(binary, 0o755);
+  return { binary, log };
 }
 
-function main(): Promise<void> {
+/** Read the concatenated argv records from the fake's log file. */
+function readCallLog(log: string): string[][] {
+  const raw = readFileSync(log, "utf8");
+  return raw
+    .split("\n\n")
+    .filter((block) => block.trim() !== "")
+    .map((block) => block.split("\n").filter((line) => line.trim() !== ""));
+}
+
+/** Absolute path the tool resolves for a root-relative identity override. */
+function abs(root: string, rel: string): string {
+  return join(root, rel);
+}
+
+async function main(): Promise<void> {
   const originalFetch = globalThis.fetch;
-  const savedEnv: Record<string, string | undefined> = {};
+  const boomFetch: typeof fetch = (async () => {
+    throw new Error("AgentBus must never issue an HTTP request");
+  }) as typeof fetch;
 
-  return (async () => {
+  try {
+    // ---- 0. whoami ---------------------------------------------------------
+    const whoami = makeFakeAgentBusctl({});
+    const whoamiResult = await agentBus({
+      action: "whoami",
+      binary: whoami.binary,
+      root: dir,
+      identity: "tmp/elastic-identity",
+    });
+    const whoamiCalls = readCallLog(whoami.log);
+    check("whoami invokes exactly one agent-busctl process", whoamiCalls.length === 1);
+    check(
+      "whoami argv carries the default flags and whitelisted action flags",
+      sameArgs(whoamiCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "whoami",
+        "--json",
+      ]),
+    );
+    check("whoami returns the CLI stdout", (whoamiResult.stdout ?? "").includes("bus-a.agent-1"));
+    check("whoami produces no parsed messages", whoamiResult.messages.length === 0);
+    check("whoami records the resolved identity", whoamiResult.identity === abs(dir, "tmp/elastic-identity"));
+    check("whoami applies --persist-session by default", whoamiResult.persistSession === true);
+
+    // ---- 1. watch (long-poll wait) -----------------------------------------
+    const watch = makeFakeAgentBusctl({});
+    const watchResult = await agentBus({
+      action: "watch",
+      binary: watch.binary,
+      root: dir,
+      forDuration: "30s",
+      count: 5,
+    });
+    const watchCalls = readCallLog(watch.log);
+    check("watch invokes exactly one agent-busctl process", watchCalls.length === 1);
+    check(
+      "watch argv carries defaults plus --for/--count",
+      sameArgs(watchCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "watch",
+        "--json",
+        "--for", "30s",
+        "--count", "5",
+      ]),
+    );
+    check("watch parses the NDJSON message into a record", watchResult.messages.length === 1);
+    check("watch message exposes its id and base64 body", (watchResult.messages[0]?.message_id as string) === "m1");
+
+    // ---- 2. send ------------------------------------------------------------
+    const send = makeFakeAgentBusctl({});
+    const sendResult = await agentBus({
+      action: "send",
+      binary: send.binary,
+      root: dir,
+      to: "bus-a.agent-2",
+      message: "hello from agent-1",
+    });
+    const sendCalls = readCallLog(send.log);
+    check("send invokes exactly one agent-busctl process", sendCalls.length === 1);
+    check(
+      "send argv carries defaults plus recipient and body",
+      sameArgs(sendCalls[0] ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+        "--persist-session",
+        "send",
+        "bus-a.agent-2",
+        "hello from agent-1",
+        "--json",
+      ]),
+    );
+    check("send returns the CLI success output", (sendResult.stdout ?? "").includes('"ok":true'));
+    check("send produces no parsed messages", sendResult.messages.length === 0);
+
+    // ---- 3. default flags: identity default + --persist-session -------------
+    const defaulted = makeFakeAgentBusctl({});
+    await agentBus({ action: "whoami", binary: defaulted.binary, root: dir });
+    const defaultedCalls = readCallLog(defaulted.log);
+    check(
+      "default identity resolves to <root>/tmp/elastic-identity",
+      sameArgs(defaultedCalls[0]?.slice(0, 2) ?? [], [
+        "--identity", abs(dir, "tmp/elastic-identity"),
+      ]),
+    );
+
+    // ---- 4. explicit overrides win over the defaults ------------------------
+    const overridden = makeFakeAgentBusctl({});
+    await agentBus({
+      action: "whoami",
+      binary: overridden.binary,
+      root: dir,
+      identity: "custom-store",
+      persistSession: false,
+      busUrl: "https://bus.example",
+    });
+    const overriddenCalls = readCallLog(overridden.log);
+    check(
+      "explicit identity / persistSession=false / --bus override the defaults",
+      sameArgs(overriddenCalls[0] ?? [], [
+        "--identity", abs(dir, "custom-store"),
+        "--bus", "https://bus.example",
+        "whoami",
+        "--json",
+      ]),
+    );
+
+    // ---- 5. no HTTP is ever made --------------------------------------------
+    globalThis.fetch = boomFetch;
+    let httpThrew = false;
     try {
-      const envKeys = [
-        "AGENT_BUS_BASE_URL",
-        "AGENT_BUS_AGENT_ID",
-        ENV_TOKEN_KEY,
-        "AGENT_BUS_STORE",
-      ];
-      for (const key of envKeys) {
-        savedEnv[key] = process.env[key];
-        delete process.env[key];
-      }
-
-      // ---- 1. enrolled roster supplies baseUrl + identity by default -------
-      writeFileSync(
-        STORE_FILE,
-        `${JSON.stringify({ busUrl: "http://127.0.0.1:9000", agentId: "bus-a.agent-1" })}\n`,
-        { mode: 0o600 },
-      );
-      process.env[ENV_TOKEN_KEY] = ENV_VAL;
-      const storeCalls = stubFetch();
-      const fromStore = await agentBus({ path: "/api/v1/messages", store: STORE_FILE });
-      check(
-        "store-supplied baseUrl is used by default",
-        fromStore.baseUrlSource === "store" && storeCalls[0]?.url === "http://127.0.0.1:9000/api/v1/messages",
-      );
-      check("store-supplied identity surfaces on the result", fromStore.identity === "bus-a.agent-1");
-
-      // ---- 2. explicit options win over the store --------------------------
-      const optionCalls = stubFetch();
-      const fromOption = await agentBus({
-        path: "/x",
-        store: STORE_FILE,
-        baseUrl: "http://127.0.0.1:7000",
-        identity: "override-agent",
-        [OPT_TOKEN_KEY]: OPTION_VAL,
+      await agentBus({
+        action: "send",
+        binary: makeFakeAgentBusctl({}).binary,
+        root: dir,
+        to: "bus-a.agent-2",
+        message: "ping",
       });
-      check(
-        "explicit baseUrl option wins over the store",
-        fromOption.baseUrlSource === "option" && optionCalls[0]?.url === "http://127.0.0.1:7000/x",
-      );
-      check("explicit identity option wins over the store", fromOption.identity === "override-agent");
-
-      // ---- 3. environment base URL wins over the store ---------------------
-      process.env.AGENT_BUS_BASE_URL = "http://127.0.0.1:6000/api";
-      const envCalls = stubFetch();
-      const fromEnv = await agentBus({ path: "/v2/ping", store: STORE_FILE });
-      check(
-        "environment base URL wins over the store",
-        fromEnv.baseUrlSource === "environment" && envCalls[0]?.url === "http://127.0.0.1:6000/api/v2/ping",
-      );
-      delete process.env.AGENT_BUS_BASE_URL;
-
-      // ---- 4. missing base URL (option/env/store) is actionable ------------
-      const emptyStore = join(dir, "empty-store.json");
-      writeFileSync(emptyStore, `${JSON.stringify({ agentId: "only-id" })}\n`);
-      let err: Error | undefined;
-      try {
-        await agentBus({ path: "/x", store: emptyStore });
-      } catch (error) {
-        err = error as Error;
-      }
-      check(
-        "missing base URL is rejected with the resolution hints",
-        err !== undefined && /baseUrl.*AGENT_BUS_BASE_URL.*\.agent-bus\.local/i.test(err.message),
-      );
-
-      // ---- 5. missing access value (never stored) is actionable ------------
-      delete process.env[ENV_TOKEN_KEY];
-      err = undefined;
-      try {
-        await agentBus({ path: "/x", store: STORE_FILE });
-      } catch (error) {
-        err = error as Error;
-      }
-      check(
-        "missing access value is rejected and never read from the store",
-        err !== undefined && new RegExp(OPT_TOKEN_KEY + ".*" + ENV_TOKEN_KEY, "i").test(err.message),
-      );
-
-      // ---- 5b. when enrolled, the missing-token error names the identity store
-      // (actionable hint) and never attempts to read the bearer from it. -----
-      const enrolledStore = join(dir, "enrolled-store.json");
-      writeFileSync(
-        enrolledStore,
-        `${JSON.stringify({
-          busUrl: "http://127.0.0.1:9200",
-          agentId: "bus-b.agent-2",
-          identityStore: join(dir, "ident"),
-        })}\n`,
-        { mode: 0o600 },
-      );
-      err = undefined;
-      try {
-        await agentBus({ path: "/x", store: enrolledStore });
-      } catch (error) {
-        err = error as Error;
-      }
-      check(
-        "enrolled-but-missing-token error names the identity store for the operator",
-        err !== undefined &&
-          /identity store '.*ident'|enrolled \(identity 'bus-b\.agent-2'/.test(err?.message ?? "") &&
-          new RegExp(OPT_TOKEN_KEY + ".*" + ENV_TOKEN_KEY, "i").test(err?.message ?? ""),
-      );
-
-      // ---- 6. malformed/missing roster falls back gracefully ---------------
-      const malformedStore = join(dir, "malformed-store.json");
-      writeFileSync(malformedStore, "{ not json !!");
-      err = undefined;
-      try {
-        await agentBus({ path: "/x", store: malformedStore });
-      } catch (error) {
-        err = error as Error;
-      }
-      check(
-        "a malformed roster does not crash, it simply yields no defaults",
-        err !== undefined && /baseUrl/i.test(err?.message ?? ""),
-      );
-
-      err = undefined;
-      try {
-        await agentBus({ path: "/x", store: join(dir, "does-not-exist.json") });
-      } catch (error) {
-        err = error as Error;
-      }
-      check(
-        "a missing roster file does not crash, it simply yields no defaults",
-        err !== undefined && /baseUrl/i.test(err?.message ?? ""),
-      );
-
-      // ---- 7. path validation requires a leading '/' -----------------------
-      process.env[ENV_TOKEN_KEY] = ENV_VAL;
-      err = undefined;
-      try {
-        await agentBus({ path: "no-leading-slash", store: STORE_FILE });
-      } catch (error) {
-        err = error as Error;
-      }
-      check(
-        "a path without a leading slash is rejected",
-        err !== undefined && /must begin with '\//i.test(err.message),
-      );
-
-      // ---- the roster never holds any injected access value ----------------
-      const storeContents = readFileSync(STORE_FILE, "utf8");
-      check(
-        "roster holds none of the injected access values",
-        !storeContents.includes(ENV_VAL) && !storeContents.includes(OPTION_VAL),
-      );
-    } finally {
-      if (globalThis.fetch !== originalFetch && originalFetch !== undefined) {
-        globalThis.fetch = originalFetch;
-      } else {
-        try {
-          delete (globalThis as { fetch?: unknown }).fetch;
-        } catch {
-          // best-effort
-        }
-      }
-      for (const key of Object.keys(savedEnv)) {
-        if (savedEnv[key] === undefined) delete (process.env as Record<string, string | undefined>)[key];
-        else process.env[key] = savedEnv[key];
-      }
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        // best-effort cleanup
-      }
+    } catch (error) {
+      httpThrew = error instanceof Error && /HTTP request/.test(error.message);
     }
+    check("send with fetch armed to throw completes without any HTTP request", httpThrew === false);
 
-    if (failures === 0) {
-      console.log("\nAll AgentBus tests passed.");
-      process.exit(0);
+    // ---- 6. fail-fast when a non-zero exit code is returned ------------------
+    const failing = join(dir, "failing-busctl.sh");
+    writeFileSync(
+      failing,
+      ["#!/bin/sh", "echo 'boom diagnostic' >&2", "exit 4", ""].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(failing, 0o755);
+    let failErr: Error | undefined;
+    try {
+      await agentBus({ action: "whoami", binary: failing, root: dir, identity: "tmp/elastic-identity" });
+    } catch (error) {
+      failErr = error as Error;
+    }
+    check(
+      "a non-zero agent-busctl exit is surfaced as a clear error with the CLI diagnostic",
+      failErr !== undefined && /failed \(exit 4\)/.test(failErr.message) && /boom diagnostic/.test(failErr.message),
+    );
+  } finally {
+    if (globalThis.fetch !== originalFetch && originalFetch !== undefined) {
+      globalThis.fetch = originalFetch;
     } else {
-      console.error(`\n${failures} AgentBus test(s) failed.`);
-      process.exit(1);
+      try {
+        delete (globalThis as { fetch?: unknown }).fetch;
+      } catch {
+        // best-effort
+      }
     }
-  })().catch((error) => {
-    console.error("AgentBus test harness crashed:", error);
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
+
+  if (failures === 0) {
+    console.log("\nAll AgentBus tests passed.");
+    process.exit(0);
+  } else {
+    console.error(`\n${failures} AgentBus test(s) failed.`);
     process.exit(1);
-  });
+  }
 }
 
-main();
+main().catch((error) => {
+  console.error("AgentBus test harness crashed:", error);
+  process.exit(1);
+});

@@ -2,209 +2,168 @@
 
 ## Purpose
 
-Send coordination messages or retrieve Agent Bus status and handoff feeds with
-Bearer authentication. Use it to announce work before acting and to report
-verification results afterwards.
+Send coordination messages, wait (long-poll) for incoming messages, and check
+the current identity — all **exclusively through the local `./agent-busctl`
+CLI**. This tool never issues a raw HTTP request and never reads a bearer/access
+token; the `agent-busctl` credential store owns all secret material, and the
+tool only passes it the non-secret `--identity <dir>` path.
+
+Use it to announce work before acting and to report verification results
+afterwards.
 
 > **Loop-mode polling does NOT use this tool.** Loop-mode Agent Bus reads (the
 > pre-planning poll, between-step polls, and the idle loop) shell out to the
-> `agent-busctl` CLI (`loop-busctl-read.ts`) and authenticate with the enrolled
-> identity via `--bus` + `--identity` — **no `AGENT_BUS_ACCESS_TOKEN`** is
-> required there. This `AgentBus` tool is a general authenticated HTTP client
-> for explicit send/status calls that choose to use a Bearer token.
->
-> **Loop-mode `watch` cursor resume (no timeout).** Each loop-mode poll is a
-> fresh `agent-busctl watch` with **no external watchdog timeout** (the CLI watch
-> is long-lived by nature; shutdown is owned by the caller). To keep reads moving
-> forward, `loop-busctl-read.ts` captures the last message's `message_id` as a
-> cursor, persists it to the git-ignored `bus-cursor.json` state file, and passes
-> it back on the **next** poll via the CLI's `--cursor <id>` flag (omitted when no
-> cursor exists yet). The CLI accepts `--cursor` without any access token — only
-> `--bus` + `--identity` are needed.
+> `agent-busctl` CLI (`loop-busctl-read.ts`) with their own cursor management and
+> are independent of this tool.
 
-## When to use
+## Actions (the only three)
 
-Use `AgentBus` to announce work, report blockers or verification results, and
-retrieve handoff/status feeds. Do not use it for durable Spec Keeper task
-state; use `SpecKeeper` for that.
+This tool supports exactly three `agent-busctl` actions:
 
-## Required parameters
+1. **whoami** — show the identity this shell acts as.
+   `agent-busctl ... whoami`
+2. **watch** — long-poll wait for messages addressed to you as they arrive.
+   `agent-busctl ... watch [--for <dur>] [--count N]`
+3. **send** — send a direct message to one fully-qualified agent.
+   `agent-busctl ... send <to-agent-id> <body>`
 
-- `path` (string): deployment API path (for example `/api/v1/messages`). Must
-  begin with `/`.
+The action is chosen from `action` (defaults inferred from the other flags:
+`to` → send, a wait bound → watch, otherwise whoami). If a requested action has
+no `agent-busctl` subcommand the tool **fails fast with a clear diagnostic** —
+it never falls back to any HTTP path.
 
-## Optional parameters
+## Default flags (always applied)
 
-- `method` (string): `GET` | `POST` | `PUT` | `PATCH` | `DELETE` (default `GET`).
-- `body` (unknown): JSON payload for the request.
-- `baseUrl` (string): deployment endpoint; defaults to `AGENT_BUS_BASE_URL`, then the
-  enrolled `busUrl` in `.agent-bus.local`.
-- `accessToken` (string): Bearer token; defaults to `AGENT_BUS_ACCESS_TOKEN`. Never stored
-  in `.agent-bus.local`.
-- `identity` (string): agent identity (for example the enrolled agent id). Defaults to
-  `AGENT_BUS_AGENT_ID`, then the enrolled `agentId` in `.agent-bus.local`.
-- `store` (string): path to the `.agent-bus.local` roster. Defaults to `AGENT_BUS_STORE`,
-  then `<cwd>/.agent-bus.local`.
-- `userAgent` (string): defaults to `elastic-agent-agent-bus/1.0`.
+Every invocation is prefixed with:
+
+- `--identity <dir>` — the credential-store **directory**, defaults to
+  `<root>/tmp/elastic-identity` (the enrolled identity store; overridable via
+  `identity` or `AGENT_BUS_IDENTITY`).
+- `--persist-session` — reuse the session token across processes so repeated
+  shell-outs don't lock the identity out; overridable via `persistSession:
+  false`.
+
+Explicit options override these defaults.
+
+## Parameters
+
+- `action` (string): `whoami` | `watch` | `send`. Optional; inferred from the
+  other flags when omitted.
+- `verify` (boolean): [whoami] authenticate against the bus (`--verify`).
+- `forDuration` (string): [watch] how long to wait, e.g. `"30s"`, `"5m"`
+  (`--for <dur>`). A bounded watch that receives nothing exits 8 ("nothing
+  arrived") rather than an error.
+- `count` (number): [watch] stop after N messages (`--count N`).
+- `to` (string): [send] fully-qualified recipient `<bus-id>.<agent-id>`; a bare
+  name is refused by `agent-busctl`.
+- `message` (string): [send] the message body, sent verbatim as a single
+  argument. **Must never carry secret-store contents.**
+- `json` (boolean): machine-readable output (`--json`). Defaults true.
+- `identity` (string): override the default `--identity <dir>` credential-store
+  directory. Defaults to `<root>/tmp/elastic-identity`.
+- `persistSession` (boolean): apply `--persist-session`. Defaults true.
+- `busUrl` (string): override the `--bus <url>`. When omitted, the CLI resolves
+  it from its own store / `AGENT_BUS_URL` / `.agent-bus.local`.
+- `binary` (string): path to the `agent-busctl` binary. Defaults to
+  `<root>/agent-busctl`, else `AGENT_BUSCTL`, else a `PATH` lookup.
+- `root` (string): workspace root used to resolve relative paths and the default
+  identity directory. Defaults to the current working directory.
 
 ## Result
 
-- `status` (number): HTTP status.
-- `statusText` (string): HTTP status text.
-- `headers` (object): response headers.
-- `body` (unknown): parsed JSON when possible, otherwise response text.
-- `identity` (string): resolved agent identity used for the call, when one was configured.
-- `baseUrlSource` (string): source of the resolved base URL — `option`, `environment`,
-  or `store`.
+- `action` (string): the action that ran.
+- `binary` (string): the `agent-busctl` binary invoked.
+- `exitCode` (number): process exit code (0 on success).
+- `stdout` (string): raw stdout.
+- `stderr` (string): raw stderr diagnostics (never secret material).
+- `messages` (array): parsed message records for `watch` (NDJSON); empty
+  otherwise.
+- `identity` (string): resolved `--identity` credential-store directory.
+- `persistSession` (boolean): whether `--persist-session` was applied.
+- `busUrl` (string, optional): the resolved `--bus` URL, when one was provided.
 
 ## Local secrets store
 
-`AgentBus` can read default configuration from the local, **non-secret** roster file
-`.agent-bus.local` written by `AgentBusEnrol`. This lets an enrolled agent call the bus
-without repeating its base URL or agent id on every call.
+The `agent-busctl` CLI resolves the bus URL and its own credential from its
+enrolled identity store (`--identity`). This tool never reads the store for the
+credential and never reads `data.json` or any secret store. It reads only the
+non-secret `--identity` directory path so the CLI can locate the store.
 
-**How credentials are loaded (precedence, highest first):**
-
-1. Explicit per-call options (`baseUrl`, `accessToken`, `identity`, `store`).
-2. Environment variables (`AGENT_BUS_BASE_URL`, `AGENT_BUS_ACCESS_TOKEN`,
-   `AGENT_BUS_AGENT_ID`, `AGENT_BUS_STORE`).
-3. The local roster `.agent-bus.local`: `busUrl` and `agentId` only.
-
-So an operator's secret manager (environment or per-call option) always overrides the
-enrolled defaults.
-
-**How the store is used:**
-
-- Looked up at `options.store`, else `AGENT_BUS_STORE`, else `<cwd>/.agent-bus.local`.
-- Read with `loadAgentBusLocalConfig`: a missing or malformed store is treated as "no
-  defaults" rather than failing the call, so the client stays usable when everything is
-  configured via the environment.
-- Only the non-secret `busUrl`, `agentId`, and `identityStore` keys are read; secrets are
-  never read from or written to this file. `identityStore` is read solely to make the
-  "missing access token" error actionable — it is the path of the `agent-busctl` identity
-  store that owns the bearer, and it is never opened or read for the credential itself.
-- The tool never reads `data.json` or any secret store; it reads only the non-secret
-  roster keys above.
-
-**Never commit `.agent-bus.local`.** It is added to `.gitignore`; keep it out of the
-repository, commit messages, docs, and handoffs. It never contains secret material, but it
-reveals enrollment layout and should stay local and mode 0600.
-
-**The `.agent-bus.local` format** is a single JSON object written by `AgentBusEnrol` (mode
-0600) holding only non-secret roster metadata:
-
-```json
-{
-  "busUrl": "https://bus.example.com",
-  "busFingerprint": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-  "agentId": "bus1.planner",
-  "name": "planner",
-  "identityStore": "/path/to/.agent-bus-identity",
-  "enrolledAt": "2026-01-01T00:00:00.000Z"
-}
-```
-
-`AgentBus` reads non-secret `busUrl` and `agentId` fields (accepting the synonymous keys
-`bus_url`/`bus` and `agent_id`/`id`), plus `identityStore` (or `identity_store`) to enrich
-the missing-token diagnostic. It never reads `data.json` or any secret store for these
-defaults, and it never follows `identityStore` to read the bearer credential.
-
-## Zero-configuration use for an enrolled agent
-
-After `AgentBusEnrol` succeeds and `AGENT_BUS_ACCESS_TOKEN` (or a per-call `accessToken`)
-is available, an enrolled agent can talk to the bus with just the API path — the base URL
-and agent identity resolve automatically:
-
-```js
-// Enrolled agent: base URL + agent id come from .agent-bus.local, token from env.
-await AgentBus({ path: "/api/v1/messages", method: "POST", body: { topic: "status", status: "in_progress" } });
-```
-
-The full resolution chain for a defaulted call (highest precedence first):
-
-1. Per-call options (`baseUrl`, `accessToken`, `identity`, `store`).
-2. Environment variables (`AGENT_BUS_BASE_URL`, `AGENT_BUS_ACCESS_TOKEN`,
-   `AGENT_BUS_AGENT_ID`, `AGENT_BUS_STORE`).
-3. The local roster `.agent-bus.local` (`busUrl`, `agentId`).
-
-Note that the **Bearer token is never read from `.agent-bus.local`** — it must come from
-`AGENT_BUS_ACCESS_TOKEN` or the `accessToken` call option. This is by design: the roster
-holds non-secret metadata only, so credentials never sit on disk in the workspace.
+**Never commit `.agent-bus.local`** or the identity store contents; they are
+git-ignored and must stay out of the repository, docs, and handoffs.
 
 ## Formatted terminal output
 
-The runtime first announces the call as `AgentBus({...})`. While the request
-runs, an in-place timer line ticks on the same terminal line (for example
-`⏱ 0.50s` in color mode, or `elapsed 0.50s` in non-TTY logs) and is finalized
-with the total elapsed time when the call completes or fails. Terminal state
-is cleaned up on exit.
-
-On completion the terminal renders `AgentBus({...})` followed by a green circle
-and a short result summary on success, or a red circle and the error message on
-failure. In no-color/non-TTY contexts the circle degrades to plain text while
-the status and summary are still shown. No `[SUCCESS]` or `[ERROR]` text
-prefix is ever emitted for a tool call.
+The runtime first announces the call as `AgentBus({...})`. While the CLI runs, an
+in-place timer line ticks on the same terminal line and is finalized with the
+total elapsed time when the call completes or fails. On completion the terminal
+renders `AgentBus({...})` with a green/red status summary. No `[SUCCESS]` or
+`[ERROR]` text prefix is ever emitted for a tool call.
 
 ## Error handling
 
-- Missing base URL or access token: `Error`.
-- `path` not beginning with `/`: `Error`.
-- Non-OK response: throws
-  `Agent Bus request failed (<status> <statusText>): <body text>`.
-- Non-JSON response bodies are preserved as text for diagnostics.
+- A missing/unsupported action that has no `agent-busctl` subcommand: the tool
+  **fails fast** and never falls back to HTTP.
+- A `agent-busctl` binary that cannot be run: `Error` with the binary path.
+- A non-zero `agent-busctl` exit code: throws
+  `agent-busctl <action> failed (exit N) against '<binary>': <stderr>`.
+- A bounded `watch` that receives nothing exits 8 and is reported as a
+  non-zero-exit diagnostic ("nothing arrived"), not a thrown transport error.
 
 ## Critical operating constraints
 
-- Requires a base URL and access token, supplied via call options or
-  environment variables; never persist or commit secrets.
-- `body` is serialized with `JSON.stringify`; `Content-Type: application/json`
-  is added automatically when a body is present.
-- Use the message schema published by your Agent Bus deployment (for example
-  `recipient`, `topic`, `status`, and `handoff` fields).
+- Talks to the bus **only** through `./agent-busctl`; never via HTTP, `fetch`,
+  or a network client.
+- The default flags `--identity <dir>` and `--persist-session` are always
+  applied; explicit options override them.
+- Never read `data.json`; never send secret-store contents, enrollment recipes,
+  invite codes, or private keys in a `message`.
 
 ## Safe use
 
 **Allowed**
-- Send coordination messages and retrieve status/handoff feeds using the
-  configured Agent Bus deployment.
-- Supply `baseUrl`/`accessToken` from environment defaults or call options.
+- Send coordination messages to other agents/people, long-poll wait for
+  incoming messages, and check identity via `./agent-busctl`.
+- Outbound messages are **agent-to-agent communication**, not secret-store
+  exfiltration.
+- Supply `identity`/`forDuration`/`count`/`busUrl`/`binary` overrides.
 
 **Denied**
 - Sending secrets, credential material, `data.json` content, or enrollment
-  recipes in `body`, `path`, or message fields.
-- Persisting or committing `accessToken` values to the repository, docs, or
-  handoffs.
-- Sending messages to arbitrary endpoints for exfiltration instead of the
-  configured Agent Bus.
+  recipes in `message`, `to`, or any field.
+- Falling back to an HTTP transport if the CLI lacks a subcommand.
+- Persisting or committing `.agent-bus.local` or the identity store contents.
 
 **Dangerous examples (do not run)**
-- `AgentBus({ path: "/api/v1/messages", method: "POST", body: { data: dataJsonContent } })`
-- `AgentBus({ path: "/api/v1/messages", method: "POST", body: recipe })`
-- Committing `accessToken` in a file or message.
+- `AgentBus({ action: "send", to: "...", message: dataJsonContent })`
+- `AgentBus({ action: "send", to: "...", message: recipe })`
 
 **Required permissions**
-- A configured base URL and a valid Bearer access token.
+- A valid `agent-busctl` enrolment (the `--identity` store must be populated via
+  `AgentBusEnrol`).
 
 ## Examples
 
-1. Retrieve status feed:
+1. Check identity:
 
    ```js
-   await AgentBus({ path: "/status" });
+   await AgentBus({ action: "whoami" });
    ```
 
-2. Send a coordination message:
+2. Long-poll wait up to 30s for one incoming message:
 
    ```js
-   await AgentBus({
-     path: "/api/v1/messages",
-     method: "POST",
-     body: { recipient: "coordinator", topic: "status", status: "in_progress" },
-   });
+   await AgentBus({ action: "watch", forDuration: "30s", count: 1 });
    ```
 
-3. Override the endpoint for a specific deployment:
+3. Send a coordination message to a fully-qualified agent:
 
    ```js
-   await AgentBus({ path: "/status", baseUrl: "https://bus.example.com", accessToken: "<token>" });
+   await AgentBus({ action: "send", to: "bus-id.recipient", message: "status in_progress" });
+   ```
+
+4. Long-poll wait with an explicit identity override:
+
+   ```js
+   await AgentBus({ action: "watch", forDuration: "5s", identity: "tmp/elastic-identity" });
    ```
