@@ -19,6 +19,7 @@ import {
 } from "./loop-replan.js";
 import { defaultBusCursorFilePath, watchAgentBusOnce } from "./loop-busctl-read.js";
 import { resolveToolSafetyConfig, startDirPathWarning } from "./tool-safety-config.js";
+import { buildPrompt, renderPrompt } from "./prompt-builder.js";
 import { detectDocker, describeDockerDetection } from "./docker-detection.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
@@ -806,27 +807,8 @@ function renderToolCallFailed(toolCall, error) {
     emitToolLines(renderToolPhase("failed", toolCall, error, { color: terminalColor }));
 }
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
-/**
- * Render a prompt template by evaluating its `${...}` interpolation expressions
- * against the supplied variable map. The template text comes from the external
- * prompt files under /elastic-agent/prompts/; all `${...}` occurrences are
- * interpolation points resolved at call time. Backticks in the template are
- * escaped so JSON fence markers in prompt text cannot break the evaluation.
- */
-function renderPrompt(template, variables) {
-    const names = Object.keys(variables);
-    const values = names.map((name) => variables[name]);
-    const evaluator = new Function(...names, `return \`${template.replace(/`/g, "\\`")}\`;`);
-    return evaluator(...values);
-}
-function buildPrompt(commandPrompts, toolCallTldrs, commandLinePromptValue = commandLinePrompt) {
-    const promptHistory = commandPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n") || "(none)";
-    const toolHistory = toolCallTldrs.map((tldr, index) => `${index + 1}. ${tldr}`).join("\n") || "(none)";
-    const renderedPrompt = renderPrompt(buildPromptTemplate, { claudeInstructions, historyLimit, promptHistory, toolHistory, commandLinePrompt: commandLinePromptValue });
-    return toolSafetyConfig.allowAgentSourceModifications
-        ? `${renderedPrompt}\n\n${selfModificationSection}`
-        : renderedPrompt;
-}
+// renderPrompt and buildPrompt live in ./prompt-builder.js so the prompt
+// flag-state gating can be unit tested without booting the side-effectful CLI.
 function summarizeToolCall(name, toolArguments, toolResponse) { return truncate(`${name}(${truncate(stringify(toolArguments), 160)}) → ${truncate(stringify(toolResponse), 240)}`, 480); }
 
 function tokenCount(value) { return Number.isFinite(value) ? value : 0; }
@@ -2053,7 +2035,16 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
     appendHistory(configData.commandLinePrompts, originalPrompt);
     const prompt = isTaskMode && taskWorkOrder
         ? buildTaskWorkOrderPrompt(taskWorkOrder)
-        : buildPrompt(configData.commandLinePrompts, configData.toolCallTldrs, originalPrompt);
+        : buildPrompt({
+            commandPrompts: configData.commandLinePrompts,
+            toolCallTldrs: configData.toolCallTldrs,
+            commandLinePromptValue: originalPrompt,
+            template: buildPromptTemplate,
+            claudeInstructions,
+            historyLimit,
+            selfModificationSection,
+            allowAgentSourceModifications: toolSafetyConfig.allowAgentSourceModifications,
+        });
 
     // Planning-necessity classification: before entering the plan-then-execute
     // flow, ask the LLM whether the work order genuinely needs a formal plan.
