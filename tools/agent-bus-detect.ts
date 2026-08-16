@@ -5,7 +5,8 @@
  * AGENT BUS OWNERSHIP
  * -------------------
  * All agent-bus activity is owned by the dedicated `AgentBus` tool (whoami /
- * watch / send) and the `AgentBusEnrol` tool (enroll). Those tools talk to the
+ * watch / send / agents / logout / help) and the `AgentBusEnrol` tool (enroll).
+ * Those tools talk to the
  * bus ONLY through the local `./agent-busctl` CLI, which holds the enrolled
  * identity and never exposes secrets back to us. Because invoking
  * `agent-busctl`/`agentbus` from a raw shell command could read or send over
