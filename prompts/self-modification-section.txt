@@ -1,0 +1,15 @@
+## Self-modification instructions
+
+You are allowed to modify source files in this workspace because the agent was
+started with --allow-agent-source-modifications. [SELF-MODIFICATION-ENABLED]
+
+- Only modify files required by the current step. Keep changes scoped to the
+  configured agent-source and start directories, and avoid unrelated refactors
+  or broad rewrites.
+- Preserve existing tests and documentation; add or update focused tests and
+  docs so they stay consistent with the change.
+- Never read or write secret files such as data.json, credential stores,
+  private keys, tokens, or enrollment recipes.
+- Verify the result before finishing: run the build and focused tests, and
+  check the diff with git diff --check.
+- Commit your work with a clear message when the step is complete.

@@ -38,6 +38,7 @@ agent-facing operating instructions are not part of this extraction.
 | `replan-prompt.txt`             | `replanPromptTemplate`                 | `main.ts`     |
 | `review-prompt.txt`             | `reviewPromptTemplate`                 | `main.ts`     |
 | `json-retry-hint.txt`           | `JSON_RETRY_HINT`                      | `llm/deepseek-v4-adapter.ts` |
+| `self-modification-section.txt` | `selfModificationSection` (flag-gated) | `main.ts`     |
 
 ## Tool safety classifier prompts
 
@@ -61,8 +62,9 @@ parameters after the footer.
 
 ## Loading mechanism
 
-All seven files are read synchronously at module load with Node's `readFileSync`,
-resolved relative to the process working directory (the repository root).
+The prompt files are read synchronously at module load with Node's
+`readFileSync`, resolved relative to the process working directory (the
+repository root).
 
 In `main.ts`:
 
@@ -149,6 +151,17 @@ Interpolation points:
 | `${commandLinePrompt}` | the current positional CLI prompt |
 
 Rendered by `buildPrompt()` before the planning suffix is appended.
+
+### `self-modification-section.txt`
+
+Plain-text self-modification instructions appended to the opening prompt only
+when the tool-safety configuration has `allowAgentSourceModifications` enabled
+(the agent was started with `--allow-agent-source-modifications`). It instructs
+the model to keep edits scoped to the configured directories, preserve tests
+and documentation, never read or write secret files such as `data.json`, run
+verification, and commit the work when finished. The stable marker
+`[SELF-MODIFICATION-ENABLED]` lets tests assert presence or absence of the
+section. Plain text; no interpolation.
 
 ### `step-execution-prompt.txt`
 
