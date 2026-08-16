@@ -213,6 +213,7 @@ let mainCheckoutMayHavePartialWork = false;
 const planningSuffix = readFileSync("prompts/planning-suffix.txt", "utf-8");
 const executionFeedbackFormat = readFileSync("prompts/execution-feedback-format.txt", "utf-8");
 const buildPromptTemplate = readFileSync("prompts/build-prompt-skeleton.txt", "utf-8");
+const selfModificationSection = readFileSync("prompts/self-modification-section.txt", "utf-8");
 const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.txt", "utf-8");
 const replanPromptTemplate = readFileSync("prompts/replan-prompt.txt", "utf-8");
 const reviewPromptTemplate = readFileSync("prompts/review-prompt.txt", "utf-8");
@@ -821,7 +822,10 @@ function renderPrompt(template, variables) {
 function buildPrompt(commandPrompts, toolCallTldrs, commandLinePromptValue = commandLinePrompt) {
     const promptHistory = commandPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n") || "(none)";
     const toolHistory = toolCallTldrs.map((tldr, index) => `${index + 1}. ${tldr}`).join("\n") || "(none)";
-    return renderPrompt(buildPromptTemplate, { claudeInstructions, historyLimit, promptHistory, toolHistory, commandLinePrompt: commandLinePromptValue });
+    const renderedPrompt = renderPrompt(buildPromptTemplate, { claudeInstructions, historyLimit, promptHistory, toolHistory, commandLinePrompt: commandLinePromptValue });
+    return toolSafetyConfig.allowAgentSourceModifications
+        ? `${renderedPrompt}\n\n${selfModificationSection}`
+        : renderedPrompt;
 }
 function summarizeToolCall(name, toolArguments, toolResponse) { return truncate(`${name}(${truncate(stringify(toolArguments), 160)}) → ${truncate(stringify(toolResponse), 240)}`, 480); }
 
