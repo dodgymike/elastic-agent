@@ -70,6 +70,13 @@ const SECRET_HEADER_NAMES = /^(authorization|proxy-authorization|x-api-key|api-k
 
 const SECRET_ENVIRONMENT_VARIABLES = /(?:^|[^\w])\$?\{?(OPENAI_API_KEY|DEEPSEEK_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_SESSION_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|NPM_AUTH_TOKEN|DOCKER_PASSWORD|DATABASE_URL)\}?/i;
 
+/**
+ * Protected credential basenames as path tokens (not substrings), so `cat .env`
+ * and `cat path/.env` are denied while `process.env` inside a grep pattern is
+ * not mistaken for the `.env` file.
+ */
+const PROTECTED_FILE_PATH = /(?:^|[\s"'`/])(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\.env|\.netrc|\.npmrc|\.pypirc|\.git-credentials)(?=[\s"'`/]|$)/i;
+
 export type ToolSafetyDecision = "safe" | "unsafe" | "ambiguous";
 export type ToolSafetySource = "static" | "llm" | "fallback";
 
@@ -476,6 +483,12 @@ function shellWords(command: string): string[] {
     .filter((part) => part.length > 0);
 }
 
+/** True when a path is the null device; the null device is never a real file target. */
+function isNullDevicePath(target: string): boolean {
+  const cleaned = target.replace(/[,;)]+$/, "");
+  return cleaned === "/dev/null" || cleaned === "dev/null";
+}
+
 /** Return redirection targets that write to a real file (not an fd or /dev/null). */
 function redirectionTargets(command: string): string[] {
   const words = shellWords(command);
@@ -487,7 +500,7 @@ function redirectionTargets(command: string): string[] {
       || /^&>>?$/.test(part);
     if (!isRedirect) continue;
     const next = words[index + 1];
-    if (!next || next.startsWith("&") || next === "/dev/null" || next === "dev/null") continue;
+    if (!next || next.startsWith("&") || isNullDevicePath(next)) continue;
     targets.push(next.replace(/[,;)]+$/, ""));
   }
   return targets;
@@ -546,7 +559,7 @@ function fileModificationTargets(command: string): string[] {
   }
   if (/^git\b/.test(executable)) targets.push(...positional);
 
-  return Array.from(new Set(targets.filter((part) => part.length > 0)));
+  return Array.from(new Set(targets.filter((part) => part.length > 0 && !isNullDevicePath(part))));
 }
 
 /**
@@ -595,6 +608,9 @@ function classifyExecuteCommand(
   if (/data\.json/i.test(allText)) {
     return unsafe("ExecuteCommand references the protected file data.json; data.json is never a valid tool target, including /tmp/data.json.");
   }
+  if (/(?:--include|--glob|-g)[= ]+["']?\*\.json["']?/i.test(allText)) {
+    return unsafe("ExecuteCommand recursively includes *.json files, which would read the protected file data.json; data.json is never a valid tool target.");
+  }
 
   const commandSecret = secretTextReason(allText);
   if (commandSecret) {
@@ -606,7 +622,7 @@ function classifyExecuteCommand(
   if (/^\s*printenv\b/.test(command) || /^\s*env\s*([|>]|$)/.test(command)) {
     return unsafe("ExecuteCommand prints environment variables, which can expose secrets.");
   }
-  if (/\b(id_rsa|id_ed25519|id_ecdsa|id_dsa|\.env|\.netrc|\.npmrc|\.pypirc|\.git-credentials)\b/i.test(command) && /\b(cat|head|tail|less|more|sed|awk|grep|rg|wc|file|cp|scp|rsync|base64|curl|wget|nc|netcat)\b/i.test(command)) {
+  if (PROTECTED_FILE_PATH.test(command) && /\b(cat|head|tail|less|more|sed|awk|grep|rg|wc|file|cp|scp|rsync|base64|curl|wget|nc|netcat)\b/i.test(command)) {
     return unsafe("ExecuteCommand accesses a protected credential file.");
   }
 
@@ -636,7 +652,7 @@ function classifyExecuteCommand(
     return safe("ExecuteCommand is a harmless no-op that reads or writes nothing outside /dev/null.");
   }
 
-  if (isKnownSafeCommand(command)) {
+  if (isKnownSafeShell(command, roots)) {
     return safe("ExecuteCommand is a known-safe, read-only or standard verification command.");
   }
 
@@ -669,6 +685,13 @@ function destructiveCommandCheck(command: string, roots: readonly string[]): Des
   if (/\b(shutdown|reboot|halt|poweroff)\b/.test(command)) return { severity: "unsafe", reason: "host shutdown or restart command." };
   if (/:\(\)\s*\{/.test(command)) return { severity: "unsafe", reason: "shell fork bomb." };
 
+  // In-workspace recursive deletes (for example `rm -rf test/.x-build` used by
+  // build/test cleanup) are intentionally kept ambiguous rather than added to
+  // the static allow-list: recursive deletion is irreversible and a mistyped
+  // path could remove source. Build/test cleanup is already permitted when it
+  // runs through `npm run test:*` or `npm run build`, because the classifier
+  // then sees the npm script rather than the inner rm. Raw `rm -rf` stays
+  // LLM-reviewed (fail-closed when the LLM is unavailable).
   const rmTargets = recursiveRmTargets(command);
   if (rmTargets !== null) {
     for (const target of rmTargets) {
@@ -733,13 +756,132 @@ function exfiltrationCommandReason(command: string): string | null {
   return null;
 }
 
+/** Quote-aware shell token used by the absolute-path scanner. */
+interface ShellCommandToken {
+  readonly text: string;
+  readonly quoted: boolean;
+  readonly start: number;
+  readonly end: number;
+}
+
+/** Tokenize a shell command into words, quotes, and operators. */
+function shellCommandTokens(command: string): ShellCommandToken[] {
+  const tokens: ShellCommandToken[] = [];
+  let index = 0;
+  while (index < command.length) {
+    const ch = command[index];
+    if (/\s/.test(ch)) {
+      index += 1;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      const quote = ch;
+      const start = index;
+      index += 1;
+      while (index < command.length) {
+        if (quote === "\"" && command[index] === "\\" && index + 1 < command.length && (command[index + 1] === "\"" || command[index + 1] === "\\")) {
+          index += 2;
+          continue;
+        }
+        if (command[index] === quote) break;
+        index += 1;
+      }
+      index += 1;
+      tokens.push({ text: command.slice(start, index), quoted: true, start, end: index });
+      continue;
+    }
+    if (";&|<>".includes(ch)) {
+      const start = index;
+      let operator = ch;
+      if (index + 1 < command.length && command[index + 1] === ch) {
+        operator += ch;
+        index += 2;
+      } else {
+        index += 1;
+      }
+      tokens.push({ text: operator, quoted: false, start, end: index });
+      continue;
+    }
+    const start = index;
+    while (index < command.length && !/\s/.test(command[index]) && !"\"';|&<>".includes(command[index])) index += 1;
+    tokens.push({ text: command.slice(start, index), quoted: false, start, end: index });
+  }
+  return tokens;
+}
+
+/** grep/rg flags whose next argument is a pattern, not a file path. */
+const GREP_PATTERN_FLAGS = new Set([
+  "-e", "--regexp", "-v", "--invert-match", "-E", "-F", "-G", "-P", "-w", "-x",
+  "--include", "--exclude", "--exclude-dir", "--exclude-from", "--include-from",
+]);
+
+const GREP_INLINE_PATTERN_FLAGS = /^(?:--include|--exclude|--exclude-dir|--exclude-from|--include-from|--regexp)=/;
+
+function blankToken(target: string[], item: ShellCommandToken): void {
+  for (let index = item.start; index < item.end; index += 1) target[index] = " ";
+}
+
+/**
+ * Blank shell regions that are not real file operands so the absolute-path
+ * scanner does not mistake pattern text or an embedded script for a file
+ * read:
+ * - `node -e`/`--eval` script bodies (opaque to the shell and reviewed
+ *   separately by the LLM classifier); and
+ * - grep/rg pattern arguments (`-e`, `-v`, `--include`, `--exclude`, ...),
+ *   whose values are patterns rather than paths.
+ */
+function maskNonFileOperandRegions(command: string): string {
+  const tokens = shellCommandTokens(command);
+  const masked = command.split("");
+  let executable: string | null = null;
+  let previousWord: ShellCommandToken | null = null;
+  for (const token of tokens) {
+    if (token.text === "&&" || token.text === "||" || token.text === ";" || token.text === "|" || token.text === "&") {
+      executable = null;
+      previousWord = null;
+      continue;
+    }
+    if (token.text === ">" || token.text === ">>" || token.text === ">|" || token.text === "<" || token.text === "<<") {
+      previousWord = null;
+      continue;
+    }
+    if (executable === null && !token.text.startsWith("-")) {
+      executable = token.text.toLowerCase().replace(/^["']+|["']+$/g, "");
+      previousWord = token;
+      continue;
+    }
+    const isNode = executable === "node" || executable === "node.exe";
+    if (isNode && previousWord !== null && /^(?:-e|--eval)$/.test(previousWord.text)) {
+      blankToken(masked, token);
+      previousWord = token;
+      continue;
+    }
+    const isGrep = executable === "grep" || executable === "rg";
+    if (isGrep) {
+      if (previousWord !== null && GREP_PATTERN_FLAGS.has(previousWord.text)) {
+        blankToken(masked, token);
+        previousWord = token;
+        continue;
+      }
+      if (GREP_INLINE_PATTERN_FLAGS.test(token.text)) {
+        blankToken(masked, token);
+        previousWord = token;
+        continue;
+      }
+    }
+    previousWord = token;
+  }
+  return masked.join("");
+}
+
 function absolutePathEscapeReason(command: string, roots: readonly string[]): string | null {
   const fileAccess = /\b(cat|head|tail|grep|rg|sed|awk|less|more|wc|ls|find|file|stat|cp|mv|rm|touch|mkdir|node|python3?|open|source)\b/i.test(command);
   if (!fileAccess) return null;
-  const absolutePaths = command.match(/(?<![\w./-])\/[A-Za-z0-9._-][^\s"'`;|&<>]*/g) ?? [];
+  const scanSource = maskNonFileOperandRegions(command);
+  const absolutePaths = scanSource.match(/(?<![\w./-])\/[A-Za-z0-9._-][^\s"'`;|&<>]*/g) ?? [];
   for (const candidate of absolutePaths) {
     const cleaned = candidate.replace(/[,;)]+$/, "");
-    if (!cleaned) continue;
+    if (!cleaned || isNullDevicePath(cleaned)) continue;
     if (resolvesOutsideAllTrustedRoots(cleaned, roots)) return cleaned;
   }
   return null;
@@ -780,9 +922,56 @@ function isHarmlessNoOp(command: string): boolean {
 
 function isKnownSafeCommand(command: string): boolean {
   const trimmed = command.trim();
+  // Compound commands are reviewed segment-by-segment by isKnownSafeShell;
+  // a bare prefix match here would let `npx tsc && <arbitrary>` hide a
+  // trailing write or read.
+  if (/&&|\|\||;/.test(trimmed)) return false;
   return /^git\s+(diff|status|log|show|branch|rev-parse|grep|ls-files)\b/.test(trimmed)
     || /^(ls|find|grep|rg|cat|head|tail|wc|file|sort|uniq|diff|printf|echo|pwd|whoami|uname|date|which|command\s+-v)\b/.test(trimmed)
     || /^(node\s+test\/[\w./-]+|npm\s+(run\s+)?(test|build)(:[\w:-]*)?(\s|$)|npx\s+tsc\b|tsc\b)/.test(trimmed);
+}
+
+/** Split a shell command on unquoted `&&`, `||`, and `;` operators. */
+function splitShellSegments(command: string): string[] {
+  const tokens = shellCommandTokens(command);
+  const segments: string[] = [];
+  let segmentStart = 0;
+  for (const token of tokens) {
+    if (token.text === "&&" || token.text === "||" || token.text === ";") {
+      const segment = command.slice(segmentStart, token.start).trim();
+      if (segment) segments.push(segment);
+      segmentStart = token.end;
+    }
+  }
+  const tail = command.slice(segmentStart).trim();
+  if (tail) segments.push(tail);
+  return segments;
+}
+
+/**
+ * True when a shell command only changes into an allowed directory and then
+ * runs known-safe read-only/verification commands. `cd <allowed-dir> && ...`
+ * chains are validated recursively so a cwd change into the configured
+ * start-dir (for example `cd /elastic-agent && git status`) is accepted as the
+ * safe directory change it is, while a cwd change outside the trusted roots is
+ * not.
+ */
+function isKnownSafeShell(command: string, roots: readonly string[]): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+
+  const cdMatch = trimmed.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*&&\s*([\s\S]*)$/i);
+  if (cdMatch) {
+    const target = (cdMatch[1] ?? cdMatch[2] ?? cdMatch[3] ?? "").trim();
+    if (target && !hasPathTraversal(target) && !resolvesOutsideAllTrustedRoots(target, roots)) {
+      return isKnownSafeShell(cdMatch[4], roots);
+    }
+    return false;
+  }
+
+  const segments = splitShellSegments(trimmed);
+  if (segments.length > 1) return segments.every((segment) => isKnownSafeShell(segment, roots));
+  return isKnownSafeCommand(trimmed);
 }
 
 function classifyHttp(parameters: Record<string, unknown>): StaticToolSafetyVerdict {

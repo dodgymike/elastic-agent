@@ -615,6 +615,54 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 6c. Static allow-list for verified safe false-positive patterns:
+    //     read-only Git/diff checks, read-only inspections with /dev/null
+    //     redirections or grep pattern arguments, cwd changes into an
+    //     allowed root, and build/test commands. Destructive cleanup such as
+    //     `rm -rf test/.x-build` stays ambiguous (LLM-reviewed).
+    // ------------------------------------------------------------------
+    check(
+      "grep inspection with a /dev/null redirect is statically safe",
+      staticVerdict("ExecuteCommand", { command: "grep -rn \"x\" main.ts 2>/dev/null | head -20" }).decision === "safe",
+    );
+    check(
+      "grep inspection with a quoted -v pattern is statically safe",
+      staticVerdict("ExecuteCommand", { command: "grep -RIn -E 'x' . | grep -v \"/dist/\" | head -20" }).decision === "safe",
+    );
+    check(
+      "git diff --check is statically safe",
+      staticVerdict("ExecuteCommand", { command: "git diff --check" }).decision === "safe",
+    );
+    check(
+      "cd into an allowed root followed by read-only git is statically safe",
+      staticVerdict("ExecuteCommand", { command: "cd /workspace && git status --short && echo ok && git log --oneline -8" }).decision === "safe",
+    );
+    check(
+      "cd outside every trusted root is not statically safe",
+      staticVerdict("ExecuteCommand", { command: "cd /elsewhere && git status" }).decision !== "safe",
+    );
+    check(
+      "node -e inspection with a path-like string stays LLM-reviewed (not statically denied)",
+      staticVerdict("ExecuteCommand", { command: "node -e \"console.log('/tmp/example.txt')\"" }).decision === "ambiguous",
+    );
+    check(
+      "compound npx tsc plus node -e stays LLM-reviewed (not statically denied)",
+      staticVerdict("ExecuteCommand", { command: "npx tsc --outDir test/.check tool-safety-classifier.ts && node -e \"console.log('/workspace/start')\"" }).decision === "ambiguous",
+    );
+    check(
+      "grep for process.env is not a protected credential file read",
+      staticVerdict("ExecuteCommand", { command: "grep -n -e 'process.env' tool-safety-classifier.ts | head" }).decision === "safe",
+    );
+    check(
+      "grep --include=*.json recursive read is denied as a data.json read",
+      staticVerdict("ExecuteCommand", { command: "grep -rn \"x\" --include=\"*.json\" ." }).decision === "unsafe",
+    );
+    check(
+      "in-workspace rm -rf cleanup stays LLM-reviewed rather than statically allowed",
+      staticVerdict("ExecuteCommand", { command: "rm -rf test/.x-build" }).decision !== "safe",
+    );
+
+    // ------------------------------------------------------------------
     // 7. Classifier prompt output parsing.
     // ------------------------------------------------------------------
     const parsedSafe = parseAs('{"safe":true,"reason":"all good"}');
