@@ -284,4 +284,24 @@ export async function Read({ path, file_size, read_length, read_offset, line_ran
   };
 }
 
+/**
+ * The input schema the Read tool advertises to the model. This is the single
+ * source of truth that main.ts wires into the native tool definition and that
+ * the schema-vs-handler consistency test checks against the options the
+ * handler actually accepts (see `ReadOptions`). Keeping the schema next to the
+ * handler means the advertised parameters cannot drift from implementation.
+ */
+export const ReadParameters: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    path: { type: "string" },
+    file_size: { type: "number", description: "Size of the file in bytes. Obtain this from the FileSize tool before calling Read." },
+    read_length: { type: "number", description: "Maximum number of bytes to return in this page." },
+    read_offset: { type: "number", description: "Zero-based byte offset at which to start reading." },
+    line_range: { type: "string", description: "Optional inclusive 1-based line range such as '100-200' (or '100' for a single line). Alternative to byte paging: Read returns only those lines. When supplied, pass read_offset 0 and read_length file_size so the byte window covers the requested lines." },
+    read_hash: { type: "string", description: "Optional expected SHA-256 of the complete file. When supplied, a mismatch is reported as an error rather than returning unchecked content. The hash is always the hash of the complete file, so it can be passed to Edit or Write even when only a page was read." },
+  },
+  required: ["path", "file_size", "read_length", "read_offset"],
+};
+
 export default Read;

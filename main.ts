@@ -46,14 +46,14 @@ import { dirname, basename, isAbsolute, join } from "node:path";
 import { resolveWorkspaceInit, loadWorkspaceInit, workspaceInitToState, writeWorkspaceInitMarkdown, type WorkspaceInit } from "./workspace-init.ts";
 import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
-import Read from "./tools/Read.ts";
+import Read, { ReadParameters } from "./tools/Read.ts";
 import FileSize from "./tools/FileSize.ts";
 import Edit from "./tools/Edit.ts";
 import Delete from "./tools/Delete.ts";
 import ListDirectory from "./tools/ListDirectory.ts";
 import Http from "./tools/Http.ts";
 import HttpRequest from "./tools/HttpRequest.ts";
-import Git from "./tools/Git.tsx";
+import Git, { GitParameters } from "./tools/Git.tsx";
 import { executeCommand as ExecuteCommand } from "./tools/ExecuteCommand.ts";
 import AgentBus from "./tools/AgentBus.ts";
 import AgentBusEnrol from "./tools/AgentBusEnrol.ts";
@@ -592,18 +592,7 @@ const tools = [
         type: "function", name: "Read",
         usage_prompt: "tools/read-usage.md",
         description: "Read a UTF-8 file after first obtaining its size with FileSize. Use read_offset and read_length to read a byte window, or pass an optional inclusive 1-based line_range such as '100-200' to read only those lines. Refuses files larger than 500k.",
-        parameters: {
-            type: "object",
-            properties: {
-                path: { type: "string" },
-                file_size: { type: "number", description: "Size of the file in bytes. Obtain this from the FileSize tool before calling Read." },
-                read_length: { type: "number", description: "Maximum number of bytes to return in this page." },
-                read_offset: { type: "number", description: "Zero-based byte offset at which to start reading." },
-                line_range: { type: "string", description: "Optional inclusive 1-based line range such as '100-200' (or '100' for a single line). Alternative to byte paging: Read returns only those lines. When supplied, pass read_offset 0 and read_length file_size so the byte window covers the requested lines." },
-                read_hash: { type: "string", description: "Optional expected SHA-256 of the complete file. When supplied, a mismatch is reported as an error rather than returning unchecked content. The hash is always the hash of the complete file, so it can be passed to Edit or Write even when only a page was read." },
-            },
-            required: ["path", "file_size", "read_length", "read_offset"],
-        },
+        parameters: ReadParameters,
         exec_handler: ({ path, file_size, read_length, read_offset, line_range, read_hash }) => Read({ path, file_size, read_length, read_offset, line_range, read_hash }),
     },
     {
@@ -669,29 +658,7 @@ const tools = [
         type: "function", name: "Git",
         usage_prompt: "tools/git-usage.md",
         description: "Inspect a Git repository (status, log, diff, ls-files), stage selected changes, or commit staged changes.",
-        parameters: {
-            type: "object",
-            properties: {
-                mode: { type: "string", enum: ["status", "log", "diff", "ls-files"] },
-                action: { type: "string", enum: ["list", "stage", "commit"] },
-                cwd: { type: "string" },
-                format: { type: "string", enum: ["short", "porcelain", "branch"] },
-                branch: { type: "boolean" },
-                oneline: { type: "boolean" },
-                stat: { type: "boolean" },
-                maxCount: { type: "integer" },
-                all: { type: "boolean" },
-                revision: { type: "string" },
-                path: { type: "string" },
-                paths: { type: "array", items: { type: "string" } },
-                staged: { type: "boolean" },
-                check: { type: "boolean" },
-                others: { type: "boolean" },
-                excludeStandard: { type: "boolean" },
-                message: { type: "string" },
-            },
-            anyOf: [{ required: ["mode"] }, { required: ["action"] }],
-        },
+        parameters: GitParameters,
         exec_handler: (options) => {
             // In review mode, execution steps stage changes in the worktree and
             // never commit; committing is performed only by the review step when
