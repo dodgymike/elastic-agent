@@ -51,15 +51,20 @@ example `⏱ 0.50s` in color mode, or `elapsed 0.50s` in non-TTY logs) and is
 finalized with the total elapsed time when the command completes or fails.
 Terminal state is cleaned up on exit.
 
-On success the terminal renders `ExecuteCommand('...')` followed by a green
-circle and captured `stdout`; `stderr` is included only when non-empty. A
-non-zero `exitCode` renders a red circle with `exit <code>`, then `stderr`
-when present, then `stdout` when present (stdout can contain useful diagnostics
-even on failure). Empty `stdout`/`stderr` are suppressed. In no-color/non-TTY
-contexts the circle markers and ANSI colors degrade to plain text; the exit
-code and streams are still shown. A rejected call (spawn error or signal)
-renders a red circle with the error message. No `[SUCCESS]` or `[ERROR]` text
-prefix is ever emitted for a tool call.
+On success the terminal renders the already-announced `ExecuteCommand('...')`
+label (the parameters always stay visible) and the result phase shows a green
+circle. A clean success — `exitCode` `0` with empty `stderr` — renders only the
+green circle: its `stdout` was already delivered to the model as the tool
+result, so echoing it into the terminal would only add noise. Success with
+non-empty `stderr` keeps the full captured `stdout` and that `stderr` visible
+(warnings must not be hidden). A non-zero `exitCode` renders a red circle with
+`exit <code>`, then `stderr` when present, then `stdout` when present (stdout
+can contain useful diagnostics even on failure). A rejected call — spawn error,
+signal, or a safety-classifier refusal (`{ error: ... }` payload) — renders a
+red circle with the error/block message. Empty `stdout`/`stderr` are suppressed.
+In no-color/non-TTY contexts the circle markers and ANSI colors degrade to
+plain text; the exit code and streams are still shown. No `[SUCCESS]` or
+`[ERROR]` text prefix is ever emitted for a tool call.
 
 ## Error handling
 
