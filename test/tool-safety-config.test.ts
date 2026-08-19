@@ -23,6 +23,35 @@ try {
     true,
   );
 
+  // --start-dir and --allow-agent-source-modifications are mutually exclusive:
+  // combining them must fail with a clear usage error so the CLI can exit
+  // non-zero instead of running with ambiguous filesystem boundaries.
+  assert.throws(
+    () =>
+      resolveToolSafetyConfig({ startDir: ".", allowAgentSourceModifications: true }, sandbox),
+    /--allow-agent-source-modifications and --start-dir cannot be used together/,
+  );
+
+  // The exclusion applies regardless of option order and is independent of the
+  // classifier's enabled/disabled state.
+  assert.throws(
+    () =>
+      resolveToolSafetyConfig(
+        { allowAgentSourceModifications: true, startDir: ".", disableClassifier: true },
+        sandbox,
+      ),
+    /--allow-agent-source-modifications and --start-dir cannot be used together/,
+  );
+
+  // Each flag alone remains valid: --start-dir without modifications, and
+  // modifications without an explicit --start-dir.
+  const startDirOnly = resolveToolSafetyConfig({ startDir: "." }, sandbox);
+  assert.equal(startDirOnly.startDirConfigured, true);
+  assert.equal(startDirOnly.allowAgentSourceModifications, false);
+  const modsOnly = resolveToolSafetyConfig({ allowAgentSourceModifications: true }, sandbox);
+  assert.equal(modsOnly.startDirConfigured, false);
+  assert.equal(modsOnly.allowAgentSourceModifications, true);
+
   // Relative directory values resolve to absolute paths under the runtime cwd.
   const child = join(sandbox, "child");
   mkdirSync(child);

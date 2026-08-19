@@ -93,14 +93,25 @@ export function resolveToolSafetyConfig(
   runtimeCwd: string = process.cwd(),
 ): ToolSafetyConfig {
   const fallback = absoluteDirectoryPath(runtimeCwd, process.cwd());
+  const startDirConfigured = options.startDir !== undefined;
+  const allowAgentSourceModifications = options.allowAgentSourceModifications === true;
+  // --start-dir scopes all tool work to a single directory, which is mutually
+  // exclusive with allowing modifications across the agent source tree. Reject
+  // the conflicting combination up front so the CLI reports a clear usage error
+  // instead of running with ambiguous filesystem boundaries.
+  if (startDirConfigured && allowAgentSourceModifications) {
+    throw new Error(
+      "Usage: --allow-agent-source-modifications and --start-dir cannot be used together.",
+    );
+  }
   const agentSourceDir = resolveDirectoryOption(options.agentSourceDir, "--agent-source-dir", fallback);
   const startDir = resolveDirectoryOption(options.startDir, "--start-dir", fallback);
   return {
     enabled: options.disableClassifier !== true,
     agentSourceDir,
     startDir,
-    startDirConfigured: options.startDir !== undefined,
-    allowAgentSourceModifications: options.allowAgentSourceModifications === true,
+    startDirConfigured,
+    allowAgentSourceModifications,
   };
 }
 
