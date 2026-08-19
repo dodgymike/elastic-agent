@@ -157,11 +157,19 @@ program
     .option("-q, --quiet", "Suppress non-essential output (tool call params/results, plan summaries, TLDR, status messages); keep 'Step N started' and 'Step N finished' messages", false)
     .option("--very-quiet", "Suppress all standard output on success; only a catastrophic/fatal error may print (overrides --quiet)", false)
     .option("--log-prompts", "Write every LLM prompt (including any session-memory context) to prompt.log in the working directory (or PROMPT_LOG_PATH)", false)
+    .option("--session-id <session-id>", "Explicit session id for this run's remembered LLM context and end-of-plan persistence; defaults to a per-run run-<uuid>")
     .addHelpText("after", `
 Prompt logging:
   --log-prompts    append every LLM prompt to prompt.log in the working directory
                    (override the path with PROMPT_LOG_PATH). May contain sensitive
                    session-memory content; handle with care and keep out of the repo.
+`)
+    .addHelpText("after", `
+Session memory:
+  --session-id <session-id>  scope this run's remembered LLM context and end-of-plan
+                   persistence to an explicit id instead of a generated run-<uuid>.
+                   Reusing an id across runs lets later turns recall and continue the
+                   same session. The id is sanitized when used as a persisted filename.
 `)
     .addHelpText("after", `
 Output verbosity:
@@ -269,8 +277,15 @@ let client: MultiTurnLlmRuntime;
 let agentMemory: MemoryModule | null;
 let agentSessionId: string;
 {
-    // A dedicated per-run session id scopes this run's remembered context.
-    agentSessionId = `run-${randomUUID()}`;
+    // A dedicated session id scopes this run's remembered context. The CLI
+    // `--session-id <id>` flag lets an operator pin an explicit id (for
+    // example to continue/recall the same session across runs); otherwise a
+    // fresh per-run `run-<uuid>` is generated so each run starts a clean
+    // session by default. The id is used verbatim for the LLM memory context
+    // and end-of-plan persistence (sanitized only when used as a filename).
+    agentSessionId = typeof options.sessionId === "string" && options.sessionId.length > 0
+        ? options.sessionId
+        : `run-${randomUUID()}`;
     // ELAGENT_MEMORY_DISABLE=1 opts out entirely (fail-open): the plan loop
     // and LLM prompts run exactly as they did before this integration. When
     // enabled, a MemoryModule is created here (swappable via dependency

@@ -382,13 +382,21 @@ Integration details:
   persistent, composite). Because the captured payload may contain sensitive
   session-memory content, keep `prompt.log` (gitignored alongside `llm.log`)
   out of the repository and handle it with care.
+- **Explicit session id (opt-in)** — pass `--session-id <id>` to pin the run's
+  session id to an explicit value instead of a generated `run-<uuid>`. The id
+  scopes every `remember()` and `getContext()` call and the end-of-plan
+  persistence, so reusing the same `--session-id` across separate runs lets a
+  later turn recall and continue the same session. It is used verbatim for the
+  LLM context and sanitized only when used as a persisted filename. (See the
+  `--session-id` help text and the Step 1 wiring below.)
 
 ## Plan-execution loop wiring
 
 `main.ts` wires the module end-to-end:
 
-1. On startup it derives a per-run `agentSessionId` (`run-${randomUUID()}`) and
-   selects the backend via `ELAGENT_MEMORY_TYPE` — the **default (unset or
+1. On startup it derives the `agentSessionId` — from `--session-id <id>` when
+   supplied, otherwise a fresh `run-${randomUUID()}` — and selects the backend
+   via `ELAGENT_MEMORY_TYPE` — the **default (unset or
    unrecognised) and explicit `persistent`** build
    `createPersistentMemoryModule(options)` (the durable, disk-backed default);
    `in-memory` builds `createInMemoryMemoryModule(options)`; `graph` builds
