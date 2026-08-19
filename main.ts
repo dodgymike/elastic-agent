@@ -57,6 +57,7 @@ import ListDirectory from "./tools/ListDirectory.ts";
 import Mkdir from "./tools/Mkdir.ts";
 import Rmdir from "./tools/Rmdir.ts";
 import Find from "./tools/Find.ts";
+import Grep, { GrepParameters } from "./tools/Grep.ts";
 import Http from "./tools/Http.ts";
 import HttpRequest from "./tools/HttpRequest.ts";
 import Git, { GitParameters } from "./tools/Git.tsx";
@@ -718,6 +719,13 @@ const tools = [
             required: ["path"],
         },
         exec_handler: ({ path, name, type, maxdepth }) => Find({ path, name, type, maxdepth }),
+    },
+    {
+        type: "function", name: "Grep",
+        usage_prompt: "tools/grep-usage.md",
+        description: "Recursively search a directory for regular files whose contents match a literal text or regular expression, returning path:line:text matches and the set of matching files. Read-only; refuses to inspect files larger than 500k and never searches data.json.",
+        parameters: GrepParameters,
+        exec_handler: ({ pattern, path, name, literal, maxdepth, ignoreCase, maxFileSize, limit }) => Grep({ pattern, path, name, literal, maxdepth, ignoreCase, maxFileSize, limit }),
     },
     {
         type: "function", name: "ExecuteCommand",

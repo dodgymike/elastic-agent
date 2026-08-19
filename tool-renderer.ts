@@ -852,6 +852,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
     Mkdir: { ...genericToolRenderer },
     Rmdir: { ...genericToolRenderer },
     Find: { ...genericToolRenderer },
+    Grep: { ...genericToolRenderer },
     ExecuteCommand: {
         pending: renderExecuteCommandPending,
         succeeded: renderExecuteCommandSucceeded,

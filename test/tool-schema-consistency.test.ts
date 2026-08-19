@@ -19,6 +19,7 @@
 // Compiled and executed standalone by the `test:tool-schema` npm script.
 import { ReadParameters } from "../tools/Read.js";
 import { GitParameters } from "../tools/Git.js";
+import { GrepParameters } from "../tools/Grep.js";
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -97,6 +98,34 @@ function main(): void {
   check(
     "Git schema declares an anyOf (mode XOR action) constraint",
     Array.isArray(anyOf) && anyOf.length === 2,
+  );
+
+  // ---------------------------------------------------------------------------
+  // 3. The Grep schema advertises exactly the options the handler accepts.
+  //    GrepParameters co-locates the schema next to Grep in tools/Grep.ts and
+  //    is wired into main.ts, so the advertised parameter set and required
+  //    fields must stay consistent with the handler's GrepOptions.
+  // ---------------------------------------------------------------------------
+  check("Grep schema root declares an object", asRecord(GrepParameters).type === "object");
+  const grepProperties = propertiesOf(GrepParameters as Record<string, unknown>);
+  const expectedGrepParams = [
+    "pattern",
+    "path",
+    "name",
+    "literal",
+    "maxdepth",
+    "ignoreCase",
+    "maxFileSize",
+    "limit",
+  ];
+  check(
+    `Grep schema property set matches the handler options (${expectedGrepParams.join(", ")})`,
+    JSON.stringify(Object.keys(grepProperties).sort()) === JSON.stringify([...expectedGrepParams].sort()),
+  );
+  check(
+    "Grep schema requires pattern and path (handler prerequisites)",
+    JSON.stringify((GrepParameters as { required?: string[] }).required?.sort()) ===
+      JSON.stringify(["path", "pattern"].sort()),
   );
 
   if (failures === 0) {

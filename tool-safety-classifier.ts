@@ -551,6 +551,7 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
     case "FileSize":
     case "ListDirectory":
     case "Find":
+    case "Grep":
     case "Http":
       return "readonly";
     case "Write":
@@ -1475,6 +1476,7 @@ export function classifyToolCallStatically(
     case "FileSize":
     case "ListDirectory":
     case "Find":
+    case "Grep":
       return classifyFileTool(toolName, record, roots, allowOutsideWorkspace);
     case "Write":
     case "Edit":

@@ -56,6 +56,8 @@ const colored = { color: true };
         "Http",
         "HttpRequest",
         "ListDirectory",
+        "Find",
+        "Grep",
         "ExecuteCommand",
         "Git",
         "AgentBus",

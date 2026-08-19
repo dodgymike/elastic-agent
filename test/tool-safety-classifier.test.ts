@@ -232,6 +232,22 @@ async function main(): Promise<void> {
       toolRiskLevel("Find") === "readonly",
     );
     check(
+      "Grep is a read-only tool",
+      toolRiskLevel("Grep") === "readonly",
+    );
+    check(
+      "safe Grep within workspace is allowed",
+      staticVerdict("Grep", { path: "tools", name: "*.ts" }).decision === "safe",
+    );
+    check(
+      "Grep data.json search path is denied",
+      staticVerdict("Grep", { path: "data.json" }).decision === "unsafe",
+    );
+    check(
+      "Grep path traversal is denied",
+      staticVerdict("Grep", { path: "tools/../secret" }).decision === "unsafe",
+    );
+    check(
       "safe Mkdir within workspace is allowed",
       staticVerdict("Mkdir", { path: "tmp/build", recursive: true }).decision === "safe",
     );
