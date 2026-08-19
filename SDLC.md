@@ -3,7 +3,8 @@
 This document describes the development lifecycle followed by the `elastic-agent`
 runtime when planning and executing a prompt. It is referenced directly by the
 post-plan review phase (criterion (c) below), so it must stay in sync with the
-process actually implemented in `main.ts`.
+process actually implemented in the CLI orchestrator (`main.ts`) and its focused
+modules described under [Module structure](#module-structure) below.
 
 ## Overview
 
@@ -20,6 +21,31 @@ a mandatory post-plan **review phase**. The lifecycle is:
 4. **Finish or retry** — if the review passes, stop. If it does not pass and the
    retry budget remains, restart the **execution** phase (not the planning
    phase) with the review feedback and learnings injected; otherwise fail.
+
+## Module structure
+
+`main.ts` is the CLI orchestrator: it parses command-line arguments and options,
+loads configuration, wires the provider and dependencies, and drives the overall
+plan-then-execute flow (running steps, invoking tools, the replan request loop,
+phase-restart application, and Spec Keeper / worktree / LLM interactions). The
+stateful orchestration functions (`runExecutionPhase`, `runReviewPhase`,
+`executePlanStep`, `dispatchToolCall`, and the tool-render wrappers) intentionally
+remain in `main.ts`, anchored by the CLI's source-text structure tests and bound
+to the run's module-level configuration.
+
+The prompt-building, parsing, and deterministic plan/step logic is factored into
+focused, dependency-light modules:
+
+| Module             | Responsibility                                                                                     |
+|--------------------|---------------------------------------------------------------------------------------------------|
+| `planner-prompt.ts`| Pure assembly of the planner/replanner/review-plan LLM prompts from the `prompts/*.txt` templates. |
+| `prompt-parser.ts` | Parsing and validating the model's JSON plan/step responses (plan, phase, abort; restart detection). |
+| `plan-handler.ts`  | Deterministic plan/step shaping & reporting: `planSteps`, `actionablePlanSteps`, `formatPlan`, `appendSuggestedUpdate`, `applyExecutionFeedback`, `fightingDenialCount`, `reportExecutionFeedback`, `reportAppliedPlanChanges`, plus token-usage / tool-call / review-summary formatters. |
+
+`main.ts` imports these helpers rather than re-implementing them. `prompt-builder.ts`
+remains the leaf dependency (`renderPrompt`) used by `planner-prompt.ts`, and
+`plan-printer.ts` owns the console plan indentation/output. The external prompt
+*templates* stay under `prompts/` and are not duplicated in code.
 
 ## Review phase
 
