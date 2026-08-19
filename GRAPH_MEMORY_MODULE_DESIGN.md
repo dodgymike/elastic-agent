@@ -198,10 +198,14 @@ const createGraphMemoryModule: MemoryModuleFactory = (options) =>
 The runtime wires memory in `main.ts` exactly where `InMemoryMemoryModule` is
 built and called today:
 
-- **Instantiation/selection** — `main.ts` around the `agentMemory` block
-  (currently `createInMemoryMemoryModule(memoryOptions)`). A selector
-  (`process.env.ELAGENT_MEMORY_TYPE === "graph"` and/or a CLI `--memory=graph`
-  flag) chooses `createGraphMemoryModule`; default remains in-memory.
+- **Instantiation/selection** — `main.ts` around the `agentMemory` block. A
+  selector (`process.env.ELAGENT_MEMORY_TYPE === "graph"` and/or a CLI
+  `--memory=graph` flag) chooses `createGraphMemoryModule`.
+  > **Runtime update (this design predates the default change):** the runtime
+  > default is now the **persistent** backend (`ELAGENT_MEMORY_TYPE` unset or
+  > `persistent` → `createPersistentMemoryModule`); `graph` and `in-memory` are
+  > explicit opt-ins, and `concat`/`both` selects a concatenation composite. See
+  > `README.md` → *Selecting the backend* for the full, current selection table.
 - **remember() call sites** — `rememberAgentStep(...)` in `main.ts` already
   calls `agentMemory.remember(input)` after each completed plan step; it is
   module-agnostic and needs no change once `agentMemory` points at the graph

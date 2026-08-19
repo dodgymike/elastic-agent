@@ -1,9 +1,10 @@
 # elastic-agent — Memory Module
 
 This document describes the **memory module** introduced into the elastic-agent
-runtime: its transport-agnostic interface, the default in-memory implementation,
-how modules are swapped and chained via dependency injection, and how it
-integrates with the LLM runtime and the plan-execution loop.
+runtime: its transport-agnostic interface, the default persistent (disk-backed)
+implementation, the in-memory and graph backends, concatenation mode, how
+modules are swapped and chained via dependency injection, and how it integrates
+with the LLM runtime and the plan-execution loop.
 
 > The module lives under `memory/` and backs the runtime's in-process,
 > LLM-summarized memory. It is distinct from the legacy file/sqlite memory
@@ -35,13 +36,15 @@ the execution flow of the agent.
 | File | Purpose |
 | --- | --- |
 | `memory/types.ts` | The transport-agnostic contract: `MemoryModule`, `MemoryContext`, `RememberInput`, `ContextRequest`, `MemoryContextResult`, `MemoryModuleFactory`. |
-| `memory/inMemory.ts` | `InMemoryMemoryModule` (the default store), its `MemorySummarizer` type, the default renderer, `mergeContextResults`, and the `createInMemoryMemoryModule` factory. |
+| `memory/inMemory.ts` | `InMemoryMemoryModule` (the volatile in-process store), its `MemorySummarizer` type, the default renderer, `mergeContextResults`, and the `createInMemoryMemoryModule` factory. |
 | `memory/graph-store.ts` | The logical graph schema (`GraphNode`, `GraphEdge`, `GraphAttributes`), the `GraphStore` storage interface, and the default in-memory adjacency store `InMemoryGraphStore`. |
 | `memory/graph-memory.ts` | `GraphMemoryModule` (the graph-backed store), `GraphMemoryOptions`, `createGraphMemoryModule`, the default chain renderer, and the `GraphFailureReport`. |
-| `memory/persistent.ts` | `PersistentMemoryModule` (the end-of-plan persistent store), `PersistentMemoryOptions`, `createPersistentMemoryModule`, `PersistentMemoryDocument`, and `PersistentFailureReport`. |
+| `memory/persistent.ts` | `PersistentMemoryModule` (the end-of-plan persistent store and **default backend**), `PersistentMemoryOptions`, `createPersistentMemoryModule`, `PersistentMemoryDocument`, and `PersistentFailureReport`. |
+| `memory/compositeMemory.ts` | `CompositeMemoryModule` (concatenation composite), `createCompositeMemoryModule` / `createConcatenationMemoryModule` factories, `CompositeMemoryOptions`, and the `FinalizableMemoryModule`/`CompositeFailureReport` types. |
 | `test/memory.test.ts` | Focused tests: interface conformance, in-memory store + summarizer, chaining, LLM integration, remember-after-step. |
 | `test/graph-memory.test.ts` | Focused tests for `GraphMemoryModule`: node creation/upsert, chain edges, `getContext`, chaining, empty-input fail-safe. |
 | `test/persistent-memory.test.ts` | Focused tests for `PersistentMemoryModule`: contract, summarizer, persist, finalize, fail-safe, factory. |
+| `test/composite-memory.test.ts` | Focused tests for `CompositeMemoryModule`: ordering, separators, remember to both, failure handling, finalize passthrough, chainable. |
 | `test/multi-turn-memory.test.ts` | Tests for the LLM runtime memory-context injection. |
 
 ## The interface (`memory/types.ts`)
@@ -74,11 +77,13 @@ round-trip through any transport without lossy conversions.
 
 ## The in-memory implementation (`memory/inMemory.ts`)
 
-`InMemoryMemoryModule` is the reference/default `MemoryModule`. It keeps an
+`InMemoryMemoryModule` is the volatile in-process `MemoryModule`. It keeps an
 ordered history of remembered plan steps in process memory (per session) and,
 when a summarizer is injected, calls it after every `remember()` to refresh a
 concise summary of everything seen so far. That summary is what `getContext()`
-returns.
+returns. It was the original runtime default; today the default is the persistent
+backend and the in-memory module is an explicit opt-in (`ELAGENT_MEMORY_TYPE=in-memory`)
+or the ephemeral secondary in concatenation mode.
 
 - **Summarizer injection** — the summarizer is a plain
   `MemorySummarizer = (input: MemorySummarizeInput) => Promise<string>`
@@ -195,21 +200,112 @@ swapped in later without changing `GraphMemoryModule`.
 ### Selecting the graph module
 
 The runtime selects the backend at startup (in `main.ts`) via the
-`ELAGENT_MEMORY_TYPE` environment variable. The default remains the in-memory
-module (`createInMemoryMemoryModule`); set it to `graph` to use
+`ELAGENT_MEMORY_TYPE` environment variable. Set it to `graph` to use
 `createGraphMemoryModule`. `ELAGENT_MEMORY_DISABLE=1/true` disables memory
-entirely for both backends.
+entirely for every backend. See [Selecting the backend](#selecting-the-backend)
+below for the full set of accepted values and the default.
 
 ```sh
-# default: in-memory
-ELAGENT_MEMORY_TYPE=          npm run build
-
 # graph-backed
 ELAGENT_MEMORY_TYPE=graph     npm run build
 
 # disabled (fail-open)
 ELAGENT_MEMORY_DISABLE=1      npm run build
 ```
+
+## Selecting the backend
+
+`main.ts` chooses the memory backend at startup from `ELAGENT_MEMORY_TYPE`. The
+**default is the persistent (disk-backed) backend** — when the variable is unset
+or unrecognised, or set to `persistent`, `main.ts` builds the durable
+`PersistentMemoryModule`. The accepted values are:
+
+| `ELAGENT_MEMORY_TYPE` | Backend | Factory |
+| --- | --- | --- |
+| (unset / unrecognised) / `persistent` | **persistent** (durable, disk-backed; the default) | `createPersistentMemoryModule` |
+| `in-memory` | in-memory (volatile in-process; the original default, explicit opt-in) | `createInMemoryMemoryModule` |
+| `graph` | graph-backed (nodes + typed edges) | `createGraphMemoryModule` |
+| `concat` / `both` | **concatenation composite** (persistent `primary` + in-memory `secondary`) | `createCompositeMemoryModule` |
+
+`ELAGENT_MEMORY_DISABLE=1/true` opts out entirely (fail-open) for every backend.
+
+```sh
+# default: persistent (disk-backed)
+ELAGENT_MEMORY_TYPE=            npm run build
+
+# explicit persistent
+ELAGENT_MEMORY_TYPE=persistent  npm run build
+
+# in-memory (original default, no end-of-plan persistence)
+ELAGENT_MEMORY_TYPE=in-memory   npm run build
+
+# graph-backed
+ELAGENT_MEMORY_TYPE=graph       npm run build
+
+# concatenation: persistent (primary) + in-memory (secondary)
+ELAGENT_MEMORY_TYPE=concat      npm run build
+
+# concatenation alias
+ELAGENT_MEMORY_TYPE=both        npm run build
+
+# disabled (fail-open)
+ELAGENT_MEMORY_DISABLE=1        npm run build
+```
+
+For the persistent backend (and the persistent half of concatenation mode),
+`ELAGENT_MEMORY_OUTPUT_DIR` (or `ELAGENT_MEMORY_OUTPUT_PATH`) selects where the
+durable per-session documents land. For the default (unset) backend, omit the
+variable or set it to `persistent`; setting `ELAGENT_MEMORY_TYPE` to anything
+unrecognised other than the values above also falls back to the persistent
+default.
+
+## Concatenation mode (`memory/compositeMemory.ts`)
+
+`ELAGENT_MEMORY_TYPE=concat` (alias `both`) composes two `MemoryModule`s into a
+single labeled, fail-safe, chainable `MemoryModule` via a concatenation
+composite (`createCompositeMemoryModule({ primary, secondary })`, alias
+`createConcatenationMemoryModule`). The default pairing is **persistent** as
+`primary` (the durable, disk-backed source) and **in-memory** as `secondary`
+(the ephemeral source). The composite satisfies the same `MemoryModule`
+contract (`remember`/`getContext`), so it can itself be wrapped, delegated, or
+nested inside another composite.
+
+- **remember(input)** — forwards to BOTH `primary` and `secondary` (and any
+  `delegate`), so every plan step is recorded in both stores. Failures in either
+  store are absorbed into the composite's `lastFailure` report and never
+  reject/abort the plan loop (the other store still records the step).
+- **getContext(request)** — retrieves context from BOTH stores and concatenates
+  them **in order: `primary` first, then `secondary`**, each under its own header
+  marker. Because the default pairing is persistent + in-memory, the runtime
+  wires the headers so `main.ts` produces:
+
+  ```text
+  --- persistent memory ---
+  <durable summary>
+  --- in-memory memory ---
+  <ephemeral context>
+  ```
+
+  A section is emitted only when that store returned a non-empty result (text or
+  `hasMemory`); empty sections are dropped. `matchedContexts` are pooled across
+  both stores. If one store throws, its section is omitted (logged as a failure)
+  and the other store's context is still returned — the composite never fails
+  open entirely for `getContext()`.
+
+- **Ordering rationale** — persistent is surfaced first because it is the
+  durable, curated end-of-plan source; in-memory sits after it so the recent
+  ephemeral snapshot augments without masking the durable summary.
+- **Finalize passthrough** — the composite is not a `PersistentMemoryModule`,
+  but it exposes an optional `finalize(sessionId)` that forwards to the inner
+  `primary` when that module exposes a `finalize` method. `main.ts`'s
+  `finalizePersistentMemory()` detects both `instanceof PersistentMemoryModule`
+  and this passthrough, so concat still persists the durable document at end of
+  plan.
+- **Chainable** — the composite is itself a `MemoryModule`, so it can be wrapped
+  or delegated further or nested inside another composite, and it honors the same
+  fail-safe semantics as every other backend.
+- **Options** — `CompositeMemoryOptions`: `primary`, `secondary`, optional
+  `headers` (custom separator markers) and optional `delegate`.
 
 ## The persistent end-of-plan implementation (`memory/persistent.ts`)
 
@@ -239,15 +335,18 @@ rename).
   the plan loop treats as non-fatal.
 - **Options** — `PersistentMemoryOptions`: `outputDir` (default `memory-output`),
   `filePath` (overrides `outputDir`), `summarizer`, `delegate`.
-- **Runtime selection** — set `ELAGENT_MEMORY_TYPE=persistent` at startup;
-  `ELAGENT_MEMORY_OUTPUT_DIR` (or `ELAGENT_MEMORY_OUTPUT_PATH`) picks the output
-  location. After the plan completes, `main.ts` calls
-  `finalizePersistentMemory()` which invokes `finalize()` and logs the durable
-  path. It is a no-op for the in-memory/graph backends and is fail-safe (a
-  finalize failure never aborts or changes plan completion).
+- **Runtime selection** — the persistent backend is the **default**
+  (`ELAGENT_MEMORY_TYPE` unset/unrecognised or `persistent`). It is also the
+  `primary` half of concatenation mode. `ELAGENT_MEMORY_OUTPUT_DIR` (or
+  `ELAGENT_MEMORY_OUTPUT_PATH`) picks the output location. After the plan
+  completes, `main.ts` calls `finalizePersistentMemory()` which invokes
+  `finalize()` (directly for a `PersistentMemoryModule`, or via the composite's
+  `finalize()` passthrough in concat mode) and logs the durable path. It is a
+  no-op for the in-memory/graph backends and is fail-safe (a finalize failure
+  never aborts or changes plan completion).
 
 ```sh
-# end-of-plan persistent memory
+# end-of-plan persistent memory (explicit; also the default when unset)
 ELAGENT_MEMORY_TYPE=persistent                npm run build
 ELAGENT_MEMORY_TYPE=persistent ELAGENT_MEMORY_OUTPUT_DIR=/var/lib/elagent-memory  npm run build
 ```
@@ -282,14 +381,18 @@ Integration details:
 `main.ts` wires the module end-to-end:
 
 1. On startup it derives a per-run `agentSessionId` (`run-${randomUUID()}`) and
-   selects the backend via `ELAGENT_MEMORY_TYPE` (default in-memory
-   `createInMemoryMemoryModule(options)`, `createGraphMemoryModule(options)`
-   with `ELAGENT_MEMORY_TYPE=graph`, or `createPersistentMemoryModule(options)`
-   with `ELAGENT_MEMORY_TYPE=persistent`) — swappable via dependency injection.
-   With the persistent backend, `main.ts` also calls
-   `finalizePersistentMemory()` at end of plan to summarise and persist the
-   session. `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely (fail-open): the
-   plan loop and LLM prompts run exactly as before.
+   selects the backend via `ELAGENT_MEMORY_TYPE` — the **default (unset or
+   unrecognised) and explicit `persistent`** build
+   `createPersistentMemoryModule(options)` (the durable, disk-backed default);
+   `in-memory` builds `createInMemoryMemoryModule(options)`; `graph` builds
+   `createGraphMemoryModule(options)`; and `concat`/`both` build a
+   `createCompositeMemoryModule({ primary: persistent, secondary: in-memory })`
+   — swappable via dependency injection. See [Selecting the backend](#selecting-the-backend).
+   For the persistent backend and the persistent half of concat, `main.ts` also
+   calls `finalizePersistentMemory()` at end of plan to summarise and persist the
+   session (via `instanceof PersistentMemoryModule` or the composite's
+   `finalize()` passthrough). `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely
+   (fail-open): the plan loop and LLM prompts run exactly as before.
 2. The runtime is constructed with `{ memory: agentMemory, sessionId:
    agentSessionId }`, so each initial LLM prompt is prefixed with recalled
    context.
@@ -310,8 +413,9 @@ prompts and the plan loop proceed unchanged with a single non-fatal warning.
 npm run test:memory             # interface, in-memory, chaining, LLM, remember-after-step
 npm run test:graph-memory       # graph module: node upsert, chain edges, getContext, chaining, fail-safe
 npm run test:persistent-memory  # persistent module: contract, summarizer, persist, finalize, fail-safe, factory
+npm run test:composite-memory   # concatenation composite: ordering, separators, failure handling, finalize passthrough
 npm run test:multi-turn-memory  # LLM runtime memory-context injection
-npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts, persistent.ts
+npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts, persistent.ts, compositeMemory.ts
 ```
 
 ## Relationship to legacy memory
@@ -323,6 +427,7 @@ The `MEMORY_*.md` family (`MEMORY_INVENTORY.md`, `MEMORY_WORKFLOW.md`,
 workstream driven from `data.json` — a write-only persistence sink with no
 startup load, validation, retrieval, or consolidation. The memory module
 described here is a **new, separate** in-process store: it has a defined
-transport-agnostic interface, an in-memory implementation with LLM
+transport-agnostic interface, multiple selectable backends (persistent by
+default, plus in-memory, graph, and concatenation composite) with LLM
 summarization, is swappable/chainable, and integrates directly with the plan
 loop and LLM prompts.
