@@ -400,21 +400,71 @@ const colored = { color: true };
     assertLines(renderToolPhase("pending", execCall, undefined, plain), ["ExecuteCommand('npm run build')"]);
 }
 
-// 25. ExecuteCommand success uses the shared helper green circle, then stdout,
-// then stderr only when stderr is non-empty (no label repeat).
+// 25. ExecuteCommand success suppresses captured stdout on a clean run: a
+// command that exits 0 and captured no stderr rendered just the green status
+// circle because its stdout was already delivered to the model via the tool
+// result, so echoing it into the terminal would only add noise. The command
+// parameters stay visible through the unchanged pending phase (test 24). Any
+// non-empty stderr is still shown so diagnostics remain visible (no label
+// repeat).
 {
     const execCall = { name: "ExecuteCommand" };
+    // Clean success: exit 0 with empty stderr suppresses the captured stdout.
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "hello\nworld\n", stderr: "" }, plain),
-        [" ●", " hello", " world"],
+        [" ●"],
     );
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "", stderr: "" }, plain),
         [" ●"],
     );
+    // Success with non-empty stderr keeps the full output (stderr is a warning
+    // and must stay visible).
     assertLines(
         renderToolPhase("succeeded", execCall, { exitCode: 0, stdout: "hello\n", stderr: "warning\n" }, plain),
         [" ●", " hello", " warning"],
+    );
+    // Parameters remain visible via the unchanged pending phase.
+    assertLines(
+        renderToolPhase("pending", { name: "ExecuteCommand", arguments: '{"command":"npm run build"}' }, undefined, plain),
+        ["ExecuteCommand('npm run build')"],
+    );
+}
+
+// 25b. A classifier-blocked ExecuteCommand is routed through the failed phase
+// with a serialized `{ error }` payload, so its output is NOT suppressed: the
+// red circle plus the block message must remain visible (with the command
+// parameters still shown by the pending phase). Non-zero exits and thrown
+// errors likewise keep their full output.
+{
+    const execCall = { name: "ExecuteCommand" };
+    assertLines(
+        renderToolPhase(
+            "failed",
+            execCall,
+            { error: "Tool call blocked by safety classifier (local): command too risky" },
+            plain,
+        ),
+        [" ● Tool call blocked by safety classifier (local): command too risky"],
+    );
+    assertLines(
+        renderToolPhase(
+            "pending",
+            { name: "ExecuteCommand", arguments: '{"command":"rm -rf /"}' },
+            undefined,
+            plain,
+        ),
+        ["ExecuteCommand('rm -rf /')"],
+    );
+    // Non-zero exit still renders the red circle, stderr, and stdout.
+    assertLines(
+        renderToolPhase("succeeded", execCall, { exitCode: 1, stdout: "out-line\n", stderr: "err-line\n" }, plain),
+        [" ● exit 1", " err-line", " out-line"],
+    );
+    // Thrown/spawn errors are not suppressed.
+    assertLines(
+        renderToolPhase("failed", execCall, "Bash was terminated by signal SIGTERM", plain),
+        [" ● Bash was terminated by signal SIGTERM"],
     );
 }
 
@@ -459,7 +509,9 @@ const colored = { color: true };
         { exitCode: 0, stdout: "ok\n", stderr: "" },
         colored,
     );
-    assertLines(successLines, [` ${ch.green("●")}`, " ok"]);
+    // Clean success suppresses stdout (exit 0, empty stderr), so only the
+    // colored green circle remains.
+    assertLines(successLines, [` ${ch.green("●")}`]);
     assert.ok(successLines[0].includes("\u001b"), "success circle must be colored green");
 
     const errorLines = renderToolPhase(
