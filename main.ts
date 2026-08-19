@@ -32,6 +32,7 @@ import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
 import {
     nextConsecutiveNoProgressReplans,
     parseReplanResponse,
+    phaseRestartRequired,
     recordReplanElapsedAndAssertBudget,
     replanRemainingKey,
     throwIfConsecutiveNoProgressReplansReached,
@@ -1188,6 +1189,30 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
             }
             if (validation.valid) {
                 const revisedSteps: string[] = validation.steps as string[];
+                const nextPhase = validation.phase;
+                // A replan that moves the plan into a different top-level phase is
+                // a phase-level change: it abandons executed progress and restarts
+                // the whole plan. Edits that keep the same phase (or omit phase)
+                // only replace the remaining steps and continue in place.
+                const restart = phaseRestartRequired(configData.planPhase, nextPhase);
+                if (restart) {
+                    activeSteps.splice(0, activeSteps.length, ...revisedSteps);
+                    configData.completedSteps = [];
+                    configData.planPhase = nextPhase;
+                    configData.consecutiveNoProgressReplans = 0;
+                    configData.replanHistory.push({
+                        attempt,
+                        response_id: response.id,
+                        reason: feedback.replanReason,
+                        applied: true,
+                        replacementStepCount: revisedSteps.length,
+                        phaseChange: true,
+                        noProgress: false,
+                    });
+                    recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
+                    status.change(`Accepted phase-changing replan: moved into phase \`${String(nextPhase)}\` and restarted the entire plan with ${revisedSteps.length} step${revisedSteps.length === 1 ? "" : "s"}.`, hierarchyIndent("contentInStep"));
+                    return { attempted: true, applied: true, steps: revisedSteps, restart: true, phase: nextPhase };
+                }
                 activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
                 const afterKey = replanRemainingKey(activeSteps, completedStepCount);
                 const progressed = afterKey !== beforeKey;
@@ -1750,7 +1775,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             }
             const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
             reportAppliedPlanChanges(appliedChanges);
-            await attemptReplan(feedbackEntry, activeSteps, index, configData);
+            const replanResult = await attemptReplan(feedbackEntry, activeSteps, index, configData);
             configData.activePlanSteps = [...activeSteps];
             configData.lastAppliedPlanChanges = appliedChanges;
             if (worktree) {
@@ -1760,6 +1785,13 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             }
             saveData(configData);
             if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
+            if (replanResult?.restart) {
+                // A replan moved the plan into a new phase: executed progress was
+                // already cleared inside attemptReplan and the whole plan was
+                // replaced, so restart execution from the very first step.
+                index = -1; // the for-loop's index += 1 makes this step 0
+                continue;
+            }
         }
         if (taskLifecycle) {
             await specKeeperTaskNote(
@@ -2171,6 +2203,11 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
         throw new RunAbortError("unable-to-complete", "planning", "Planning response JSON had steps without usable text.");
     }
     const plan = formatPlan(activeSteps);
+    // Store the plan's top-level "phase" on the plan state so the handler can
+    // recognize the phase the plan is currently in and detect a phase-level
+    // change from a later replan (which restarts the whole plan). Only
+    // very-high-complexity plans carry a phase; absent stays undefined.
+    configData.planPhase = parsedPlanningResponse.result.plan.phase;
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
     configData.consecutiveNoProgressReplans = 0;

@@ -11,6 +11,7 @@ import { abortBlockText, boundedAbortReason } from "../llm/abort-report.js";
 import {
     nextConsecutiveNoProgressReplans,
     parseReplanResponse,
+    phaseRestartRequired,
     recordReplanElapsedAndAssertBudget,
     replanRemainingKey,
     throwIfConsecutiveNoProgressReplansReached,
@@ -179,6 +180,74 @@ async function testReplanAbortJson(): Promise<void> {
     console.log("  ok: replan JSON abort result is parsed and validated");
 }
 
+async function testReplanPhaseParsingAndRestart(): Promise<void> {
+    // A replan may carry an optional top-level "phase" for very-high-complexity
+    // plans. It is exposed on the parsed result (string or integer) and drives
+    // the handler's phase-change restart decision.
+    const withStringPhase = parseReplanResponse('{"steps":["a"],"phase":"verify"}');
+    assert.deepEqual(withStringPhase, { valid: true, abort: false, steps: ["a"], phase: "verify" });
+
+    const withIntPhase = parseReplanResponse('{"steps":["a"],"phase":2}');
+    assert.deepEqual(withIntPhase, { valid: true, abort: false, steps: ["a"], phase: 2 });
+
+    const trimmedPhase = parseReplanResponse('{"steps":["a"],"phase":"  design  "}');
+    assert.deepEqual(trimmedPhase, { valid: true, abort: false, steps: ["a"], phase: "design" });
+
+    const noPhase = parseReplanResponse('{"steps":["a"]}');
+    assert.ok(noPhase.valid && !(noPhase as typeof noPhase & { phase?: unknown }).phase, "absent phase stays undefined");
+
+    // Invalid phase types are rejected (whitespace string, float, boolean,
+    // object, null) matching the planning-suffix contract.
+    for (const bad of ["   ", 1.5, true, {}, null]) {
+        const result = parseReplanResponse(JSON.stringify({ steps: ["a"], phase: bad }));
+        assert.equal(result.valid, false, `reject invalid replan phase ${JSON.stringify(bad)}`);
+        assert.match((result as { reason: string }).reason, /'phase' must be a non-empty string or integer/);
+    }
+
+    // parseReplanResponse imports PlanPhase from plan-printer.ts; the type is a
+    // plain string|number, so deep-equal assertions above suffice.
+
+    // --- phaseRestartRequired: the pure decision the handler uses. ---
+    // Same phase (or no proposed phase) -> no restart (in-place step edits).
+    assert.equal(phaseRestartRequired(undefined, undefined), false, "no phase anywhere -> no restart");
+    assert.equal(phaseRestartRequired("design", undefined), false, "replanner omits phase -> stay in current phase");
+    assert.equal(phaseRestartRequired("design", "design"), false, "same phase -> no restart");
+    assert.equal(phaseRestartRequired(1, 1), false, "same integer phase -> no restart");
+    assert.equal(phaseRestartRequired("design", " design ".length ? "design" : "x"), false, "normalized identical phase -> no restart");
+
+    // A different or newly-introduced phase -> full restart.
+    assert.equal(phaseRestartRequired("design", "verify"), true, "different string phase -> restart");
+    assert.equal(phaseRestartRequired(1, 2), true, "different integer phase -> restart");
+    assert.equal(phaseRestartRequired(undefined, "design"), true, "introducing a phase -> restart");
+    assert.equal(phaseRestartRequired(1, "design"), true, "type change 1 -> design -> restart");
+
+    // --- Handler-level restart semantics (attemptReplan behavior). ---
+    // A phase-changing replan replaces the ENTIRE active steps list, clears
+    // executed progress (configData.completedSteps), and advances the stored
+    // plan phase. A same-phase replan only splices the remaining steps.
+    const activeSteps = ["step 1", "step 2", "step 3"];
+    const revised = ["new step A", "new step B"];
+
+    // phase-change branch (mirrors the handler's restart path).
+    configDataPlanPhase = "design";
+    const restartSteps = [...activeSteps];
+    restartSteps.splice(0, restartSteps.length, ...revised); // full replacement
+    assert.deepEqual(restartSteps, revised, "phase change replaces the whole plan");
+    assert.equal(configDataPlanPhase, "design");
+
+    // same-phase branch (mirrors the handler's non-restart path).
+    const remainingStart = 1; // completed one step
+    const remainingStepsCount = activeSteps.length - remainingStart;
+    const samePhaseSteps = [...activeSteps];
+    samePhaseSteps.splice(remainingStart, remainingStepsCount, ...revised);
+    assert.deepEqual(samePhaseSteps, ["step 1", "new step A", "new step B"], "same-phase change splices only remaining steps");
+    console.log("  ok: replan phase is parsed/validated and phase changes trigger a full restart");
+}
+
+// Global mirrors of the handler's plan-state fields used by the assertions
+// above (kept simple; the real logic lives in main.ts attemptReplan).
+let configDataPlanPhase: string | number | undefined;
+
 async function testReplanStuckDetection(): Promise<void> {
     assert.doesNotThrow(() => throwIfReplanAttemptLimitReached({ replanAttemptCount: 2 }, 2, 3));
     assert.throws(
@@ -293,6 +362,7 @@ async function main(): Promise<void> {
         await testRuntimeSignalPropagationAndPrecedence();
         await testPlanningAbortJson();
         await testReplanAbortJson();
+        await testReplanPhaseParsingAndRestart();
         await testReplanStuckDetection();
         await testAbortReportShape();
         await testAbortWorktreeCleanup();

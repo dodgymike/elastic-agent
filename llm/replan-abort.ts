@@ -5,15 +5,47 @@
  * entrypoint.
  */
 
-import { extractJsonFromResponse } from "../plan-printer.js";
+import { extractJsonFromResponse, type PlanPhase } from "../plan-printer.js";
 import { RunAbortError } from "./run-abort.js";
 
 export type ReplanParseResult =
     | { readonly valid: false; readonly reason: string }
     | { readonly valid: true; readonly abort: true; readonly reason: string }
-    | { readonly valid: true; readonly abort: false; readonly steps: string[] };
+    | { readonly valid: true; readonly abort: false; readonly steps: string[]; readonly phase?: PlanPhase };
 
 export const DEFAULT_MAX_REVISED_PLAN_STEPS = 50;
+
+/**
+ * True when a replanning response proposes a different top-level phase than the
+ * one the plan is currently in, which the handler treats as a full restart.
+ * A proposed phase always wins (if the replanner returns a phase at all) and a
+ * change of value — or introducing a phase where none existed — is a restart.
+ * Keeping the same phase (or omitting it, meaning steps are edited within the
+ * current phase) returns false so the plan continues without restarting.
+ */
+export function phaseRestartRequired(previousPhase: PlanPhase | undefined, nextPhase: PlanPhase | undefined): boolean {
+    return nextPhase !== undefined && nextPhase !== previousPhase;
+}
+
+/**
+ * Validate a top-level `phase` value present on a replan response object.
+ * Mirrors the plan-parser contract in prompts/planning-suffix.txt: a present
+ * value must be a non-empty string or integer. Throws a descriptive error
+ * otherwise.
+ */
+function validateReplanPhase(value: unknown): PlanPhase {
+    if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (trimmed.length === 0) {
+            throw new Error("Replan response 'phase' must be a non-empty string or integer when present.");
+        }
+        return trimmed;
+    }
+    if (typeof value === "number" && Number.isInteger(value)) {
+        return value;
+    }
+    throw new Error("Replan response 'phase' must be a non-empty string or integer when present.");
+}
 
 /**
  * Parse a replan response. The replan prompt asks for JSON with either a
@@ -54,7 +86,23 @@ export function parseReplanResponse(text: string, maxRevisedPlanSteps = DEFAULT_
     if (record.steps.length > maxRevisedPlanSteps) return { valid: false, reason: `The revised plan has more than ${maxRevisedPlanSteps} steps.` };
     const steps = record.steps.map((step) => typeof step === "string" ? step.trim() : "");
     if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
-    return { valid: true, abort: false, steps };
+
+    // The optional top-level "phase" lets the replanner (for very-high-complexity
+    // plans) propose a move to a different major stage. When present it must be a
+    // non-empty string or integer; when absent the steps are treated as edits
+    // within the current phase. The handler compares this against the phase the
+    // plan is currently in to decide on a full restart (see phaseRestartRequired).
+    let phase: PlanPhase | undefined;
+    const hasPhase = Object.prototype.hasOwnProperty.call(record, "phase") && record.phase !== undefined;
+    if (hasPhase) {
+        try {
+            phase = validateReplanPhase(record.phase);
+        } catch (error) {
+            return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+        }
+    }
+
+    return { valid: true, abort: false, steps, ...(phase !== undefined ? { phase } : {}) };
 }
 
 /** Normalized key of the remaining plan used for duplicate/no-progress detection. */

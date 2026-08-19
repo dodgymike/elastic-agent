@@ -143,6 +143,18 @@ very-high-complexity plans the caller passes `{ requirePhase: true }` and the
 parser rejects a plan that omits `phase`; for low-/medium-complexity work the
 flag is left unset so the field is optional and may be absent.
 
+The handler (`main.ts`) stores the plan's top-level `phase` on the run state as
+`configData.planPhase` when the plan is created, so it can recognize the phase
+the plan is currently in while executing. The focused replanner
+(`attemptReplan` in `main.ts`) parses an optional `phase` from the replan
+response (`parseReplanResponse` in `llm/replan-abort.ts`, which validates it the
+same way — a non-empty string or integer) and compares it to the stored phase
+with `phaseRestartRequired`. A replan that proposes a *different* phase is a
+full restart: the whole plan is replaced, executed progress is cleared, the
+stored phase is advanced, and execution restarts from step 0. A replan that
+keeps the same phase (or omits it, meaning only step edits) replaces only the
+remaining steps and continues without restarting.
+
 The same `phase` field is documented in the replanner prompt
 (`replan-prompt.txt`), where a proposed phase change is treated as a signal to
 fully restart the plan, while changes confined to the current phase do not
