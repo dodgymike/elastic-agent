@@ -34,6 +34,9 @@ test/.loop-replan-build-verify/
 test/.loop-queue-build-verify/
 test/.replan-prompt-consistency-build/
 test/.dt-verify/
+test/.planner-prompt-build/
+test/.prompt-parser-build/
+test/.plan-handler-build/
 
 # Agent execution worktrees; keep the staging copies out of the repository.
 .worktrees/
