@@ -12,18 +12,27 @@
  *  5. Fail-safe: when one module's remember() throws, the composite reports it
  *     on lastFailure but does not reject.
  *  6. finalize() passthrough: forwards to a durable (finalizable) primary.
+ *  7. Real concat-mode wiring (as main.ts sets up): a durable
+ *     PersistentMemoryModule primary + InMemoryMemoryModule secondary — both
+ *     stores are updated on remember() and both labelled blocks appear in
+ *     getContext(), with session/user context reaching both inner modules and
+ *     finalize() flushing the durable primary.
  *
  * Follows the project's test conventions: plain `node:assert/strict`, a
  * `main().catch(...)` entrypoint, compiled with tsc and run with node.
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   CompositeMemoryModule,
   createCompositeMemoryModule,
   createConcatenationMemoryModule,
 } from "../memory/compositeMemory.js";
-import { createInMemoryMemoryModule } from "../memory/inMemory.js";
+import { createInMemoryMemoryModule, InMemoryMemoryModule } from "../memory/inMemory.js";
+import { createPersistentMemoryModule, PersistentMemoryModule } from "../memory/persistent.js";
 import type {
   ContextRequest,
   MemoryContextResult,
@@ -207,6 +216,51 @@ async function testFinalizePassthrough(): Promise<void> {
   assert.equal(await compositeNonFinal.finalize(SESSION), undefined);
 }
 
+async function testRealConcatWiring(): Promise<void> {
+  // Mirrors the concat-mode setup in main.ts: a durable PersistentMemoryModule
+  // primary + an InMemoryMemoryModule secondary, with named headers.
+  const dir = await mkdtemp(join(tmpdir(), "elagent-concat-"));
+  try {
+    const persistent = createPersistentMemoryModule({ outputDir: dir }) as PersistentMemoryModule;
+    const inMemory = createInMemoryMemoryModule({}) as InMemoryMemoryModule;
+    const module = new CompositeMemoryModule({
+      primary: persistent,
+      secondary: inMemory,
+      headers: { primary: "persistent memory", secondary: "in-memory memory" },
+    });
+
+    const input: RememberInput = {
+      context: { session_id: SESSION, user_id: "user-concat", plan: "P" },
+      actions: [{ name: "Read" }, { name: "Edit" }],
+      outcome: "completed",
+      reasoning: "do it",
+      timestamp: "2025-01-01T00:00:00.000Z",
+    };
+    await module.remember(input);
+
+    // Both inner stores are updated (point 3: concat updates both stores).
+    assert.equal(persistent.countForSession(SESSION), 1, "persistent primary updated");
+    assert.equal(inMemory.countForSession(SESSION), 1, "in-memory secondary updated");
+
+    // getContext() concatenates both labelled blocks, persistent first.
+    const ctx = await module.getContext({ session_id: SESSION, user_id: "user-concat" });
+    assert.match(ctx.text, /--- persistent memory ---/);
+    assert.match(ctx.text, /--- in-memory memory ---/);
+    const persistentIdx = ctx.text.indexOf("--- persistent memory ---");
+    const inMemoryIdx = ctx.text.indexOf("--- in-memory memory ---");
+    assert.ok(persistentIdx >= 0 && inMemoryIdx >= 0);
+    assert.ok(persistentIdx < inMemoryIdx, "persistent block precedes in-memory block");
+    assert.equal(ctx.hasMemory, true);
+
+    // The composite's finalize() passthrough flushes the durable primary.
+    const path = (await module.finalize(SESSION)) as string;
+    assert.equal(typeof path, "string");
+    assert.ok((path as string).endsWith(".json"), "durable primary finalize writes a document");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   await testConstructorRequiresModules();
   await testRememberForwardsToBoth();
@@ -215,6 +269,7 @@ async function main(): Promise<void> {
   await testGetContextFailSafeKeepsOtherContext();
   await testRememberFailSafeDoesNotReject();
   await testFinalizePassthrough();
+  await testRealConcatWiring();
   console.log("composite-memory.test.ts: OK");
 }
 
