@@ -36,6 +36,13 @@ import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abo
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { parsePlanOrAbort, planStepsFromObject } from "./prompt-parser.js";
+import {
+    applyExecutionFeedback,
+    fightingDenialCount,
+    formatPlan,
+    reportAppliedPlanChanges,
+    reportExecutionFeedback,
+} from "./plan-handler.js";
 import { indent, printPlan } from "./plan-printer.js";
 import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
 import {
@@ -222,7 +229,6 @@ const maxReplanParseRetries = 2;
 const maxPlanParseRetries = 1;
 const maxReviewParseRetries = 2;
 const maxReviewAttempts = 3;
-const maxRevisedPlanSteps = 50;
 // Execution worktree: plan steps stage their changes in a dedicated worktree
 // (git add --all) and never commit. The worktree is kept alive across review
 // attempts so the review step can inspect the staged changes before committing.
@@ -1260,21 +1266,6 @@ function captureExecutionFeedback(configData, response, stepIndex) {
     configData.executionFeedback.push(entry);
     return entry;
 }
-function planSteps(plan) {
-    const steps = plan.split("\n").map((line) => line.trim())
-        .filter((line) => /^\d+[.)]\s+/.test(line)).map((line) => line.replace(/^\d+[.)]\s+/, "").trim()).filter(Boolean);
-    return steps.length > 0 ? steps : [plan.trim() || "Execute the requested work and report the result."];
-}
-function actionablePlanSteps(plan) {
-    if (typeof plan !== "string" || !plan.trim()) return { valid: false, reason: "The revised plan response was empty." };
-    const steps = plan.split("\n").map((line) => line.trim())
-        .filter((line) => /^\d+[.)]\s+/.test(line)).map((line) => line.replace(/^\d+[.)]\s+/, "").trim());
-    if (steps.length === 0) return { valid: false, reason: "The revised plan must contain at least one numbered step." };
-    if (steps.length > maxRevisedPlanSteps) return { valid: false, reason: `The revised plan has more than ${maxRevisedPlanSteps} steps.` };
-    if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
-    return { valid: true, steps };
-}
-
 async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, configData) {
     const step = completedStepCount + 1;
     throwIfAborted(abortController.signal, "replan", step);
@@ -1382,78 +1373,6 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         return { attempted: true, applied: false, reason };
     }
 }
-function formatPlan(steps) {
-    return steps.map((step, index) => `${index + 1}. ${step}`).join("\n");
-}
-function appendSuggestedUpdate(step, update) {
-    return `${step}\nUpdate: ${update.trim()}`;
-}
-function reportExecutionFeedback(feedbackEntry) {
-    const stepLabel = `Step ${feedbackEntry?.step ?? "unknown"}`;
-    if (!feedbackEntry?.valid) {
-        status.warning(`${stepLabel} feedback was retained as an execution note but not applied: ${feedbackEntry?.validationError ?? "unknown validation error"}`, hierarchyIndent("contentInStep"));
-        return;
-    }
-
-    const feedback = feedbackEntry.feedback;
-    status.feedback(`${stepLabel} status: ${feedback.stepStatus}. ${truncate(feedback.summary)}`, hierarchyIndent("contentInStep"));
-    if (feedback.findings.length > 0) {
-        status.feedback(`${stepLabel} findings: ${feedback.findings.map((finding) => truncate(finding, 160)).join("; ")}`, hierarchyIndent("contentInStep"));
-    }
-    if (feedback.replanRequired) {
-        status.replan(`${stepLabel} recommends replanning: ${truncate(feedback.replanReason)}`, hierarchyIndent("contentInStep"));
-    } else {
-        status.replan(`${stepLabel} does not recommend replanning.`, hierarchyIndent("contentInStep"));
-    }
-}
-function reportAppliedPlanChanges(appliedChanges) {
-    if (appliedChanges.localUpdate) {
-        status.change(`Accepted local update for step ${appliedChanges.localUpdate.step}: ${truncate(appliedChanges.localUpdate.update)}`, hierarchyIndent("contentInStep"));
-    }
-    for (const update of appliedChanges.planUpdates) {
-        status.change(`Accepted update for remaining step ${update.step}: ${truncate(update.update)}`, hierarchyIndent("contentInStep"));
-    }
-    for (const rejected of appliedChanges.rejectedPlanUpdates) {
-        status.warning(`Skipped suggested update for step ${rejected.step}: ${rejected.reason}`, hierarchyIndent("contentInStep"));
-    }
-}
-function applyExecutionFeedback(feedbackEntry, activeSteps, completedStepCount) {
-    const result: { localUpdate: any; planUpdates: any[]; rejectedPlanUpdates: any[] } = { localUpdate: null, planUpdates: [], rejectedPlanUpdates: [] };
-    if (!feedbackEntry?.valid || !feedbackEntry.feedback) return result;
-
-    const feedback = feedbackEntry.feedback;
-    if (feedback.suggestedStepUpdate?.trim()) {
-        activeSteps[completedStepCount] = appendSuggestedUpdate(activeSteps[completedStepCount], feedback.suggestedStepUpdate);
-        result.localUpdate = { step: completedStepCount + 1, update: feedback.suggestedStepUpdate };
-    }
-
-    for (const suggestion of feedback.suggestedPlanUpdates) {
-        const targetIndex = suggestion.step - 1;
-        if (targetIndex < completedStepCount + 1 || targetIndex >= activeSteps.length) {
-            result.rejectedPlanUpdates.push({ ...suggestion, reason: "The target is not a remaining plan step." });
-            continue;
-        }
-        if (!suggestion.update.trim()) {
-            result.rejectedPlanUpdates.push({ ...suggestion, reason: "The update is empty." });
-            continue;
-        }
-        activeSteps[targetIndex] = appendSuggestedUpdate(activeSteps[targetIndex], suggestion.update);
-        result.planUpdates.push({ step: suggestion.step, update: suggestion.update });
-    }
-    return result;
-}
-/**
- * Count classifier-denial goals that reached the "fighting" threshold during
- * this run. `denialTrackerState` is the serialized DenialTracker (see
- * denial-tracker.ts): `{ goals: { goalKey: { count, lastTool, lastReason } } }`.
- * A goal counts as fighting once its consecutive-denial count reaches the
- * DENIAL_REPLAN_THRESHOLD.
- */
-function fightingDenialCount(configData): number {
-    const goals = configData?.denialTrackerState?.goals ?? {};
-    const values = typeof goals === "object" && !Array.isArray(goals) ? Object.values(goals) : [];
-    return values.filter((goal: any) => goal && Number.isInteger(goal.count) && goal.count >= DENIAL_REPLAN_THRESHOLD).length;
-}
 
 /**
  * Normalize a plan's top-level `tldr` field (which may be a string, an object,
@@ -1530,7 +1449,7 @@ function reportImplementationTldr(
     // Issues / blockers: classifier-denial "fighting" count plus any recorded
     // review learnings/reasons. Both are bounded and secret-free.
     const issues: string[] = [];
-    const fightingCount = fightingDenialCount(configData);
+    const fightingCount = fightingDenialCount(configData, DENIAL_REPLAN_THRESHOLD);
     if (fightingCount > 0) issues.push(`${fightingCount} goal(s) hit repeated classifier denials (fighting-the-classifier)`);
     for (const entry of failedReplans) {
         const reason = truncate(String(entry.failure ?? entry.reason ?? "replan failed"), 100);
@@ -1835,7 +1754,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
         if (toolOutputs.length === 0) {
             let feedbackEntry = captureExecutionFeedback(configData, response, index);
-            reportExecutionFeedback(feedbackEntry);
+            reportExecutionFeedback(feedbackEntry, status, hierarchyIndent);
             saveData(configData);
             if (!feedbackEntry.valid) {
                 const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable }) + startDirWarning;
@@ -1851,7 +1770,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                 saveData(configData);
                 if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
                 const retryEntry = captureExecutionFeedback(configData, retryResponse, index);
-                reportExecutionFeedback(retryEntry);
+                reportExecutionFeedback(retryEntry, status, hierarchyIndent);
                 feedbackEntry = retryEntry;
                 saveData(configData);
             }
@@ -1934,7 +1853,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                 );
             }
             const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
-            reportAppliedPlanChanges(appliedChanges);
+            reportAppliedPlanChanges(appliedChanges, status, hierarchyIndent);
             const replanResult = await attemptReplan(feedbackEntry, activeSteps, index, configData);
             configData.activePlanSteps = [...activeSteps];
             configData.lastAppliedPlanChanges = appliedChanges;
