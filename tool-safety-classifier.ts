@@ -550,11 +550,14 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
     case "Read":
     case "FileSize":
     case "ListDirectory":
+    case "Find":
     case "Http":
       return "readonly";
     case "Write":
     case "Edit":
     case "Delete":
+    case "Mkdir":
+    case "Rmdir":
     case "ExecuteCommand":
     case "Git":
     case "HttpRequest":
@@ -582,6 +585,20 @@ function classifyFileTool(
 
   const dataJson = dataJsonTargetReason(target);
   if (dataJson) return unsafe(dataJson);
+
+  // Find's `name` parameter is a file/directory name matcher that can directly
+  // target protected names (for example `name: "data.json"`), so it is treated
+  // as part of the search surface: a matcher that resolves to the protected
+  // data.json store is refused just like a direct path to it.
+  if (toolName === "Find") {
+    const nameParam = stringValue(parameters.name);
+    if (nameParam !== null) {
+      const nameDataJson = dataJsonTargetReason(nameParam);
+      if (nameDataJson) return unsafe(`Find name is unsafe: ${nameDataJson}`);
+      const nameProtected = protectedPathReason(nameParam);
+      if (nameProtected) return unsafe(`Find name is unsafe: ${nameProtected}`);
+    }
+  }
 
   const protectedReason = protectedPathReason(target);
   if (protectedReason) return unsafe(protectedReason);
@@ -1457,10 +1474,13 @@ export function classifyToolCallStatically(
     case "Read":
     case "FileSize":
     case "ListDirectory":
+    case "Find":
       return classifyFileTool(toolName, record, roots, allowOutsideWorkspace);
     case "Write":
     case "Edit":
-    case "Delete": {
+    case "Delete":
+    case "Mkdir":
+    case "Rmdir": {
       if (config) {
         const target = stringValue(record.path);
         const policyVerdict = fileEditPolicyVerdict(toolName, target, config, policyRoots, allowOutsideWorkspace);

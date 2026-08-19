@@ -849,6 +849,9 @@ export const toolRenderers: Record<string, ToolRenderer> = {
     Http: { ...genericToolRenderer },
     HttpRequest: { ...genericToolRenderer },
     ListDirectory: { ...genericToolRenderer },
+    Mkdir: { ...genericToolRenderer },
+    Rmdir: { ...genericToolRenderer },
+    Find: { ...genericToolRenderer },
     ExecuteCommand: {
         pending: renderExecuteCommandPending,
         succeeded: renderExecuteCommandSucceeded,

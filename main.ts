@@ -54,6 +54,9 @@ import FileSize from "./tools/FileSize.ts";
 import Edit from "./tools/Edit.ts";
 import Delete from "./tools/Delete.ts";
 import ListDirectory from "./tools/ListDirectory.ts";
+import Mkdir from "./tools/Mkdir.ts";
+import Rmdir from "./tools/Rmdir.ts";
+import Find from "./tools/Find.ts";
 import Http from "./tools/Http.ts";
 import HttpRequest from "./tools/HttpRequest.ts";
 import Git, { GitParameters } from "./tools/Git.tsx";
@@ -671,6 +674,50 @@ const tools = [
         usage_prompt: "tools/list-directory-usage.md",
         parameters: { type: "object", properties: { directory: { type: "string" } }, required: ["directory"] },
         exec_handler: ({ directory }) => ListDirectory({ directory }),
+    },
+    {
+        type: "function", name: "Mkdir",
+        usage_prompt: "tools/mkdir-usage.md",
+        description: "Create a directory at path. When recursive is true, any missing parent directories are created as well (like mkdir -p); otherwise a missing parent rejects. Existing directories are accepted as a no-op.",
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string" },
+                recursive: { type: "boolean", description: "Create missing parent directories as needed (default false)." },
+            },
+            required: ["path"],
+        },
+        exec_handler: ({ path, recursive }) => Mkdir({ path, recursive }),
+    },
+    {
+        type: "function", name: "Rmdir",
+        usage_prompt: "tools/rmdir-usage.md",
+        description: "Remove a directory. Without recursive, only an empty directory is removed and a non-empty one rejects; pass recursive:true to remove the directory tree and its contents explicitly. Never removes a regular file (use Delete for files).",
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string" },
+                recursive: { type: "boolean", description: "Remove the directory tree and its contents (default false)." },
+            },
+            required: ["path"],
+        },
+        exec_handler: ({ path, recursive }) => Rmdir({ path, recursive }),
+    },
+    {
+        type: "function", name: "Find",
+        usage_prompt: "tools/find-usage.md",
+        description: "Search a directory for entries matching an optional name glob and entry type, recursing up to an optional maxdepth. Returns matching entry paths in depth-first order.",
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string" },
+                name: { type: "string", description: "Optional basename glob: * (any run), ? (one char), or an exact name." },
+                type: { type: "string", enum: ["file", "directory"], description: "Optional entry-type filter." },
+                maxdepth: { type: "number", description: "Optional maximum recursion depth below path (0 matches only the path's own entries)." },
+            },
+            required: ["path"],
+        },
+        exec_handler: ({ path, name, type, maxdepth }) => Find({ path, name, type, maxdepth }),
     },
     {
         type: "function", name: "ExecuteCommand",

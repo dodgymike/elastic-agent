@@ -208,6 +208,57 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 1b. Filesystem utility tools: Find (read-only), Mkdir and Rmdir
+    //     (file-mutating, gated by the edit/write policy).
+    // ------------------------------------------------------------------
+    check(
+      "safe Find within workspace is allowed",
+      staticVerdict("Find", { path: "tools", name: "*.ts", type: "file" }).decision === "safe",
+    );
+    check(
+      "Find an absolute in-workspace path is allowed",
+      staticVerdict("Find", { path: "/workspace/tools" }).decision === "safe",
+    );
+    check(
+      "Find data.json is denied",
+      staticVerdict("Find", { path: ".", name: "data.json" }).decision === "unsafe",
+    );
+    check(
+      "Find path traversal is denied",
+      staticVerdict("Find", { path: "tools/../secret" }).decision === "unsafe",
+    );
+    check(
+      "Find is a read-only tool",
+      toolRiskLevel("Find") === "readonly",
+    );
+    check(
+      "safe Mkdir within workspace is allowed",
+      staticVerdict("Mkdir", { path: "tmp/build", recursive: true }).decision === "safe",
+    );
+    check(
+      "Mkdir and Rmdir without the allow flag are denied (file-mutating gate)",
+      (() => {
+        const denyConfig: TestToolSafetyConfig = {
+          enabled: true,
+          agentSourceDir,
+          startDir,
+          startDirConfigured: true,
+          allowAgentSourceModifications: false,
+        };
+        return staticVerdictWithConfig("Mkdir", { path: "notes.md" }, denyConfig).decision === "unsafe"
+          && staticVerdictWithConfig("Rmdir", { path: "notes.md" }, denyConfig).decision === "unsafe";
+      })(),
+    );
+    check(
+      "safe Rmdir within workspace is allowed",
+      staticVerdict("Rmdir", { path: "tmp/build", recursive: true }).decision === "safe",
+    );
+    check(
+      "Mkdir and Rmdir are mutating tools",
+      toolRiskLevel("Mkdir") === "mutating" && toolRiskLevel("Rmdir") === "mutating",
+    );
+
+    // ------------------------------------------------------------------
     // 1c. AgentBusEnrol — redeeming an in-workspace agent-bus invite.
     // ------------------------------------------------------------------
     check(
@@ -729,6 +780,28 @@ async function main(): Promise<void> {
       classifyToolCallStatically("Read", { path: join(tmpDir, "outside.txt") }, canonicalPathOptions).decision === "unsafe",
     );
 
+    // (e) Find is read-only like Read, so it must accept the same three
+    //     containment forms — canonical absolute, symlinked absolute, and
+    //     cwd-relative — within the canonical start dir, and refuse paths
+    //     that escape every trusted root.
+    check(
+      "Find canonical absolute path under the start dir is allowed",
+      classifyToolCallStatically("Find", { path: join(canonicalWs, "package.json") }, canonicalPathOptions).decision === "safe",
+    );
+    check(
+      "Find symlinked absolute path resolving into the start dir is allowed",
+      !symlinkResolves
+        || classifyToolCallStatically("Find", { path: join(aliasWs, "package.json") }, canonicalPathOptions).decision === "safe",
+    );
+    check(
+      "Find cwd-relative path is allowed",
+      classifyToolCallStatically("Find", { path: "package.json" }, canonicalPathOptions).decision === "safe",
+    );
+    check(
+      "Find outside every trusted root stays blocked",
+      classifyToolCallStatically("Find", { path: "/tmp/outside.txt" }, canonicalPathOptions).decision === "unsafe",
+    );
+
     // ------------------------------------------------------------------
     // 5d2. --start-dir confinement: when the classifier is handed ONLY the
     //     canonical start directory as its workspace root / allowed directory
@@ -874,6 +947,56 @@ async function main(): Promise<void> {
     check(
       "edit boundary: symlinked alias cannot smuggle a realpath escaping the editable root",
       classifyToolCallStatically("Write", { path: join(tmpDir, "edit-boundary", "outside.txt"), content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision !== "safe",
+    );
+
+    // (e) Mkdir and Rmdir are file-mutating like Write/Edit/Delete, so they
+    //     must honor the exact same edit/write boundary canonicalization: a
+    //     canonical absolute, symlinked absolute, or cwd-relative path that
+    //     resolves inside the editable root is accepted, while anything that
+    //     resolves outside it is refused. A symlinked absolute path must
+    //     resolve through its real target into the editable root to be
+    //     accepted (mirroring the Write/Edit/Delete regression above).
+    check(
+      "edit boundary: canonical absolute Mkdir inside the editable root is allowed",
+      classifyToolCallStatically("Mkdir", { path: join(editCanonicalRoot, "sub", "new"), recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: canonical absolute Rmdir inside the editable root is allowed",
+      classifyToolCallStatically("Rmdir", { path: join(editCanonicalRoot, "sub", "new"), recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: symlinked absolute Mkdir resolving into the editable root is allowed",
+      !editSymlinkResolves
+        || classifyToolCallStatically("Mkdir", { path: join(editAliasRoot, "package.json"), recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: symlinked absolute Rmdir resolving into the editable root is allowed",
+      !editSymlinkResolves
+        || classifyToolCallStatically("Rmdir", { path: join(editAliasRoot, "package.json"), recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: cwd-relative Mkdir resolving inside the editable root is allowed",
+      classifyToolCallStatically("Mkdir", { path: "build", recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: cwd-relative Rmdir resolving inside the editable root is allowed",
+      classifyToolCallStatically("Rmdir", { path: "build", recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: Mkdir outside the editable root is refused",
+      classifyToolCallStatically("Mkdir", { path: "/etc/agent-new", recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "unsafe",
+    );
+    check(
+      "edit boundary: Rmdir outside the editable root is refused",
+      classifyToolCallStatically("Rmdir", { path: "/etc/agent-removed", recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "unsafe",
+    );
+    check(
+      "edit boundary: symlinked alias cannot smuggle Mkdir into a realpath escaping the editable root",
+      classifyToolCallStatically("Mkdir", { path: join(tmpDir, "edit-boundary", "outside"), recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision !== "safe",
+    );
+    check(
+      "edit boundary: symlinked alias cannot smuggle Rmdir into a realpath escaping the editable root",
+      classifyToolCallStatically("Rmdir", { path: join(tmpDir, "edit-boundary", "outside"), recursive: true }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision !== "safe",
     );
 
     // ------------------------------------------------------------------
