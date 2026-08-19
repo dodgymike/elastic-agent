@@ -74,9 +74,21 @@ injection.
   persistent backend, and honors the same chaining/fail-safe semantics.
   `createGraphMemoryModule` is the swappable factory. See `README.md` for how
   it differs from the in-memory module.
+- **Persistent end-of-plan store** (`memory/persistent.ts`):
+  `PersistentMemoryModule` records plan steps in process memory like the
+  in-memory module AND, when the plan completes, `finalize(sessionId)`
+  summarises the full session through the same `MemorySummarizer` contract and
+  persists a durable per-session `PersistentMemoryDocument` (version, session,
+  plan, stepCount, summary, steps) to disk via an atomic write. It honors the
+  same chaining/fail-safe semantics (`outputDir`/`filePath` select the output;
+  a throwing summarizer or a failed write is surfaced non-fatally).
+  `createPersistentMemoryModule` is the swappable factory. The plan loop calls
+  `finalizePersistentMemory()` (→ `finalize()`) at end of plan when this backend
+  is selected.
 - **Selection**: `main.ts` picks the backend with `ELAGENT_MEMORY_TYPE`
-  (default in-memory; `ELAGENT_MEMORY_TYPE=graph` selects the graph module).
-  `ELAGENT_MEMORY_DISABLE=1/true` disables memory entirely for both backends.
+  (default in-memory; `graph` selects the graph module; `persistent` selects the
+  persistent module). `ELAGENT_MEMORY_DISABLE=1/true` disables memory entirely
+  for all backends.
 - **Chaining**: an optional `delegate` forwards calls; `getContext()` merges own
   and delegated results via `mergeContextResults`. **Swapping**: the runtime
   constructs memory through the factory so the backend can be replaced without
@@ -91,9 +103,11 @@ injection.
 - **Tests**: `npm run test:memory` (interface, in-memory, chaining, LLM
   integration, remember-after-step), `npm run test:graph-memory` (graph node
   creation/upsert, chain edges, `getContext`, chaining, empty-input fail-safe),
-  and `npm run test:multi-turn-memory` (LLM runtime memory context).
-  `memory/types.ts`, `memory/inMemory.ts`, `memory/graph-store.ts`, and
-  `memory/graph-memory.ts` are part of `npm run build`.
+  `npm run test:persistent-memory` (persist + finalize + summarizer +
+  fail-safe), and `npm run test:multi-turn-memory` (LLM runtime memory
+  context). `memory/types.ts`, `memory/inMemory.ts`, `memory/graph-store.ts`,
+  `memory/graph-memory.ts`, and `memory/persistent.ts` are part of
+  `npm run build`.
 
 See `README.md` for the full interface, usage, injection, chaining, and a short
 example.

@@ -39,6 +39,11 @@ import {
     createGraphMemoryModule,
     type GraphMemoryOptions,
 } from "./memory/graph-memory.js";
+import {
+    createPersistentMemoryModule,
+    PersistentMemoryModule,
+    type PersistentMemoryOptions,
+} from "./memory/persistent.js";
 import type {
     MemoryAction,
     MemoryJsonValue,
@@ -275,6 +280,13 @@ let agentSessionId: string;
     //     summarizer via the factory options; absent an LLM backend the module
     //     falls back to its deterministic chain renderer, exactly as the
     //     in-memory module falls back to defaultHistorySummarizer).
+    //   - "persistent" -> the PersistentMemoryModule
+    //     (createPersistentMemoryModule), which records plan steps in process
+    //     memory exactly like the in-memory module AND persists + summarises
+    //     the full session to a durable per-session file when finalize() is
+    //     called at end of plan (see finalizePersistentMemory below). It keeps
+    //     the same remember()/getContext() contract; ELAGENT_MEMORY_OUTPUT_DIR
+    //     (or ELAGENT_MEMORY_OUTPUT_PATH) selects where the documents land.
     const disabled =
         process.env.ELAGENT_MEMORY_DISABLE === "1" ||
         process.env.ELAGENT_MEMORY_DISABLE === "true";
@@ -284,6 +296,12 @@ let agentSessionId: string;
     } else if (memoryType === "graph") {
         const graphOptions: GraphMemoryOptions = {};
         agentMemory = createGraphMemoryModule(graphOptions);
+    } else if (memoryType === "persistent") {
+        const persistentOptions: PersistentMemoryOptions = {
+            outputDir: process.env.ELAGENT_MEMORY_OUTPUT_DIR,
+            filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
+        };
+        agentMemory = createPersistentMemoryModule(persistentOptions);
     } else {
         const memoryOptions: InMemoryMemoryOptions = {};
         agentMemory = createInMemoryMemoryModule(memoryOptions);
@@ -1845,6 +1863,29 @@ async function rememberAgentStep(options: {
     }
 }
 
+/**
+ * End-of-plan memory lifecycle: when the swappable MemoryModule is a
+ * PersistentMemoryModule, summarise and persist the full per-session memory to
+ * a durable file. This is the "persist and summarise at end of plan" step: it
+ * runs only for the persistent backend (ELAGENT_MEMORY_TYPE=persistent) and is
+ * a no-op for the in-memory and graph modules (which keep their store solely in
+ * process memory). Fail-safe: a finalize() failure is reported as a non-fatal
+ * warning and never aborts or changes the plan's completion.
+ *
+ * The persisted payload is built by PersistentMemoryModule from the same
+ * non-secret episodic data remember() already carried (session id, step
+ * actions, outcome, reasoning, plan label), so nothing secret is written.
+ */
+async function finalizePersistentMemory(): Promise<void> {
+    if (!agentMemory || !(agentMemory instanceof PersistentMemoryModule)) return;
+    try {
+        const path = await agentMemory.finalize(agentSessionId);
+        status.success(`Persisted end-of-plan memory to ${path}`);
+    } catch (error) {
+        status.warning(`End-of-plan memory finalize failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
 async function executePlanStep(step, index, steps, plan, configData, executionContext) {
     const color = terminalColor;
     for (const line of buildPrettyStepLines(index, steps.length, step, { color, remainingSteps: steps.slice(index + 1) })) {
@@ -2708,6 +2749,9 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
         reviewOutcome,
         reviewAttempts: reviewOutcome === "passed" ? reviewAttempt : undefined,
     });
+    // End-of-plan memory lifecycle (persistent backend only): summarise and
+    // persist the full session just before the terminal completion line. Fail-safe.
+    await finalizePersistentMemory();
     status.success(isTaskMode ? "Task-mode plan execution complete. Stopping." : "Plan complete. Stopping.");
     cleanupExecutionWorktree();
     return { success: true };

@@ -38,8 +38,10 @@ the execution flow of the agent.
 | `memory/inMemory.ts` | `InMemoryMemoryModule` (the default store), its `MemorySummarizer` type, the default renderer, `mergeContextResults`, and the `createInMemoryMemoryModule` factory. |
 | `memory/graph-store.ts` | The logical graph schema (`GraphNode`, `GraphEdge`, `GraphAttributes`), the `GraphStore` storage interface, and the default in-memory adjacency store `InMemoryGraphStore`. |
 | `memory/graph-memory.ts` | `GraphMemoryModule` (the graph-backed store), `GraphMemoryOptions`, `createGraphMemoryModule`, the default chain renderer, and the `GraphFailureReport`. |
+| `memory/persistent.ts` | `PersistentMemoryModule` (the end-of-plan persistent store), `PersistentMemoryOptions`, `createPersistentMemoryModule`, `PersistentMemoryDocument`, and `PersistentFailureReport`. |
 | `test/memory.test.ts` | Focused tests: interface conformance, in-memory store + summarizer, chaining, LLM integration, remember-after-step. |
 | `test/graph-memory.test.ts` | Focused tests for `GraphMemoryModule`: node creation/upsert, chain edges, `getContext`, chaining, empty-input fail-safe. |
+| `test/persistent-memory.test.ts` | Focused tests for `PersistentMemoryModule`: contract, summarizer, persist, finalize, fail-safe, factory. |
 | `test/multi-turn-memory.test.ts` | Tests for the LLM runtime memory-context injection. |
 
 ## The interface (`memory/types.ts`)
@@ -209,6 +211,47 @@ ELAGENT_MEMORY_TYPE=graph     npm run build
 ELAGENT_MEMORY_DISABLE=1      npm run build
 ```
 
+## The persistent end-of-plan implementation (`memory/persistent.ts`)
+
+`PersistentMemoryModule` records plan steps in process memory (like the
+in-memory module) **and** adds an explicit end-of-plan lifecycle: when the plan
+completes, the runtime calls `finalize(sessionId)`, which gathers every step the
+session remembered, summarises them through the same injected `MemorySummarizer`
+contract (falling back to `defaultHistorySummarizer`), and writes a durable
+per-session `PersistentMemoryDocument` to disk via an atomic write (temp file +
+rename).
+
+- **End-of-plan persist + summarise** — `finalize(sessionId)` produces a
+  durable JSON document `{ version, session_id, user_id, plan, persistedAt,
+  stepCount, summary, steps }`. The summary is built fresh over the full
+  remembered history; `steps` is the lightweight per-step record (actions,
+  outcome, outcomeDetail, reasoning, description, timestamp). The payload is
+  non-secret episodic data only — never from a secret store or data sink.
+- **Summarizer injection** — reuses the `MemorySummarizer` function type; a
+  real LLM-backed summarizer or a stub both work, and a throwing summarizer is
+  absorbed (the running summary is still persisted) and recorded on
+  `lastFailure`.
+- **Chaining / swapping** — `createPersistentMemoryModule(options)` is a
+  `MemoryModuleFactory`; an optional `delegate` is forwarded and merged via
+  `mergeContextResults`, and `outputDir` (or `filePath`) selects where the
+  documents land. Fail-safe like the other modules: `remember()`/`getContext()`
+  never reject, and a durable-write failure in `finalize()` is a thrown error
+  the plan loop treats as non-fatal.
+- **Options** — `PersistentMemoryOptions`: `outputDir` (default `memory-output`),
+  `filePath` (overrides `outputDir`), `summarizer`, `delegate`.
+- **Runtime selection** — set `ELAGENT_MEMORY_TYPE=persistent` at startup;
+  `ELAGENT_MEMORY_OUTPUT_DIR` (or `ELAGENT_MEMORY_OUTPUT_PATH`) picks the output
+  location. After the plan completes, `main.ts` calls
+  `finalizePersistentMemory()` which invokes `finalize()` and logs the durable
+  path. It is a no-op for the in-memory/graph backends and is fail-safe (a
+  finalize failure never aborts or changes plan completion).
+
+```sh
+# end-of-plan persistent memory
+ELAGENT_MEMORY_TYPE=persistent                npm run build
+ELAGENT_MEMORY_TYPE=persistent ELAGENT_MEMORY_OUTPUT_DIR=/var/lib/elagent-memory  npm run build
+```
+
 ## LLM integration
 
 `MultiTurnLlmRuntime` (in `llm/multi-turn-runtime.ts`) accepts an optional
@@ -240,10 +283,13 @@ Integration details:
 
 1. On startup it derives a per-run `agentSessionId` (`run-${randomUUID()}`) and
    selects the backend via `ELAGENT_MEMORY_TYPE` (default in-memory
-   `createInMemoryMemoryModule(options)`, or `createGraphMemoryModule(options)`
-   with `ELAGENT_MEMORY_TYPE=graph`) — swappable via dependency injection.
-   `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely (fail-open): the plan loop
-   and LLM prompts run exactly as before.
+   `createInMemoryMemoryModule(options)`, `createGraphMemoryModule(options)`
+   with `ELAGENT_MEMORY_TYPE=graph`, or `createPersistentMemoryModule(options)`
+   with `ELAGENT_MEMORY_TYPE=persistent`) — swappable via dependency injection.
+   With the persistent backend, `main.ts` also calls
+   `finalizePersistentMemory()` at end of plan to summarise and persist the
+   session. `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely (fail-open): the
+   plan loop and LLM prompts run exactly as before.
 2. The runtime is constructed with `{ memory: agentMemory, sessionId:
    agentSessionId }`, so each initial LLM prompt is prefixed with recalled
    context.
@@ -263,8 +309,9 @@ prompts and the plan loop proceed unchanged with a single non-fatal warning.
 ```sh
 npm run test:memory             # interface, in-memory, chaining, LLM, remember-after-step
 npm run test:graph-memory       # graph module: node upsert, chain edges, getContext, chaining, fail-safe
+npm run test:persistent-memory  # persistent module: contract, summarizer, persist, finalize, fail-safe, factory
 npm run test:multi-turn-memory  # LLM runtime memory-context injection
-npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts
+npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts, persistent.ts
 ```
 
 ## Relationship to legacy memory
