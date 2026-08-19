@@ -31,6 +31,7 @@ import {
 import { detectDocker, describeDockerDetection } from "./docker-detection.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
+import type { MemoryModule } from "./memory/types.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
@@ -227,6 +228,13 @@ process.on("SIGTERM", () => {
     abortController.abort("SIGTERM");
 });
 let client: MultiTurnLlmRuntime;
+// Module-level swappable MemoryModule + session id for LLM prompt context.
+// Step 5 instantiates the in-memory store and calls remember() after each plan
+// step; the runtime reads getContext() to inject summarized context into
+// prompts. Both are optional/fail-safe: with no memory attached the LLM prompts
+// proceed unchanged.
+let agentMemory: MemoryModule | null = null;
+let agentSessionId: string | undefined;
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
 const dataFilename = "/tmp/data.json";
 const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
@@ -2059,6 +2067,7 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
         await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
         modelConfiguration.model,
         abortController.signal,
+        { memory: agentMemory ?? undefined, sessionId: agentSessionId },
     );
     let configData = readData();
     if (!configData) configData = { responseIds: [] };
