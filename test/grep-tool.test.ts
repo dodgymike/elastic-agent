@@ -99,14 +99,32 @@ async function main(): Promise<void> {
     const dataJsonSearch = await Grep({ pattern: "secret-beta", path: dir });
     check("data.json contents are never searched", dataJsonSearch.files.every((f) => !f.endsWith("data.json")) && dataJsonSearch.matches.every((m) => !m.path.endsWith("data.json")));
 
-    // 12. A non-directory base path is rejected.
-    let nonDirError = "";
-    try {
-      await Grep({ pattern: "beta", path: join(dir, "a.txt") });
-    } catch (error) {
-      nonDirError = error instanceof Error ? error.message : String(error);
-    }
-    check("non-directory base path is rejected", /not a directory/.test(nonDirError));
+    // 12. A single file can be grepped directly (path is a regular file, not a
+    //     directory). name is ignored for a single-file search.
+    const singleFile = await Grep({ pattern: "beta", path: join(dir, "a.txt") });
+    check(
+      "single-file grep finds matches in that file only",
+      singleFile.files.length === 1 && singleFile.files[0].endsWith("a.txt"),
+    );
+    check("single-file grep returns correct line/text", singleFile.count === 1 && singleFile.matches[0].line === 2 && singleFile.matches[0].text === "beta");
+
+    // 12b. recursive:false inspects only a directory's direct child files and
+    //      does not descend into subdirectories.
+    const nonRecursive = await Grep({ pattern: "beta", path: dir, recursive: false });
+    check(
+      "recursive:false excludes nested subdirectory files",
+      nonRecursive.files.every((f) => !f.includes("/sub/")),
+    );
+    check(
+      "recursive:false still finds direct child matches",
+      nonRecursive.files.some((f) => f.endsWith("a.txt")),
+    );
+    // The default (recursive omitted) does descend and finds the nested file.
+    const defaultRecursive = await Grep({ pattern: "beta", path: dir, name: "c.txt" });
+    check(
+      "default recursion descends into subdirectories",
+      defaultRecursive.files.some((f) => f.includes("/sub/") && f.endsWith("c.txt")),
+    );
 
     // 13. A missing base path is rejected with an actionable error.
     let missingDirError = "";

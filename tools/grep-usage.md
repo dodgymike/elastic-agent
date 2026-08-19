@@ -2,18 +2,21 @@
 
 ## Purpose
 
-Recursively search a directory for regular files whose contents match a literal
-text or regular expression, returning each match as a `path:line:text` tuple
-along with the set of matching files.
+Search a single file or a directory for contents matching a literal text or
+regular expression, returning each match as a `path:line:text` tuple along
+with the set of matching files. When `path` is a directory the search descends
+recursively by default; pass `recursive: false` to search only the directory's
+direct child files.
 
 ## When to use
 
 Use `Grep` when you need to find text *inside* files (code identifiers, error
 strings, configuration values, symbol references) rather than locating entries
 by name. It is the native read-only replacement for shelling out to
-`grep -r`/`grep -rl` through ExecuteCommand, which can be blocked or tangled by
-shell quoting and workspace-boundary classifiers. Use `Find` when you only need
-file/directory names, and `Read` to inspect a specific file's contents.
+`grep`/`grep -r`/`grep -rl` through ExecuteCommand, which can be blocked or
+tangled by shell quoting and workspace-boundary classifiers. Use `Find` when
+you only need file/directory names, and `Read` to inspect a specific file's
+contents. To search a single file, pass that file as `path`.
 
 ## Required parameters
 
@@ -21,15 +24,20 @@ file/directory names, and `Read` to inspect a specific file's contents.
   file contents. When `literal` is false it is compiled as a regular
   expression; a pattern with no regex metacharacters behaves as a plain
   substring either way.
-- `path` (string): a filesystem directory to search recursively. It must
-  resolve to a directory.
+- `path` (string): the file or directory to search. A single regular file is
+  grepped directly. A directory's child files are searched, descending into
+  subdirectories when `recursive` is true (the default).
 
 ## Optional parameters
 
 - `name` (string): basename glob filter (same semantics as `Find`'s `name`):
   `*` (any run), `?` (one char), `**` (any number of path segments), or an
-  exact name. When omitted, every regular file under `path` that is small
-  enough to inspect is a candidate.
+  exact name. When omitted, every regular file under a directory `path` that is
+  small enough to inspect is a candidate. Ignored when `path` is a single file.
+- `recursive` (boolean): when true (the default), a directory search descends
+  into subdirectories; when false, only the directory's direct child files are
+  inspected (like `grep` without `-r`). Ignored when `path` is a single file and
+  when `maxdepth` already bounds recursion.
 - `literal` (boolean): when true, `pattern` is treated as exact text and its
   regex metacharacters are escaped. Default false.
 - `ignoreCase` (boolean): when true, matching is case-insensitive. Default
@@ -68,7 +76,8 @@ error message on failure. No `[SUCCESS]` or `[ERROR]` text prefix is emitted.
 - `limit` not a positive integer: `TypeError`.
 - `pattern` is not a valid regular expression (when `literal` is false):
   actionable error suggesting `literal: true`.
-- `path` does not exist or is not a directory: actionable error with cause.
+- `path` does not exist or is neither a file nor a directory (for example a
+  missing path, a socket, or a device): actionable error with cause.
 - Unreadable base directory during recursion: actionable error with cause.
 - Individual unreadable/oversized files encountered during the search are
   skipped silently rather than aborting the whole search.
@@ -130,4 +139,17 @@ error message on failure. No `[SUCCESS]` or `[ERROR]` text prefix is emitted.
 
    ```js
    const result = await Grep({ pattern: "class (\\w+)", path: "tools", limit: 50 });
+   ```
+
+4. Grep a single file directly:
+
+   ```js
+   const result = await Grep({ pattern: "main", path: "main.ts" });
+   // result.matches: [{ path: "main.ts", line: 1, text: "..." }]
+   ```
+
+5. Search only a directory's direct child files (no subdirectory descent):
+
+   ```js
+   const result = await Grep({ pattern: "TODO", path: ".", recursive: false });
    ```

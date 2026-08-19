@@ -112,6 +112,7 @@ function main(): void {
     "pattern",
     "path",
     "name",
+    "recursive",
     "literal",
     "maxdepth",
     "ignoreCase",

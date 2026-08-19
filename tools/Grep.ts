@@ -8,15 +8,29 @@ export interface GrepOptions {
    * is treated as a literal substring either way.
    */
   pattern: string;
-  /** Base directory to search recursively for files. */
+  /**
+   * The file or directory to search. When `path` is a regular file, its
+   * contents are searched directly (a single-file grep). When `path` is a
+   * directory, its child files are searched, descending into subdirectories
+   * only when `recursive` is true (the default) and within the optional
+   * `maxdepth` bound.
+   */
   path: string;
   /**
    * Optional basename filter. Same glob semantics as the Find tool: an exact
    * name or a pattern using `*` (any run of characters), `?` (exactly one
    * character), and `**` (any number of path segments). When omitted, every
    * regular file under `path` that is small enough to inspect is a candidate.
+   * Ignored when `path` points at a single file.
    */
   name?: string;
+  /**
+   * When true (the default), searching a directory descends into
+   * subdirectories. Set to false to inspect only the directory's direct child
+   * files (like `grep` without `-r`). Ignored when `path` points at a single
+   * file and when `maxdepth` already bounds recursion.
+   */
+  recursive?: boolean;
   /**
    * Treat `pattern` as a literal string rather than a regular expression.
    * When false, any regex metacharacters in `pattern` are interpreted; a
@@ -142,6 +156,9 @@ interface WalkContext {
   pattern: RegExp;
   nameFilter?: RegExp;
   maxdepth?: number;
+  /** When false, a directory search inspects only direct child files and does
+   * not descend into subdirectories (like `grep` without `-r`). */
+  recursive: boolean;
   maxFileSize: number;
   limit: number;
   matches: GrepMatch[];
@@ -206,7 +223,11 @@ async function walk(directory: string, depth: number, ctx: WalkContext): Promise
     if (ctx.maxdepth === undefined || entryDepth <= ctx.maxdepth) {
       if (isRegularFile(entry) && (ctx.nameFilter === undefined || ctx.nameFilter.test(entry.name))) {
         await inspectFile(childPath, ctx);
-      } else if (entry.isDirectory() && (ctx.maxdepth === undefined || entryDepth < ctx.maxdepth)) {
+      } else if (
+        entry.isDirectory() &&
+        ctx.recursive &&
+        (ctx.maxdepth === undefined || entryDepth < ctx.maxdepth)
+      ) {
         await walk(childPath, entryDepth, ctx);
       }
     }
@@ -214,21 +235,27 @@ async function walk(directory: string, depth: number, ctx: WalkContext): Promise
 }
 
 /**
- * Recursively search `path` (a directory) for regular files whose contents
- * match `pattern`, returning `path:line:text` matches in file/line order.
+ * Search a single file or a directory for regular files whose contents match
+ * `pattern`, returning `path:line:text` matches in file/line order.
+ *
+ * When `path` is a regular file, that file's contents are searched directly
+ * (a single-file grep). When `path` is a directory, its child files are
+ * searched and, when `recursive` is true (the default), subdirectories are
+ * descended into up to the optional `maxdepth` bound.
  *
  * The tool is strictly read-only: it never creates, modifies, or removes
  * anything, and it never writes to the filesystem. It refuses to inspect files
  * larger than `maxFileSize` (default 500k, matching the Read tool) and caps the
- * returned matches at `limit` (default 1000). A `path` that is missing, not a
- * directory, or unreadable rejects with an actionable error carrying the
- * original filesystem cause; individual unreadable files encountered during
- * the search are skipped rather than aborting the whole search.
+ * returned matches at `limit` (default 1000). A `path` that is missing or
+ * unreadable rejects with an actionable error carrying the original filesystem
+ * cause; individual unreadable files encountered during the search are skipped
+ * rather than aborting the whole search.
  */
 export default async function Grep({
   pattern,
   path,
   name,
+  recursive,
   literal,
   maxdepth,
   ignoreCase,
@@ -263,14 +290,14 @@ export default async function Grep({
       { cause: error instanceof Error ? error : undefined },
     );
   }
-  if (!baseStats.isDirectory()) {
-    throw new Error(`Grep base path '${basePath}' is not a directory.`);
-  }
 
   const ctx: WalkContext = {
     pattern: regex,
     nameFilter: name !== undefined ? globToRegExp(name) : undefined,
     maxdepth,
+    // Recursion is the default for directory searches; `recursive: false`
+    // limits the search to a directory's direct child files.
+    recursive: recursive !== false,
     maxFileSize: maxFileBytes,
     limit: maxResults,
     matches: [],
@@ -278,7 +305,17 @@ export default async function Grep({
     truncated: false,
   };
 
-  await walk(basePath, 0, ctx);
+  if (baseStats.isFile()) {
+    // Single-file grep: inspect just this file (still respecting the size cap,
+    // `name` is ignored, and the data.json guard). A missing file was already
+    // rejected by `stat` above.
+    await inspectFile(basePath, ctx);
+  } else if (baseStats.isDirectory()) {
+    await walk(basePath, 0, ctx);
+  } else {
+    // Not a file or directory (e.g. a socket, device, or symlink target).
+    throw new Error(`Grep base path '${basePath}' is neither a file nor a directory.`);
+  }
 
   return {
     matches: ctx.matches,
@@ -296,10 +333,11 @@ export const GrepParameters: Record<string, unknown> = {
   type: "object",
   properties: {
     pattern: { type: "string", description: "Literal text or regular expression to search for within file contents." },
-    path: { type: "string", description: "Base directory to search recursively for files." },
-    name: { type: "string", description: "Optional basename glob: * (any run), ? (one char), or an exact name." },
+    path: { type: "string", description: "File or directory to search. A single file is grepped directly; a directory's child files are searched, descending when recursive is true." },
+    name: { type: "string", description: "Optional basename glob: * (any run), ? (one char), or an exact name. Ignored for a single-file path." },
+    recursive: { type: "boolean", description: "When true (default), a directory search descends into subdirectories; false inspects only direct child files. Ignored for a single-file path." },
     literal: { type: "boolean", description: "Treat pattern as a literal string instead of a regular expression (default false)." },
-    maxdepth: { type: "number", description: "Optional maximum recursion depth below path (0 matches only the path's own entries)." },
+    maxdepth: { type: "number", description: "Optional maximum recursion depth below path (1 inspects only path's direct children)." },
     ignoreCase: { type: "boolean", description: "When true, matching is case-insensitive (default false)." },
     maxFileSize: { type: "number", description: "Maximum size in bytes of a single file to inspect; larger files are skipped (default 500000)." },
     limit: { type: "number", description: "Maximum number of line matches to collect before stopping (default 1000)." },

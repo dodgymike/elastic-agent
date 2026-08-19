@@ -723,9 +723,9 @@ const tools = [
     {
         type: "function", name: "Grep",
         usage_prompt: "tools/grep-usage.md",
-        description: "Recursively search a directory for regular files whose contents match a literal text or regular expression, returning path:line:text matches and the set of matching files. Read-only; refuses to inspect files larger than 500k and never searches data.json.",
+        description: "Search a single file or a directory for contents matching a literal text or regular expression, returning path:line:text matches and the set of matching files. Directory searches descend recursively when recursive:true. Read-only; refuses to inspect files larger than 500k and never searches data.json.",
         parameters: GrepParameters,
-        exec_handler: ({ pattern, path, name, literal, maxdepth, ignoreCase, maxFileSize, limit }) => Grep({ pattern, path, name, literal, maxdepth, ignoreCase, maxFileSize, limit }),
+        exec_handler: ({ pattern, path, name, recursive, literal, maxdepth, ignoreCase, maxFileSize, limit }) => Grep({ pattern, path, name, recursive, literal, maxdepth, ignoreCase, maxFileSize, limit }),
     },
     {
         type: "function", name: "ExecuteCommand",
