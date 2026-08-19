@@ -119,6 +119,23 @@ export function defaultChainRenderer(chain: readonly GraphNode[]): string {
 }
 
 /**
+ * Default, fail-safe summarizer body used when no summarizer is injected. It
+ * renders the ordered `MemorySummarizeInput` entries (which carry step
+ * context, actions, and outcome) into a readable, LLM-ready chain. Kept as a
+ * standalone function so it can be reused/tested independently of the module.
+ */
+function defaultChainRendererEntries(input: MemorySummarizeInput): string {
+  if (input.entries.length === 0) return "";
+  const lines = input.entries.map((entry) => {
+    const stepIndex = String((entry.context?.context as { step?: unknown } | undefined)?.step ?? "?");
+    const actions = entry.actions.length > 0 ? ` [${entry.actions.join(", ")}]` : "";
+    const detail = entry.outcomeDetail !== undefined ? `: ${renderJson(entry.outcomeDetail)}` : "";
+    return `[${stepIndex}] ${entry.outcome}${detail}${actions}`;
+  });
+  return `Session ${input.sessionId} steps:\n${lines.join("\n")}`;
+}
+
+/**
  * Graph-backed MemoryModule that records plan steps as nodes/edges and
  * refreshes a concise per-session summary via an injected summarizer.
  *
@@ -374,7 +391,7 @@ export class GraphMemoryModule implements MemoryModule {
   private readonly defaultSummarizer: MemorySummarizer = async (
     input: MemorySummarizeInput,
   ): Promise<string> => {
-    return defaultChainRenderer(input.entries as unknown as GraphNode[]);
+    return defaultChainRendererEntries(input);
   };
 }
 
