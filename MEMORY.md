@@ -85,10 +85,19 @@ injection.
   `createPersistentMemoryModule` is the swappable factory. The plan loop calls
   `finalizePersistentMemory()` (→ `finalize()`) at end of plan when this backend
   is selected.
-- **Selection**: `main.ts` picks the backend with `ELAGENT_MEMORY_TYPE`
-  (default in-memory; `graph` selects the graph module; `persistent` selects the
-  persistent module). `ELAGENT_MEMORY_DISABLE=1/true` disables memory entirely
-  for all backends.
+- **Selection**: `main.ts` picks the backend with `ELAGENT_MEMORY_TYPE`. The
+  **default is now the persistent backend** (a behavior change from the prior
+  in-memory default); `ELAGENT_MEMORY_DISABLE=1/true` disables memory entirely
+  for all backends. Accepted values:
+  - (unset or anything unrecognised) / `persistent` -> the persistent module
+    (`createPersistentMemoryModule`) — the durable, disk-backed default.
+  - `in-memory` -> the in-memory module (`createInMemoryMemoryModule`) — an
+    explicit opt-in to the pre-change in-process default.
+  - `graph` -> the graph module (`createGraphMemoryModule`).
+  - `concat` (alias `both`) -> a **concatenation composite** wrapping the
+    persistent module as its **primary** (durable) source and the in-memory
+    module as its **secondary** (ephemeral) source. See “Concatenation mode”
+    below.
 - **Chaining**: an optional `delegate` forwards calls; `getContext()` merges own
   and delegated results via `mergeContextResults`. **Swapping**: the runtime
   constructs memory through the factory so the backend can be replaced without
@@ -108,6 +117,50 @@ injection.
   context). `memory/types.ts`, `memory/inMemory.ts`, `memory/graph-store.ts`,
   `memory/graph-memory.ts`, and `memory/persistent.ts` are part of
   `npm run build`.
+
+### Concatenation mode
+
+`ELAGENT_MEMORY_TYPE=concat` (alias `both`) composes two `MemoryModule`s into a
+single labeled, fail-safe `MemoryModule` via a concatenation composite
+(`createCompositeMemoryModule({ primary, secondary })`, alias
+`createConcatenationMemoryModule`). The default pairing is **persistent** as
+`primary` (the durable disk-backed source) and **in-memory** as `secondary`
+(the ephemeral source).
+
+- **remember(input)** — forwards to BOTH `primary` and `secondary`, so every
+  plan step is recorded in both stores. Failures in either store are absorbed
+  fail-safe: they are recorded on the composite's `lastFailure` report and never
+  reject/abort the plan loop (the other store still records the step).
+- **getContext(request)** — retrieves context from BOTH stores and concatenates
+  them **in order: `primary` first, then `secondary`**, each rendered under its
+  own header marker so the LLM can tell which source a memory came from:
+
+  ```
+  --- persistent memory ---
+  <primary text>
+  --- in-memory memory ---
+  <secondary text>
+  ```
+
+  A section is emitted only when that store returned a non-empty result (text
+  or `hasMemory`); empty sections are dropped. `matchedContexts` are pooled
+  across both stores. If one store throws, its section is omitted (logged as a
+  failure) and the other store's context is still returned — the composite never
+  fails open entirely for `getContext()`.
+
+- **Ordering rationale** — persistent is surfaced first because it is the
+  durable, curated end-of-plan source; in-memory sits after it so the recent
+  ephemeral snapshot augments without masking the durable summary.
+- **Finalize passthrough** — the composite itself is not a
+  `PersistentMemoryModule`, so at end of plan `main.ts` must forward
+  `finalize()` to the inner `primary` when that inner module exposes one. Use
+  the composite's optional `finalize(sessionId)` passthrough (delegates to
+  `primary` when the primary has a `finalize` method), and detect it in
+  `finalizePersistentMemory()` (alongside `instanceof PersistentMemoryModule`)
+  so concat persists the durable document at end of plan.
+- **Chainable** — the composite is itself a `MemoryModule`, so it can be
+  wrapped/delegated further or nested inside another composite, and it honors
+  the same fail-safe semantics as every other backend.
 
 See `README.md` for the full interface, usage, injection, chaining, and a short
 example.
