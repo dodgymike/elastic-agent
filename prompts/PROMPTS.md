@@ -134,6 +134,15 @@ non-empty string or integer. This field forms the contract that the
 planning-response parser (`plan-printer.ts`) and the phase-aware handler logic
 in `main.ts` rely on.
 
+The parser (`plan-printer.ts`) recognizes `phase` as an optional top-level
+field and exposes it on the parsed plan. When present, the value is validated —
+it must be a trimmed non-empty string or an integer (`null`, booleans, floats,
+arrays, objects, and whitespace-only strings are rejected). The parser's parse
+functions accept a `PlanJsonOptions` argument with a `requirePhase` flag: for
+very-high-complexity plans the caller passes `{ requirePhase: true }` and the
+parser rejects a plan that omits `phase`; for low-/medium-complexity work the
+flag is left unset so the field is optional and may be absent.
+
 The same `phase` field is documented in the replanner prompt
 (`replan-prompt.txt`), where a proposed phase change is treated as a signal to
 fully restart the plan, while changes confined to the current phase do not

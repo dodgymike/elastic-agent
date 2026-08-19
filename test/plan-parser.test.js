@@ -3,12 +3,14 @@
 //   parsePlanJson            - parse + validate into a typed plan object
 //   planStepsFromObject      - bridge parsed plan steps into step strings
 //   extractPlanJson          - non-throwing compatibility wrapper
+//   parsePlanOrAbort         - non-throwing plan-vs-abort parse
 // Compiled into test/.plan-parser-build by the test:plan-parser npm script.
 const {
     extractJsonFromResponse,
     parsePlanJson,
     planStepsFromObject,
     extractPlanJson,
+    parsePlanOrAbort,
 } = require("./.plan-parser-build/plan-printer.js");
 
 let failures = 0;
@@ -110,6 +112,81 @@ const samplePlan = {
     const steps = planStepsFromObject(plan);
     check("integration flow yields 2 actionable steps", steps.length === 2);
     check("integration flow returns a plan object with expected_outcome", plan.expected_outcome === samplePlan.expected_outcome);
+}
+
+// 11. Top-level "phase": valid string phase is accepted and exposed on the plan.
+{
+    const plan = parsePlanJson(JSON.stringify({ ...samplePlan, phase: "design" }));
+    check("parsePlanJson accepts a string phase", plan.phase === "design");
+    const trimmed = parsePlanJson(JSON.stringify({ ...samplePlan, phase: "  design  " }));
+    check("parsePlanJson trims a string phase", trimmed.phase === "design");
+}
+
+// 12. Top-level "phase": valid integer phase is accepted and exposed on the plan.
+{
+    const plan = parsePlanJson(JSON.stringify({ ...samplePlan, phase: 1 }));
+    check("parsePlanJson accepts an integer phase", plan.phase === 1);
+}
+
+// 13. Top-level "phase": absent phase is accepted for low/medium complexity.
+{
+    const plan = parsePlanJson(JSON.stringify(samplePlan));
+    check("parsePlanJson allows absent phase for low/medium complexity", plan.phase === undefined);
+}
+
+// 14. Top-level "phase": requirePhase (very-high complexity) rejects a missing phase.
+{
+    check(
+        "parsePlanJson throws when requirePhase and phase is absent",
+        throws(() => parsePlanJson(JSON.stringify(samplePlan), { requirePhase: true })),
+    );
+}
+
+// 15. Top-level "phase": invalid types are rejected whether or not phase is required.
+{
+    const invalidTypes = [
+        { ...samplePlan, phase: "   " },        // whitespace-only string
+        { ...samplePlan, phase: 1.5 },          // non-integer number
+        { ...samplePlan, phase: {} },           // object
+        { ...samplePlan, phase: [] },           // array
+        { ...samplePlan, phase: true },         // boolean
+        { ...samplePlan, phase: null },         // null
+    ];
+    for (const bad of invalidTypes) {
+        check(
+            `parsePlanJson rejects invalid phase ${JSON.stringify(bad.phase)}`,
+            throws(() => parsePlanJson(JSON.stringify(bad))),
+        );
+    }
+}
+
+// 16. Top-level "phase": a very-high-complexity plan WITH a valid phase is accepted.
+{
+    const plan = parsePlanJson(JSON.stringify({ ...samplePlan, phase: "verify" }), { requirePhase: true });
+    check("parsePlanJson accepts a high-complexity plan with a valid phase", plan.phase === "verify");
+}
+
+// 17. Top-level "phase": parsePlanOrAbort exposes and validates phase the same way.
+{
+    const ok = parsePlanOrAbort(JSON.stringify({ ...samplePlan, phase: 2 }));
+    check("parsePlanOrAbort exposes phase on a valid plan", ok.valid && ok.result.kind === "plan" && ok.result.plan.phase === 2);
+
+    const missingHigh = parsePlanOrAbort(JSON.stringify(samplePlan), { requirePhase: true });
+    check(
+        "parsePlanOrAbort rejects missing phase for high complexity",
+        missingHigh.valid === false && /phase/.test(missingHigh.reason),
+    );
+
+    const badType = parsePlanOrAbort(JSON.stringify({ ...samplePlan, phase: false }));
+    check("parsePlanOrAbort rejects invalid phase type", badType.valid === false && /phase/.test(badType.reason));
+}
+
+// 18. Top-level "phase": extractPlanJson (compatibility wrapper) threads options.
+{
+    const r = extractPlanJson(JSON.stringify(samplePlan), { requirePhase: true });
+    check("extractPlanJson rejects missing phase when required", r.valid === false && /phase/.test(r.reason));
+    const ok = extractPlanJson(JSON.stringify({ ...samplePlan, phase: "build" }), { requirePhase: true });
+    check("extractPlanJson accepts present phase when required", ok.valid === true && ok.plan.phase === "build");
 }
 
 if (failures === 0) { console.log("\nAll plan-parser tests passed."); process.exit(0); }

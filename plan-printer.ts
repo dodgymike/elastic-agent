@@ -46,10 +46,22 @@ export interface PlanStep {
     details?: unknown;
 }
 
+/**
+ * A validated top-level `phase` value: a trimmed non-empty string or an
+ * integer, as constrained by the planning prompt (`prompts/planning-suffix.txt`).
+ */
+export type PlanPhase = string | number;
+
 export interface PlanObject {
     tldr?: unknown;
     steps?: PlanStep[];
     expected_outcome?: unknown;
+    /**
+     * Optional top-level field identifying a major stage of work with its own
+     * steps. Only present for very-high-complexity plans; when present it is a
+     * non-empty string or integer (see prompts/planning-suffix.txt).
+     */
+    phase?: PlanPhase;
 }
 
 /**
@@ -60,9 +72,67 @@ export interface ParsedPlan extends PlanObject {
     steps: PlanStep[];
 }
 
+/**
+ * Parse options understood by the plan JSON parsers.
+ */
+export interface PlanJsonOptions {
+    /**
+     * When true, the top-level `phase` field is required. This is intended for
+     * very-high-complexity plans that the prompt contract requires to carry a
+     * phase. When false (the default, low/medium complexity) `phase` is
+     * optional: it may be present (and must then be valid) or absent.
+     */
+    requirePhase?: boolean;
+}
+
 type ExtractResult =
     | { valid: true; plan: ParsedPlan }
     | { valid: false; reason: string };
+
+/**
+ * Validate a top-level `phase` value that is present on a plan object.
+ * Returns a normalized phase (trimmed string or integer) and throws a
+ * descriptive error when it is not a non-empty string or integer, matching the
+ * contract in prompts/planning-suffix.txt.
+ */
+function validatePhase(value: unknown): PlanPhase {
+    if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (trimmed.length === 0) {
+            throw new Error("Planning response 'phase' must be a non-empty string or integer when present.");
+        }
+        return trimmed;
+    }
+    if (typeof value === "number" && Number.isInteger(value)) {
+        return value;
+    }
+    throw new Error("Planning response 'phase' must be a non-empty string or integer when present.");
+}
+
+/**
+ * Validate and normalize a plan object's top-level `phase` field onto the plan.
+ * `requirePhase` reflects high-complexity expectations: phase must be present.
+ * When present the value is validated regardless of the requirement. Mutates
+ * and returns `plan`.
+ */
+function applyPhase(plan: Record<string, unknown>, options: PlanJsonOptions): void {
+    const requires = options.requirePhase === true;
+    // Only a missing key or an explicit undefined counts as "absent". An
+    // explicit null is a supplied (malformed) value and is rejected by the
+    // type check below — the prompt contract requires a non-empty string or
+    // integer, so emitting `"phase": null` is a parse error, not an omission.
+    const present = Object.prototype.hasOwnProperty.call(plan, "phase")
+        && plan.phase !== undefined;
+
+    if (!present) {
+        if (requires) {
+            throw new Error("A very-high-complexity plan must include a top-level 'phase' field.");
+        }
+        return;
+    }
+
+    plan.phase = validatePhase(plan.phase);
+}
 
 /** Fixed indentation width per hierarchy level (spaces). */
 const INDENT = {
@@ -115,8 +185,13 @@ export function extractJsonFromResponse(response: string): string {
  * Throws a descriptive error when parsing fails or the result does not have
  * the required shape: an object with a `steps` array whose entries are
  * objects, each carrying a `step_number` (number) and a `tldr` (string).
+ *
+ * The optional top-level `phase` field is validated when present (it must be a
+ * non-empty string or integer, per prompts/planning-suffix.txt) and exposed on
+ * the returned plan. When `options.requirePhase` is true (very-high-complexity
+ * plans) the field is required and its absence is a validation error.
  */
-export function parsePlanJson(extracted: string): ParsedPlan {
+export function parsePlanJson(extracted: string, options: PlanJsonOptions = {}): ParsedPlan {
     let parsed: unknown;
     try {
         parsed = JSON.parse(extracted);
@@ -146,6 +221,8 @@ export function parsePlanJson(extracted: string): ParsedPlan {
         }
     }
 
+    applyPhase(plan, options);
+
     return plan as unknown as ParsedPlan;
 }
 
@@ -174,10 +251,10 @@ export function planStepsFromObject(plan: PlanObject): string[] {
  * This is the compatibility wrapper used for best-effort parsing and display;
  * it delegates to extractJsonFromResponse + parsePlanJson.
  */
-export function extractPlanJson(text: string): ExtractResult {
+export function extractPlanJson(text: string, options: PlanJsonOptions = {}): ExtractResult {
     try {
         const extracted = extractJsonFromResponse(text);
-        return { valid: true, plan: parsePlanJson(extracted) };
+        return { valid: true, plan: parsePlanJson(extracted, options) };
     } catch (error) {
         return { valid: false, reason: error instanceof Error ? error.message : String(error) };
     }
@@ -205,7 +282,7 @@ export type PlanOrAbortResult =
  * - When `abort` is `true`, `reason` must be a non-empty string after
  *   trimming, and `abort` wins even if plan steps are also present.
  */
-export function parsePlanOrAbort(text: string): PlanOrAbortResult {
+export function parsePlanOrAbort(text: string, options: PlanJsonOptions = {}): PlanOrAbortResult {
     let extracted: string;
     try {
         extracted = extractJsonFromResponse(text);
@@ -239,7 +316,7 @@ export function parsePlanOrAbort(text: string): PlanOrAbortResult {
     }
 
     try {
-        return { valid: true, result: { kind: "plan", plan: parsePlanJson(extracted) } };
+        return { valid: true, result: { kind: "plan", plan: parsePlanJson(extracted, options) } };
     } catch (error) {
         return { valid: false, reason: error instanceof Error ? error.message : String(error) };
     }
@@ -270,6 +347,9 @@ export function printPlan(plan: unknown, write: (line: string) => void = (line) 
 
     write(`${indent("plan")}PLAN`);
     write(`${indent("plan")}TLDR: ${text(planObj.tldr)}`);
+    if (planObj.phase !== undefined && planObj.phase !== null) {
+        write(`${indent("plan")}PHASE: ${text(planObj.phase)}`);
+    }
     write(`${indent("plan")}STEPS:`);
 
     if (steps.length === 0) {

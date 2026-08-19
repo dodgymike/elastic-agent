@@ -106,5 +106,20 @@ const samplePlan = {
     check("printPlan tolerates non-object input", out.includes("could not be displayed"));
 }
 
+// 7. printPlan renders the top-level phase line only when a phase is present.
+{
+    const withPhase = capture((w) => printPlan({ ...samplePlan, phase: "design" }, w));
+    check("output contains PHASE when phase present", withPhase.text.includes("PHASE: design"));
+    check(
+        "PHASE line is indented at the plan level and after TLDR",
+        withPhase.lines[1] === `${indent("plan")}TLDR: Add pretty-printing of the planning step output`
+        && withPhase.lines[2] === `${indent("plan")}PHASE: design`
+        && withPhase.lines[3] === `${indent("plan")}STEPS:`,
+    );
+
+    const noPhase = capture((w) => printPlan(samplePlan, w));
+    check("no PHASE line when phase absent", !noPhase.text.includes("PHASE:"));
+}
+
 if (failures === 0) { console.log("\nAll plan-print tests passed."); process.exit(0); }
 else { console.error(`\n${failures} test(s) failed.`); process.exit(1); }
