@@ -35,6 +35,10 @@ import {
     createInMemoryMemoryModule,
     type InMemoryMemoryOptions,
 } from "./memory/inMemory.js";
+import {
+    createGraphMemoryModule,
+    type GraphMemoryOptions,
+} from "./memory/graph-memory.js";
 import type {
     MemoryAction,
     MemoryJsonValue,
@@ -254,14 +258,32 @@ let agentSessionId: string;
     agentSessionId = `run-${randomUUID()}`;
     // ELAGENT_MEMORY_DISABLE=1 opts out entirely (fail-open): the plan loop
     // and LLM prompts run exactly as they did before this integration. When
-    // enabled, the in-memory MemoryModule is created here (swappable via
-    // dependency injection — an operator could supply a different factory or a
-    // delegating chain in the future) without the need to create a module.
+    // enabled, a MemoryModule is created here (swappable via dependency
+    // injection — an operator could supply a different factory or a delegating
+    // chain in the future) without the need to create a module.
+    //
+    // ELAGENT_MEMORY_TYPE selects the backend:
+    //   - (unset / anything else) -> the default in-memory MemoryModule
+    //     (createInMemoryMemoryModule), unchanged from prior behavior.
+    //   - "graph" -> the graph-backed GraphMemoryModule
+    //     (createGraphMemoryModule), which models each plan step as graph
+    //     nodes/typed edges so later turns can retrieve a chain of related
+    //     steps instead of flat history. It keeps the same MemoryModule
+    //     interface, so the remember() call sites and LLM getContext()
+    //     injection are unchanged; summarization uses the same optional
+    //     MemorySummarizer contract (an operator can inject an LLM-backed
+    //     summarizer via the factory options; absent an LLM backend the module
+    //     falls back to its deterministic chain renderer, exactly as the
+    //     in-memory module falls back to defaultHistorySummarizer).
     const disabled =
         process.env.ELAGENT_MEMORY_DISABLE === "1" ||
         process.env.ELAGENT_MEMORY_DISABLE === "true";
+    const memoryType = process.env.ELAGENT_MEMORY_TYPE ?? "";
     if (disabled) {
         agentMemory = null;
+    } else if (memoryType === "graph") {
+        const graphOptions: GraphMemoryOptions = {};
+        agentMemory = createGraphMemoryModule(graphOptions);
     } else {
         const memoryOptions: InMemoryMemoryOptions = {};
         agentMemory = createInMemoryMemoryModule(memoryOptions);
