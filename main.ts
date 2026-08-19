@@ -44,7 +44,7 @@ import chalk from "chalk";
 import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
 import { startToolTimer } from "./tool-timer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, basename, isAbsolute, join } from "node:path";
+import { dirname, basename, isAbsolute, join, resolve as pathResolve } from "node:path";
 import { resolveWorkspaceInit, loadWorkspaceInit, workspaceInitToState, writeWorkspaceInitMarkdown, type WorkspaceInit } from "./workspace-init.ts";
 import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
@@ -131,15 +131,28 @@ try {
 // error instead of a mid-run failure.
 let toolSafetyConfig: ReturnType<typeof resolveToolSafetyConfig>;
 try {
+    // The main entry module path (from process.argv[1], the script handed to
+    // node) is resolved to the agent-source root so --allow-agent-source-modifications
+    // can enforce that the working directory matches the directory containing
+    // main.ts.
+    const mainModulePath = pathResolve(process.argv[1] ?? "main.ts");
     toolSafetyConfig = resolveToolSafetyConfig({
         disableClassifier: options.disableClassifier,
         agentSourceDir: options.agentSourceDir,
         startDir: options.startDir,
         allowAgentSourceModifications: options.allowAgentSourceModifications,
-    });
+    }, process.cwd(), mainModulePath);
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
+}
+// When --allow-agent-source-modifications is set, the authoritative working
+// directory is the agent-source root (the directory containing main.ts). The
+// config resolution has already verified the process cwd resolves to it, so
+// chdir to the canonical root makes it the authoritative cwd for all reads and
+// tool calls that follow.
+if (toolSafetyConfig.allowAgentSourceModifications) {
+    process.chdir(toolSafetyConfig.agentSourceDir);
 }
 // Task mode is handled inside main() after Spec Keeper defaults are resolved.
 // The run mode is resolved above so prompt-mode-only argument rules are
@@ -1482,15 +1495,21 @@ async function dispatchToolCall(output, configData, goalKey) {
     // configured, all work is confined to that single directory: the workspace
     // root becomes the canonical start directory and the process's original
     // start-up directory is *removed* from the allowed set, so neither the
-    // logical pwd nor its canonical form are trusted any longer. When no
-    // --start-dir is given, the running directory and its canonical form from
-    // workspace-init are the trusted "local" roots.
+    // logical pwd nor its canonical form are trusted any longer. When
+    // --allow-agent-source-modifications is set, the only trusted/allowed root
+    // is the canonical agent-source root (the directory containing main.ts),
+    // which is also the authoritative cwd. Otherwise the running directory and
+    // its canonical form from workspace-init are the trusted "local" roots.
     const classifierWorkspaceRoot = toolSafetyConfig.startDirConfigured
         ? toolSafetyConfig.startDir
-        : process.cwd();
+        : toolSafetyConfig.allowAgentSourceModifications
+            ? toolSafetyConfig.agentSourceDir
+            : process.cwd();
     const classifierAllowedDirectories = toolSafetyConfig.startDirConfigured
         ? [toolSafetyConfig.startDir]
-        : workspaceInit.allowedDirectories;
+        : toolSafetyConfig.allowAgentSourceModifications
+            ? [toolSafetyConfig.agentSourceDir]
+            : workspaceInit.allowedDirectories;
 
     let classification;
     try {

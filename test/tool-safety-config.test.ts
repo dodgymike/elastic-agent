@@ -15,11 +15,15 @@ try {
   assert.equal(defaults.agentSourceDir, resolve(sandbox));
   assert.equal(defaults.startDir, resolve(sandbox));
 
-  // Boolean flags map onto the resolved config.
+  // Boolean flags map onto the resolved config. The modifications flag resolves
+  // its agent-source root from a main.ts entry file, so point it at a real one
+  // in the sandbox (the sandbox is the runtime cwd, matching the root).
   assert.equal(resolveToolSafetyConfig({ disableClassifier: true }, sandbox).enabled, false);
   assert.equal(resolveToolSafetyConfig({ disableClassifier: false }, sandbox).enabled, true);
+  const rootMain = join(sandbox, "main.ts");
+  writeFileSync(rootMain, "// entry\n");
   assert.equal(
-    resolveToolSafetyConfig({ allowAgentSourceModifications: true }, sandbox).allowAgentSourceModifications,
+    resolveToolSafetyConfig({ allowAgentSourceModifications: true }, sandbox, rootMain).allowAgentSourceModifications,
     true,
   );
 
@@ -48,7 +52,7 @@ try {
   const startDirOnly = resolveToolSafetyConfig({ startDir: "." }, sandbox);
   assert.equal(startDirOnly.startDirConfigured, true);
   assert.equal(startDirOnly.allowAgentSourceModifications, false);
-  const modsOnly = resolveToolSafetyConfig({ allowAgentSourceModifications: true }, sandbox);
+  const modsOnly = resolveToolSafetyConfig({ allowAgentSourceModifications: true }, sandbox, rootMain);
   assert.equal(modsOnly.startDirConfigured, false);
   assert.equal(modsOnly.allowAgentSourceModifications, true);
 
@@ -182,6 +186,42 @@ try {
   const defaultCanonical = resolveToolSafetyConfig({}, sandbox);
   assert.equal(defaultCanonical.startDir, realpathSync(sandbox));
   assert.equal(defaultCanonical.agentSourceDir, realpathSync(sandbox));
+
+  // --allow-agent-source-modifications resolves the agent-source root from the
+  // main entry module and enforces that the working directory matches it. With
+  // a main.ts at the root and the cwd equal to that root (the happy path), both
+  // the agent-source dir and the working/start dir become the canonical root,
+  // and the classifier is told modifications are permitted there.
+  const srcRoot = join(sandbox, "src-root");
+  mkdirSync(srcRoot, { recursive: true });
+  const mainEntry = join(srcRoot, "main.ts");
+  writeFileSync(mainEntry, "// entry\n");
+  const modsHappy = resolveToolSafetyConfig(
+    { allowAgentSourceModifications: true },
+    srcRoot,
+    mainEntry,
+  );
+  assert.equal(modsHappy.allowAgentSourceModifications, true);
+  assert.equal(modsHappy.agentSourceDir, realpathSync(srcRoot));
+  assert.equal(modsHappy.startDir, realpathSync(srcRoot));
+  assert.equal(modsHappy.startDirConfigured, false);
+
+  // A working directory that does not resolve to the agent-source root fails
+  // startup with a clear mismatch error so the CLI can exit non-zero instead of
+  // running with an ambiguous filesystem boundary.
+  const wrongCwd = join(sandbox, "wrong-cwd");
+  mkdirSync(wrongCwd, { recursive: true });
+  assert.throws(
+    () => resolveToolSafetyConfig({ allowAgentSourceModifications: true }, wrongCwd, mainEntry),
+    /--allow-agent-source-modifications requires the working directory to be the agent source root/,
+  );
+
+  // Without a main entry path the mods flag cannot resolve a root and fails
+  // with a clear usage error rather than guessing.
+  assert.throws(
+    () => resolveToolSafetyConfig({ allowAgentSourceModifications: true }, srcRoot),
+    /--allow-agent-source-modifications requires the main entry module path to resolve the agent source root/,
+  );
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }

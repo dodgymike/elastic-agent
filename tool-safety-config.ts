@@ -19,6 +19,10 @@
 
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import {
+  AgentSourceRootMismatchError,
+  resolveAgentSourceRoot,
+} from "./tool-source-root.js";
 
 /**
  * Resolved, validated tool-safety configuration. All directory paths are
@@ -102,6 +106,7 @@ function resolveDirectoryOption(value: string | undefined, flagName: string, fal
 export function resolveToolSafetyConfig(
   options: RawToolSafetyOptions,
   runtimeCwd: string = process.cwd(),
+  mainPath?: string,
 ): ToolSafetyConfig {
   const fallback = absoluteDirectoryPath(runtimeCwd, process.cwd());
   const startDirConfigured = options.startDir !== undefined;
@@ -114,6 +119,31 @@ export function resolveToolSafetyConfig(
     throw new Error(
       "Usage: --allow-agent-source-modifications and --start-dir cannot be used together.",
     );
+  }
+  // --allow-agent-source-modifications lets the agent rewrite its own source,
+  // so the authoritative modification root is the directory containing the
+  // main entry module (the agent's own main.ts), and the runtime working
+  // directory must resolve to that same root. Both directories are set to the
+  // canonical agent-source root so the classifier's edit boundary and the tool
+  // working directory follow the user's intent. A mismatch fails startup with a
+  // clear error instead of running with an ambiguous filesystem boundary.
+  if (allowAgentSourceModifications) {
+    if (!mainPath) {
+      throw new Error(
+        "Usage: --allow-agent-source-modifications requires the main entry module path to resolve the agent source root.",
+      );
+    }
+    const sourceRoot = resolveAgentSourceRoot(mainPath, runtimeCwd);
+    if (!sourceRoot.cwdMatchesRoot) {
+      throw new AgentSourceRootMismatchError(sourceRoot.root, runtimeCwd);
+    }
+    return {
+      enabled: options.disableClassifier !== true,
+      agentSourceDir: sourceRoot.root,
+      startDir: sourceRoot.root,
+      startDirConfigured: false,
+      allowAgentSourceModifications: true,
+    };
   }
   const agentSourceDir = resolveDirectoryOption(options.agentSourceDir, "--agent-source-dir", fallback);
   const startDir = resolveDirectoryOption(options.startDir, "--start-dir", fallback);
