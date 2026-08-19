@@ -774,6 +774,109 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 5d3. Edit/write boundary canonicalization for file-mutating tools. The
+    //     edit-policy boundary (isInsideAnyBoundary/editableRoots) must treat
+    //     canonical absolute, symlinked absolute, and cwd-relative paths just
+    //     as consistently as the read containment checks do, so a Write/Edit/
+    //     Delete (or a file-modifying ExecuteCommand) through a symlinked
+    //     alias into the configured editable root is allowed while anything
+    //     that resolves outside it stays refused — including through a
+    //     symlink that cannot smuggle its real target out of the root.
+    // ------------------------------------------------------------------
+    // Build a real symlink so fs.realpathSync exercises the symlink-alias
+    // path, with a probe file that must exist on disk for the realpath to
+    // resolve through the alias.
+    const editCanonicalRoot = join(tmpDir, "edit-boundary", "root");
+    mkdirSync(editCanonicalRoot, { recursive: true });
+    writeFileSync(join(editCanonicalRoot, "package.json"), "{}", "utf8");
+    const editAliasDir = join(tmpDir, "edit-boundary", "alias-target");
+    let editAliasRoot = editCanonicalRoot;
+    let editSymlinkResolves = false;
+    try {
+      symlinkSync(editCanonicalRoot, editAliasDir, "dir");
+      editAliasRoot = editAliasDir;
+      editSymlinkResolves = realpathSync(editAliasRoot) === editCanonicalRoot;
+    } catch {
+      editAliasRoot = editCanonicalRoot;
+    }
+    // The config's editable roots are the canonical start dir (as main.ts
+    // hands the classifier following --allow-agent-source-modifications),
+    // while the tool's cwd is the symlinked alias — so both the alias and
+    // the canonical root must be accepted as the same real location.
+    const editConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir: editCanonicalRoot,
+      startDir: editCanonicalRoot,
+      startDirConfigured: true,
+      allowAgentSourceModifications: true,
+    };
+    const editPathOptions = {
+      workspaceRoot: editAliasRoot,
+      allowedDirectories: [editCanonicalRoot],
+    };
+    check(
+      "edit root symlink resolves to the canonical root",
+      !editSymlinkResolves || realpathSync(editAliasRoot) === editCanonicalRoot,
+    );
+    // (a) Canonical absolute path below the editable root is allowed for
+    //     Write/Edit/Delete.
+    check(
+      "edit boundary: canonical absolute Write inside the editable root is allowed",
+      classifyToolCallStatically("Write", { path: join(editCanonicalRoot, "notes.md"), content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: canonical absolute Edit inside the editable root is allowed",
+      classifyToolCallStatically("Edit", { path: join(editCanonicalRoot, "package.json"), old_string: "a", new_string: "b" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: canonical absolute Delete inside the editable root is allowed",
+      classifyToolCallStatically("Delete", { path: join(editCanonicalRoot, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    // (b) A symlinked absolute path resolving into the editable root is
+    //     allowed for a mutating tool (the regression this guards). The probe
+    //     file must exist on disk for fs.realpathSync to resolve through the
+    //     alias, exactly as in section 5d — production edits target files that
+    //     exist. `package.json` exists; a Write to it (mode-confirming an
+    //     overwrite) and an Edit to it both canonicalize through the alias.
+    check(
+      "edit boundary: symlinked absolute Write resolving into the editable root is allowed",
+      !editSymlinkResolves
+        || classifyToolCallStatically("Write", { path: join(editAliasRoot, "package.json"), content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    check(
+      "edit boundary: symlinked absolute Edit resolving into the editable root is allowed",
+      !editSymlinkResolves
+        || classifyToolCallStatically("Edit", { path: join(editAliasRoot, "package.json"), old_string: "a", new_string: "b" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    // (c) A cwd-relative path resolving inside the editable root is allowed.
+    check(
+      "edit boundary: cwd-relative Write resolving inside the editable root is allowed",
+      classifyToolCallStatically("Write", { path: "notes.md", content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
+    );
+    // A Write that would create a brand-new file through a symlink alias is
+    // conservatively refused (fail-closed) because fs.realpathSync cannot
+    // resolve a non-existent leaf through the alias — the classifier cannot
+    // verify it lands inside the editable root, so it does not approve it.
+    // This mirrors the read-containment behavior for non-existent symlinked
+    // targets and keeps the fail-closed posture even when the effective cwd
+    // is a symlinked alias of the start dir.
+    check(
+      "edit boundary: Write creating a new file through a symlink alias is conservatively refused",
+      !editSymlinkResolves
+        || classifyToolCallStatically("Write", { path: join(editAliasRoot, "brand-new.md"), content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision !== "safe",
+    );
+    // (d) A path outside every editable root stays refused, and the symlinked
+    //     alias cannot smuggle a real target outside the root into the set.
+    check(
+      "edit boundary: Write outside the editable root is refused",
+      classifyToolCallStatically("Write", { path: "/etc/agent-notes.md", content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "unsafe",
+    );
+    check(
+      "edit boundary: symlinked alias cannot smuggle a realpath escaping the editable root",
+      classifyToolCallStatically("Write", { path: join(tmpDir, "edit-boundary", "outside.txt"), content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision !== "safe",
+    );
+
+    // ------------------------------------------------------------------
     // 5e. Docker prompt-variant selection: the runtime's isDocker flag (or
     //     AGENT_IN_DOCKER) selects the Docker or non-Docker filesystem-policy
     //     addendum, which is composed with the shared base prompt and included

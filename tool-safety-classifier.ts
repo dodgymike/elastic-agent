@@ -391,35 +391,56 @@ function resolvesOutsideAllTrustedRoots(target: string, roots: readonly string[]
 
 /**
  * Boundary-safe prefix check between two absolute paths. Returns true when
- * `candidate` is equal to `dir` or is a descendant of `dir`. The check uses
- * path.resolve plus path.relative, so a target such as `../outside` or an
- * absolute path cannot escape the configured boundary through traversal.
+ * `candidate` is equal to `dir` or is a descendant of `dir`. Both paths are
+ * canonicalized (relative-to-cwd resolved then symlink-resolved with
+ * `canonicalAbsolutePath`) before the containment comparison, so a symlinked
+ * directory alias compares equal to its real location and a path that would
+ * escape the boundary through a symlink is refused. The relative/`..` check
+ * also ensures a target such as `../outside` or an absolute path cannot escape
+ * the configured boundary through traversal.
  */
-function isInsideBoundary(candidate: string, dir: string): boolean {
-  const rel = relative(resolve(dir), resolve(candidate));
+function isInsideBoundary(candidate: string, dir: string, cwd = process.cwd()): boolean {
+  const canonicalCandidate = canonicalAbsolutePath(candidate, cwd);
+  const canonicalDir = canonicalAbsolutePath(dir, cwd);
+  const rel = relative(canonicalDir, canonicalCandidate);
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
 /**
  * True when `target` resolves inside at least one configured editable
- * directory. Relative targets are resolved against each directory in turn,
- * mirroring how tool paths are resolved relative to the runtime working
- * directory.
+ * directory. Each target candidate is resolved against the corresponding
+ * directory (for a relative target) or used as-is (for an absolute target) and
+ * then canonicalized by `isInsideBoundary` so symlinked and cwd-relative forms
+ * of an editable root are accepted while anything that resolves outside every
+ * root is refused — mirroring how the file-tool containment checks
+ * (`resolvesOutsideAllTrustedRoots`) treat the same path forms consistently.
  */
-function isInsideAnyBoundary(target: string, dirs: readonly string[]): boolean {
+function isInsideAnyBoundary(target: string, dirs: readonly string[], cwd = process.cwd()): boolean {
   if (dirs.length === 0) return false;
-  const absoluteTarget = isAbsolute(target) ? resolve(target) : null;
   for (const dir of dirs) {
-    const resolvedDir = resolve(dir);
-    const candidate = absoluteTarget ?? resolve(resolvedDir, target);
-    if (isInsideBoundary(candidate, resolvedDir)) return true;
+    // Resolve possible symlinks in the root *before* joining a relative
+    // target against it, so a relative path is interpreted relative to the
+    // real (canonical) root, not a lexical alias that could point a relative
+    // sibling outside the boundary.
+    const canonicalDir = canonicalAbsolutePath(dir, cwd);
+    const candidate = isAbsolute(target) ? target : resolve(canonicalDir, target);
+    if (isInsideBoundary(candidate, canonicalDir, cwd)) return true;
   }
   return false;
 }
 
-/** De-duplicated absolute editable roots derived from the tool-safety config. */
+/**
+ * De-duplicated absolute editable roots derived from the tool-safety config.
+ * The config values are already canonicalized at CLI-resolution time
+ * (`resolveDirectoryOption` symlink-resolves them), but `canonicalAbsolutePath`
+ * is applied again here so the boundary comparison always runs against the real
+ * location and stays robust even if a config value arrives non-canonical.
+ */
 function editableRoots(config: ToolSafetyConfig): string[] {
-  return Array.from(new Set([resolve(config.agentSourceDir), resolve(config.startDir)]));
+  return Array.from(new Set([
+    canonicalAbsolutePath(config.agentSourceDir),
+    canonicalAbsolutePath(config.startDir),
+  ]));
 }
 
 /**
