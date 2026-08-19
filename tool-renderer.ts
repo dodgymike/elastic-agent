@@ -342,8 +342,23 @@ function renderExecuteCommandPending(toolCall: ToolCallDescriptor, options: Tool
  * shared tool-command helper. This keeps stdout/stderr ordering identical to
  * the central dispatch path: success prints stdout then any non-empty stderr;
  * failure prints stderr then any non-empty stdout.
+ *
+ * The one intentional divergence is suppressing output on a clean success: a
+ * command that exits 0 and captured no stderr had its full stdout delivered to
+ * the model through the tool result, so echoing it into the terminal only adds
+ * noise. Such a call renders just the green status circle (the `ExecuteCommand`
+ * label is owned by the pending phase, so the parameters remain visible and are
+ * not repeated here). Any non-zero exit, non-empty stderr, thrown error, or
+ * `{ error }` payload still renders the full output via the shared helper so
+ * diagnostics stay visible. This change is specific to the ExecuteCommand
+ * succeeded renderer: the shared renderToolCommand helper and the Git renderers
+ * are untouched.
  */
 function renderExecuteCommandSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
+    const streams = commandStreamsFrom(result);
+    if (streams && streams.exitCode === 0 && streams.stderr.trim() === "") {
+        return [` ${ansiHelpers(options.color).green("●")}`];
+    }
     return renderToolCommand(toolCall, result, options);
 }
 
