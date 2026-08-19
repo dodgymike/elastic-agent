@@ -375,6 +375,13 @@ Integration details:
   messages).
 - **Fail-safe** — a rejected `getContext()` leaves the prompt unchanged and
   reports the failure as a non-fatal diagnostic; the agent loop continues.
+- **Prompt logging (opt-in)** — pass `--log-prompts` (or set `PROMPT_LOG_PATH`
+  to override the path) to append every finalized LLM prompt — including the
+  injected session-memory context above — to `prompt.log` in the working
+  directory. This single hook covers every memory mode (in-memory, graph,
+  persistent, composite). Because the captured payload may contain sensitive
+  session-memory content, keep `prompt.log` (gitignored alongside `llm.log`)
+  out of the repository and handle it with care.
 
 ## Plan-execution loop wiring
 
@@ -415,6 +422,7 @@ npm run test:graph-memory       # graph module: node upsert, chain edges, getCon
 npm run test:persistent-memory  # persistent module: contract, summarizer, persist, finalize, fail-safe, factory
 npm run test:composite-memory   # concatenation composite: ordering, separators, failure handling, finalize passthrough
 npm run test:multi-turn-memory  # LLM runtime memory-context injection
+npm run test:prompt-logger      # prompt.log writer (--log-prompts)
 npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts, persistent.ts, compositeMemory.ts
 ```
 

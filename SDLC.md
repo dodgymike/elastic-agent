@@ -98,6 +98,14 @@ The model returns a structured JSON review result:
 Every LLM prompt and response (planning, execution, replanning, review planning,
 review, and JSON retries) is recorded to `llm.log` in full, without truncation.
 
+Prompt logging is opt-in. Pass `--log-prompts` (or set `PROMPT_LOG_PATH` to
+override the path) to append **every** LLM prompt — including the finalized
+`messages` array with any injected session-memory context — to `prompt.log` in
+the working directory. This covers all memory modes (in-memory, graph,
+persistent, composite). Because the captured payload can include sensitive
+session-memory content, `prompt.log` should be handled with care and kept out
+of the repository (`prompt.log` is gitignored alongside `llm.log`).
+
 ## Constants
 
 | Constant            | Default | Meaning                                  |
