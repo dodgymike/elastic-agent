@@ -8,6 +8,15 @@
  * reached the "fighting" threshold, and report execution feedback / applied
  * plan changes through an injectable status reporter.
  *
+ * In addition to the plan/step shaping helpers it also owns a set of small,
+ * deterministic pure formatters the CLI re-uses during execution and review:
+ * token-usage math (tokenCount / getCachedTokens / usageSummary / totalUsage),
+ * a tool-call summarizer for the compact history tldr (summarizeToolCall), the
+ * tools-available prompt section (buildToolsAvailablePrompt), and the
+ * review-summary formatters (formatExecutedSteps / formatLearnings /
+ * summarizeReview). Keeping these pure in this module lets them be unit tested
+ * without booting the CLI and keeps main.ts focused on orchestration.
+ *
  * Design notes:
  *  - Every helper is a pure function except the two reporting helpers, which
  *    take a `PlanHandlerReporter` (a structural subset of the `status`
@@ -21,7 +30,7 @@
  *    the deterministic, dependency-light plan/step logic.
  */
 
-import { truncate } from "./tool-renderer.js";
+import { truncate, stringify } from "./tool-renderer.js";
 
 /** The default handler for a revised-plan step count (mirrors main.ts). */
 export const DEFAULT_MAX_REVISED_PLAN_STEPS = 50;
@@ -177,4 +186,75 @@ export function reportAppliedPlanChanges(appliedChanges: ExecutionFeedbackChange
     for (const rejected of appliedChanges.rejectedPlanUpdates) {
         status.warning(`Skipped suggested update for step ${rejected.step}: ${rejected.reason}`, hierarchyIndent("contentInStep"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Small deterministic formatters (usage math, tool summary, and review
+// summaries) kept here as pure functions so main.ts stays focused on
+// orchestration and they can be unit tested without booting the CLI.
+// ---------------------------------------------------------------------------
+
+/** A numeric token count; any non-finite value (e.g. a missing usage field) is 0. */
+export function tokenCount(value: unknown): number {
+    return Number.isFinite(value) ? (value as number) : 0;
+}
+
+/** The number of cached input tokens for a usage object (0 when absent). */
+export function getCachedTokens(usage: any): number {
+    return tokenCount(usage?.input_tokens_details?.cached_tokens);
+}
+
+/** A compact usage summary: total, cached, and total minus cached. */
+export function usageSummary(usage: any): { total: number; cached: number; totalMinusCache: number } {
+    const total = tokenCount(usage?.total_tokens);
+    const cached = getCachedTokens(usage);
+    return { total, cached, totalMinusCache: total - cached };
+}
+
+/** Sum an array of usage summaries into a single aggregate. */
+export function totalUsage(tokenUsage: any[]): { total: number; cached: number; totalMinusCache: number } {
+    return tokenUsage.reduce(
+        (sum: { total: number; cached: number; totalMinusCache: number }, usage: any) => ({
+            total: sum.total + tokenCount(usage.total_tokens),
+            cached: sum.cached + tokenCount(usage.cached_tokens),
+            totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache),
+        }),
+        { total: 0, cached: 0, totalMinusCache: 0 },
+    );
+}
+
+/** A one-line summary of a tool call for the compact history tldr. */
+export function summarizeToolCall(name: unknown, toolArguments: unknown, toolResponse: unknown): string {
+    return truncate(`${name}(${truncate(stringify(toolArguments), 160)}) → ${truncate(stringify(toolResponse), 240)}`, 480);
+}
+
+/** Render the tools-available prompt section (repo-relative usage prompt filenames). */
+export function buildToolsAvailablePrompt(tools: any[]): string {
+    const lines = tools
+        .map((tool) => `${tool.name} - usage prompt: ${tool.usage_prompt ?? "(none)"}`)
+        .join("\n");
+    return `Tools available:\n${lines}`;
+}
+
+/** Render the completed-steps recap used by the review prompt ("(none)" when empty). */
+export function formatExecutedSteps(completedSteps: any[]): string {
+    if (!Array.isArray(completedSteps) || completedSteps.length === 0) return "(none)";
+    return completedSteps.map((entry) => `${entry.step}. ${entry.text}`).join("\n");
+}
+
+/** Render the review learnings recap used by the review prompt ("(none)" when empty). */
+export function formatLearnings(learnings: any[]): string {
+    if (!Array.isArray(learnings) || learnings.length === 0) return "(none)";
+    return learnings.map((learning: unknown, index: number) => `${index + 1}. ${learning}`).join("\n");
+}
+
+/**
+ * Build a concise summary of a happy review for use in the review commit message.
+ * When the review carried learnings, those are used; otherwise the generic
+ * "review passed" summary is returned.
+ */
+export function summarizeReview(review: { passed: boolean; reasons?: string[]; learnings?: string[] } | undefined): string {
+    const learnings = Array.isArray(review?.learnings) ? review.learnings.filter(Boolean) : [];
+    if (learnings.length > 0) return truncate(learnings.join("; "), 160);
+    return "completed work passed all four review criteria";
 }

@@ -38,10 +38,19 @@ import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { parsePlanOrAbort, planStepsFromObject } from "./prompt-parser.js";
 import {
     applyExecutionFeedback,
+    buildToolsAvailablePrompt,
     fightingDenialCount,
+    formatExecutedSteps,
+    formatLearnings,
     formatPlan,
+    getCachedTokens,
     reportAppliedPlanChanges,
     reportExecutionFeedback,
+    summarizeReview,
+    summarizeToolCall,
+    tokenCount,
+    totalUsage,
+    usageSummary,
 } from "./plan-handler.js";
 import { indent, printPlan } from "./plan-printer.js";
 import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
@@ -897,20 +906,12 @@ const tools = [
     },
 ];
 
-/**
- * Render the tools-available prompt section. Each tool is listed together with
- * its repository-relative usage prompt filename (for example
- * tools/read-usage.md) so the model can load that file through the ordinary
- * Read tool. The section is injected into prompts whose LLM request also
- * carries the native tool definitions.
- */
-function buildToolsAvailablePrompt(tools) {
-    const lines = tools
-        .map((tool) => `${tool.name} - usage prompt: ${tool.usage_prompt ?? "(none)"}`)
-        .join("\n");
-    return `Tools available:\n${lines}`;
-}
-
+// The tools-available prompt section is built by buildToolsAvailablePrompt
+// (moved to ./plan-handler.js with the other pure formatters). It lists each
+// tool together with its repository-relative usage prompt filename (for
+// example tools/read-usage.md) so the model can load that file through the
+// ordinary Read tool. The section is injected into prompts whose LLM request
+// also carries the native tool definitions.
 const toolsAvailable = buildToolsAvailablePrompt(tools);
 
 /**
@@ -954,14 +955,9 @@ function renderToolCallFailed(toolCall, error) {
 function appendHistory(history, value) { history.push(value); if (history.length > historyLimit) history.splice(0, history.length - historyLimit); }
 // renderPrompt and buildPrompt live in ./prompt-builder.js so the prompt
 // flag-state gating can be unit tested without booting the side-effectful CLI.
-function summarizeToolCall(name, toolArguments, toolResponse) { return truncate(`${name}(${truncate(stringify(toolArguments), 160)}) → ${truncate(stringify(toolResponse), 240)}`, 480); }
-
-function tokenCount(value) { return Number.isFinite(value) ? value : 0; }
-function getCachedTokens(usage) { return tokenCount(usage?.input_tokens_details?.cached_tokens); }
-function usageSummary(usage) { const total = tokenCount(usage?.total_tokens); const cached = getCachedTokens(usage); return { total, cached, totalMinusCache: total - cached }; }
-function totalUsage(tokenUsage) {
-    return tokenUsage.reduce((sum, usage) => ({ total: sum.total + tokenCount(usage.total_tokens), cached: sum.cached + tokenCount(usage.cached_tokens), totalMinusCache: sum.totalMinusCache + tokenCount(usage.total_minus_cache) }), { total: 0, cached: 0, totalMinusCache: 0 });
-}
+// summarizeToolCall and the token-usage math (tokenCount/getCachedTokens/
+// usageSummary/totalUsage) live in ./plan-handler.js with the other pure
+// formatters.
 class CompatibleResponseWrapper {
     response: any;
     constructor(response) { this.response = response; }
@@ -1208,24 +1204,8 @@ function parseReviewResult(text) {
         return { valid: false, reason: `Review JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
     }
 }
-function formatExecutedSteps(completedSteps) {
-    if (!Array.isArray(completedSteps) || completedSteps.length === 0) return "(none)";
-    return completedSteps.map((entry) => `${entry.step}. ${entry.text}`).join("\n");
-}
-function formatLearnings(learnings) {
-    if (!Array.isArray(learnings) || learnings.length === 0) return "(none)";
-    return learnings.map((learning, index) => `${index + 1}. ${learning}`).join("\n");
-}
-/**
- * Build a concise summary of a happy review for use in the review commit message.
- * When the review carried learnings, those are used; otherwise the generic
- * "review passed" summary is returned.
- */
-function summarizeReview(review: { passed: boolean; reasons?: string[]; learnings?: string[] } | undefined) {
-    const learnings = Array.isArray(review?.learnings) ? review.learnings.filter(Boolean) : [];
-    if (learnings.length > 0) return truncate(learnings.join("; "), 160);
-    return "completed work passed all four review criteria";
-}
+// formatExecutedSteps / formatLearnings / summarizeReview live in
+// ./plan-handler.js with the other pure review/usage formatters.
 /**
  * Issue the review prompt to the model and return a validated review result.
  * If the response is not valid JSON, append the parsing error and issue a
