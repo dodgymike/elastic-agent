@@ -106,6 +106,14 @@ program
     .option("--agent-source-dir <dir>", "Agent source directory whose files may be edited (default: resolved agent source directory)")
     .option("--start-dir <dir>", "Starting directory whose files may be edited (default: runtime working directory)")
     .option("--allow-agent-source-modifications", "Allow edit-capable tools to modify files inside the agent source and start directories", false)
+    .option("-q, --quiet", "Suppress non-essential output (tool call params/results, plan summaries, TLDR, status messages); keep 'Step N started' and 'Step N finished' messages", false)
+    .option("--very-quiet", "Suppress all standard output on success; only a catastrophic/fatal error may print (overrides --quiet)", false)
+    .addHelpText("after", `
+Output verbosity:
+  --quiet / -q     show only step start/finish messages plus fatal errors.
+  --very-quiet     suppress all standard output on success; takes precedence over --quiet.
+  The short form -qq is equivalent to --very-quiet.
+`)
     .addHelpText("after", `
 Provider selection:
   --provider <provider-id> takes precedence over LLM_PROVIDER.
@@ -118,8 +126,26 @@ Selected-provider configuration:
 
 Credentials must be supplied through the runtime environment or secret manager, never command-line arguments or source control.
 `);
-program.parse(process.argv);
+// The short form -qq is not expressible as a distinct commander short flag
+// (commander treats one-char short flags, so -qq would collapse to -q -q ==
+// --quiet). Translate the exact token before parsing so -qq behaves exactly
+// like --very-quiet while -q continues to mean --quiet.
+const cliArgs = process.argv.map((arg) => (arg === "-qq" ? "--very-quiet" : arg));
+program.parse(cliArgs);
 const options = program.opts();
+// Output-verbosity flags, resolved once here so the output-filtering logic
+// (quiet/very-quiet modes) shares a single source of truth. Both default to
+// false. --very-quiet takes precedence over --quiet: when both are requested
+// the stronger very-quiet mode wins (it suppresses everything on success, so
+// the quieter/quieter split below stays consistent with that precedence).
+const verbosity = {
+    quiet: options.quiet === true,
+    veryQuiet: options.veryQuiet === true,
+};
+// Effective write gate for standard output. veryQuiet overrides quiet: when
+// veryQuiet is active nothing may print on success, so `quiet` (which would
+// still allow step start/finish lines) must not apply.
+const outputVerbose = !verbosity.veryQuiet && !verbosity.quiet;
 // The prompt is mutable so loop mode can re-enter planning with a relevant
 // Agent Bus message as the new work order (see runAgentReplanLoop / step 5 of
 // the loop-mode plan). The first execution uses the CLI positional prompt.
