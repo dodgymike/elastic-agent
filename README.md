@@ -1,0 +1,204 @@
+# elastic-agent — Memory Module
+
+This document describes the **memory module** introduced into the elastic-agent
+runtime: its transport-agnostic interface, the default in-memory implementation,
+how modules are swapped and chained via dependency injection, and how it
+integrates with the LLM runtime and the plan-execution loop.
+
+> The module lives under `memory/` and backs the runtime's in-process,
+> LLM-summarized memory. It is distinct from the legacy file/sqlite memory
+> sinks that `MEMORY_INVENTORY.md`, `MEMORY_WORKFLOW.md`, and the `MEMORY_*.md`
+> family describe. See [Relationship to legacy memory](#relationship-to-legacy-memory).
+
+## Overview
+
+A `MemoryModule` is the durable/episodic store that records what the agent did
+while executing a plan and summarizes it so later turns — and the LLM's prompts
+— can reuse relevant context instead of rediscovering it. It pairs with the LLM
+adapters in `llm/` but is transport-agnostic: the same interface can back an
+in-memory store, a file store, a SQLite store, or a remote service.
+
+Two clear responsibilities:
+
+1. **Remember** — `remember({ context, actions, outcome, reasoning, ... })`
+   records one completed plan step.
+2. **Recall** — `getContext({ session_id, ... })` returns a concise,
+   LLM-ready summary the prompt builder can inject into the next prompt.
+
+The interface is deliberately free of provider SDK objects, credentials,
+storage backends, and transport-specific payloads, so a `MemoryModule` can be
+**swapped** (dependency-injected) or **chained** (delegated) without changing
+the execution flow of the agent.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `memory/types.ts` | The transport-agnostic contract: `MemoryModule`, `MemoryContext`, `RememberInput`, `ContextRequest`, `MemoryContextResult`, `MemoryModuleFactory`. |
+| `memory/inMemory.ts` | `InMemoryMemoryModule` (the default store), its `MemorySummarizer` type, the default renderer, `mergeContextResults`, and the `createInMemoryMemoryModule` factory. |
+| `test/memory.test.ts` | Focused tests: interface conformance, in-memory store + summarizer, chaining, LLM integration, remember-after-step. |
+| `test/multi-turn-memory.test.ts` | Tests for the LLM runtime memory-context injection. |
+
+## The interface (`memory/types.ts`)
+
+```ts
+interface MemoryModule {
+  remember(input: RememberInput): Promise<void>;
+  getContext(request: ContextRequest): Promise<MemoryContextResult>;
+}
+```
+
+Key shapes:
+
+- **`MemoryContext`** — `session_id` (required), optional `user_id`,
+  `plan`, `planState`, and free-form `context`. It identifies the conversation
+  and places a step within the running plan. `plan`/`planState` are opaque
+  (`unknown`) so the contract stays agnostic to any specific plan data model.
+- **`RememberInput`** — wraps `context`, the `actions` the step performed
+  (`MemoryAction[]`), the `outcome` (`"completed" | "failed" | "aborted" |
+  "skipped" | "unknown"`), optional `outcomeDetail`, `reasoning`, `timestamp`,
+  and `extra`.
+- **`ContextRequest`** — `session_id`, optional `user_id`/`plan`, a
+  `maxChars` budget hint, and free-form `hints`.
+- **`MemoryContextResult`** — `text` (an LLM-ready summary), `matchedContexts`
+  (structured provenance for chaining/audit), and `hasMemory`.
+
+The contract is **transport-agnostic**: `MemoryJsonObject`/`MemoryJsonValue`
+mirror the JSON subset used by the LLM adapter contract so memory payloads can
+round-trip through any transport without lossy conversions.
+
+## The in-memory implementation (`memory/inMemory.ts`)
+
+`InMemoryMemoryModule` is the reference/default `MemoryModule`. It keeps an
+ordered history of remembered plan steps in process memory (per session) and,
+when a summarizer is injected, calls it after every `remember()` to refresh a
+concise summary of everything seen so far. That summary is what `getContext()`
+returns.
+
+- **Summarizer injection** — the summarizer is a plain
+  `MemorySummarizer = (input: MemorySummarizeInput) => Promise<string>`
+  function. Any caller can supply an LLM-backed summarizer, a heuristic
+  summarizer, or a test stub — no SDK coupling.
+- **Default renderer** — when no summarizer is injected,
+  `defaultHistorySummarizer` renders a readable, deterministic history so
+  `getContext()` still returns useful context.
+- **Chaining** — an optional `delegate` `MemoryModule` receives forwarded
+  `remember()`/`getContext()` calls so several stores can be composed (e.g. an
+  in-memory cache in front of a durable backend). `getContext()` merges own and
+  delegated results via `mergeContextResults` (de-duplicating provenance).
+- **Swappable** — `createInMemoryMemoryModule(options)` is a
+  `MemoryModuleFactory` so the store can be constructed/swapped via dependency
+  injection without coupling callers to the concrete class.
+- **Fail-safe** — `remember()`/`getContext()` never reject because of a
+  summarizer or delegate failure; the first failure is recorded on
+  `lastFailure` (a `MemoryFailureReport`) and surfaced to the caller, which the
+  plan loop treats as non-fatal. `remember()` never throws to abort the loop.
+- **Per-session isolation** — history and summary are keyed by `session_id`;
+  sessions do not leak into each other.
+
+### Example: construct, remember, recall
+
+```ts
+import { InMemoryMemoryModule } from "./memory/inMemory.js";
+import type { RememberInput } from "./memory/types.js";
+
+// No summarizer injected → the default renderer is used.
+const memory = new InMemoryMemoryModule();
+
+await memory.remember({
+  context: { session_id: "run-abc", user_id: "task-1", plan: "Plan: do work." },
+  actions: [{ name: "plan-step-1", description: "read CLAUDE.md" }],
+  outcome: "completed",
+  reasoning: "Read the project instructions before acting.",
+  timestamp: new Date().toISOString(),
+});
+
+const ctx = await memory.getContext({ session_id: "run-abc" });
+console.log(ctx.text);       // the summarized history (LLM-ready)
+console.log(ctx.hasMemory);  // true
+```
+
+### Example: chain and swap via the factory
+
+```ts
+import { createInMemoryMemoryModule } from "./memory/inMemory.js";
+import type { MemoryModule } from "./memory/types.js";
+
+// A durable backend that also implements MemoryModule.
+const durableBackend: MemoryModule = /* ... */;
+
+// A chain: in-memory cache in front of the durable backend.
+const memory = createInMemoryMemoryModule({ delegate: durableBackend });
+
+// Swap wherever the runtime constructs memory — the plan loop and LLM
+// integration only see the MemoryModule interface, so the backend can be
+// replaced without touching the execution flow.
+```
+
+## LLM integration
+
+`MultiTurnLlmRuntime` (in `llm/multi-turn-runtime.ts`) accepts an optional
+`MemoryModule` plus a session id. Before generating an initial (non-continuation)
+completion it calls `memory.getContext({ session_id })`; when the store returns
+summarized context, it prepends a labeled block to the user input:
+
+```
+[SESSION MEMORY — additional context remembered from earlier in this session]
+<summarized context>
+
+<original prompt>
+```
+
+Integration details:
+
+- **Optional / backward compatible** — a runtime constructed with only
+  `adapter`/`model`/`signal` behaves exactly as before; memory is attached via
+  the constructor options or at runtime via `attachMemory(memory, sessionId)`.
+- **Initial turn only** — memory context is injected only on the initial turn
+  of a phase/step, never on tool continuations (which reuse their stored
+  messages).
+- **Fail-safe** — a rejected `getContext()` leaves the prompt unchanged and
+  reports the failure as a non-fatal diagnostic; the agent loop continues.
+
+## Plan-execution loop wiring
+
+`main.ts` wires the module end-to-end:
+
+1. On startup it derives a per-run `agentSessionId` (`run-${randomUUID()}`) and
+   creates the in-memory store via `createInMemoryMemoryModule(options)` —
+   swappable via dependency injection. `ELAGENT_MEMORY_DISABLE=1` opts out
+   entirely (fail-open): the plan loop and LLM prompts run exactly as before.
+2. The runtime is constructed with `{ memory: agentMemory, sessionId:
+   agentSessionId }`, so each initial LLM prompt is prefixed with recalled
+   context.
+3. After each plan step completes, `rememberAgentStep(...)` calls
+   `agentMemory.remember({ context: { session_id, user_id, plan, planState },
+   actions, outcome, outcomeDetail, reasoning, timestamp })`, once per step,
+   never throwing. The input is built from plan/execution metadata already in
+   the loop — never from `data.json` or secret payloads — so it is safe to
+   persist even where a durable backend later stores it.
+
+The integration is **optional and fail-safe**: if memory is disabled, the
+summarizer/delegate throws, or `remember()`/`getContext()` fails, the LLM
+prompts and the plan loop proceed unchanged with a single non-fatal warning.
+
+## Tests
+
+```sh
+npm run test:memory             # interface, in-memory, chaining, LLM, remember-after-step
+npm run test:multi-turn-memory  # LLM runtime memory-context injection
+npm run build                   # includes memory/types.ts and memory/inMemory.ts
+```
+
+## Relationship to legacy memory
+
+The `MEMORY_*.md` family (`MEMORY_INVENTORY.md`, `MEMORY_WORKFLOW.md`,
+`MEMORY_ADOPTION_AND_MIGRATION.md`, `MEMORY_FILE_LAYOUT.md`,
+`MEMORY_RETRIEVAL_AND_CONSOLIDATION.md`, `MEMORY_ROLLOUT_SCOPE.md`,
+`MEMORY_WRITE_POLICY.md`) documents the pre-existing, file/sqlite-based memory
+workstream driven from `data.json` — a write-only persistence sink with no
+startup load, validation, retrieval, or consolidation. The memory module
+described here is a **new, separate** in-process store: it has a defined
+transport-agnostic interface, an in-memory implementation with LLM
+summarization, is swappable/chainable, and integrates directly with the plan
+loop and LLM prompts.
