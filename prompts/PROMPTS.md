@@ -223,7 +223,18 @@ The focused replanning prompt used by `attemptReplan` when a step's feedback
 requests replanning. It asks the model to replace only the remaining work
 without repeating completed steps or executing tools, and to return a concise
 numbered revised plan. The revised plan is validated by
-`actionablePlanSteps` (must contain 1–`maxRevisedPlanSteps` numbered steps).
+`actionablePlanSteps` (must contain 1–`maxRevisedPlanSteps` numbered steps) and
+by `parseReplanResponse` in `llm/replan-abort.ts`.
+
+The prompt is phase-aware. It documents the optional top-level `phase` field
+that mirrors the planner prompt (`planning-suffix.txt`): a `phase` may only be
+proposed for very-high-complexity plans that genuinely span multiple phases and
+multiple steps, and when present it must be a non-empty string or integer. The
+prompt states that proposing a **different** phase than the current one causes a
+full restart (executed progress is abandoned and the whole plan restarts from
+the first step), while changing individual tasks or revising steps **within** the
+current phase does not restart the plan. The current phase is injected via
+`${currentPhase}` (rendered as `"(none)"` when the plan has no phase).
 
 Interpolation points:
 
@@ -234,6 +245,7 @@ Interpolation points:
 | `${JSON.stringify(feedback)}` | the validated feedback object |
 | `${toolFindings}` | recent tool-result TLDRs |
 | `${formatPlan(remainingSteps)}` | formatted remaining steps |
+| `${currentPhase}` | the phase the plan is currently in, or `(none)` |
 | `${...}` (as needed) | remaining interpolation via `renderPrompt` |
 
 ### `review-prompt.txt`

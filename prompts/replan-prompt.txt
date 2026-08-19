@@ -21,9 +21,30 @@ A concise, actionable revised plan containing one or more numbered steps:
   "steps": ["first revised step", "second revised step"]
 }
 
+OPTIONAL TOP-LEVEL FIELD "phase":
+- "phase" is a top-level JSON field that identifies a major stage of work with
+  its own steps (for example "phase": 1 or "phase": "design"). It mirrors the
+  top-level "phase" field in the planning prompt (planning-suffix.txt).
+- Only consider proposing a phase change for plans that have VERY HIGH
+  complexity and genuinely span multiple phases and multiple steps. For
+  low- or medium-complexity plans never add a phase.
+- When present it must be a non-empty string or integer; the value names the
+  major stage the revised steps belong to. A phase represents a major stage, not
+  an individual step, so only return it when the revised plan really starts a
+  new major stage.
+- PROPOSING A DIFFERENT PHASE CAUSES A FULL RESTART: if the current phase
+  (${currentPhase}) differs from the "phase" you return, the runtime treats your
+  revised plan as a phase-level change, abandons all executed progress, and
+  restarts the whole plan from the very first step. Use this only when a fresh
+  start is genuinely required.
+- Changing individual tasks or revising the steps WITHIN the current phase does
+  NOT restart the whole plan. To edit just the remaining work, return only
+  "steps" and leave "phase" absent (or return the same phase value). In that
+  case the runtime replaces only the remaining steps and continues in place.
+
 If you cannot honestly produce a usable revised plan, do NOT invent one. Instead return exactly:
 {
   "abort": true,
   "reason": "why no usable revised plan could be produced"
 }
-When "abort" is true, "reason" must be a non-empty string. If both "steps" and "abort": true are present, "abort": true wins.
+When "abort" is true, "reason" must be a non-empty string. If both "steps" and "abort": true are present, "abort": true wins. If both a different "phase" and "abort": true are present, "abort": true wins.

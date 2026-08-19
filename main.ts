@@ -1171,7 +1171,8 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
     status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`, hierarchyIndent("contentInStep"));
     const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
-    const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps });
+    const currentPhase = configData.planPhase === undefined ? "(none)" : String(configData.planPhase);
+    const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps, currentPhase });
     let lastFailure = "unknown";
     try {
         for (let parseAttempt = 0; parseAttempt <= maxReplanParseRetries; parseAttempt += 1) {
