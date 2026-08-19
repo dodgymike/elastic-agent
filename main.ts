@@ -41,9 +41,12 @@ import {
 } from "./memory/graph-memory.js";
 import {
     createPersistentMemoryModule,
-    PersistentMemoryModule,
     type PersistentMemoryOptions,
 } from "./memory/persistent.js";
+import {
+    createCompositeMemoryModule,
+    type FinalizableMemoryModule,
+} from "./memory/compositeMemory.js";
 import type {
     MemoryAction,
     MemoryJsonValue,
@@ -268,8 +271,16 @@ let agentSessionId: string;
     // chain in the future) without the need to create a module.
     //
     // ELAGENT_MEMORY_TYPE selects the backend:
-    //   - (unset / anything else) -> the default in-memory MemoryModule
-    //     (createInMemoryMemoryModule), unchanged from prior behavior.
+    //   - (unset / "persistent") -> the default persistent MemoryModule
+    //     (createPersistentMemoryModule), which records plan steps in process
+    //     memory exactly like the in-memory module AND persists + summarises
+    //     the full session to a durable per-session file when finalize() is
+    //     called at end of plan (see finalizePersistentMemory below). It keeps
+    //     the same remember()/getContext() contract; ELAGENT_MEMORY_OUTPUT_DIR
+    //     (or ELAGENT_MEMORY_OUTPUT_PATH) selects where the documents land.
+    //   - "in-memory" -> the volatile in-process in-memory MemoryModule
+    //     (createInMemoryMemoryModule), unchanged from prior behavior; useful
+    //     when an operator does not want end-of-plan persistence.
     //   - "graph" -> the graph-backed GraphMemoryModule
     //     (createGraphMemoryModule), which models each plan step as graph
     //     nodes/typed edges so later turns can retrieve a chain of related
@@ -280,13 +291,14 @@ let agentSessionId: string;
     //     summarizer via the factory options; absent an LLM backend the module
     //     falls back to its deterministic chain renderer, exactly as the
     //     in-memory module falls back to defaultHistorySummarizer).
-    //   - "persistent" -> the PersistentMemoryModule
-    //     (createPersistentMemoryModule), which records plan steps in process
-    //     memory exactly like the in-memory module AND persists + summarises
-    //     the full session to a durable per-session file when finalize() is
-    //     called at end of plan (see finalizePersistentMemory below). It keeps
-    //     the same remember()/getContext() contract; ELAGENT_MEMORY_OUTPUT_DIR
-    //     (or ELAGENT_MEMORY_OUTPUT_PATH) selects where the documents land.
+    //   - "concat" | "both" -> concatenation mode: a CompositeMemoryModule
+    //     (createCompositeMemoryModule) wraps the durable persistent store as
+    //     primary and the in-memory store as secondary, so remember() updates
+    //     BOTH stores and getContext() concatenates their labelled context
+    //     (durable first, then in-memory). finalize() forwards to the durable
+    //     primary at end of plan (see finalizePersistentMemory below) while the
+    //     volatile in-memory secondary keeps short-term context live across
+    //     turns within this process.
     const disabled =
         process.env.ELAGENT_MEMORY_DISABLE === "1" ||
         process.env.ELAGENT_MEMORY_DISABLE === "true";
@@ -296,15 +308,33 @@ let agentSessionId: string;
     } else if (memoryType === "graph") {
         const graphOptions: GraphMemoryOptions = {};
         agentMemory = createGraphMemoryModule(graphOptions);
-    } else if (memoryType === "persistent") {
+    } else if (memoryType === "in-memory") {
+        const memoryOptions: InMemoryMemoryOptions = {};
+        agentMemory = createInMemoryMemoryModule(memoryOptions);
+    } else if (memoryType === "concat" || memoryType === "both") {
+        // Concatenation mode: durable persistent (primary) + in-memory
+        // (secondary). Both inner modules receive the same remember() input and
+        // the same session/user context; getContext() concatenates their
+        // labelled summaries. The composite's finalize() passthrough lets the
+        // durable primary flush at end of plan.
+        const persistentOptions: PersistentMemoryOptions = {
+            outputDir: process.env.ELAGENT_MEMORY_OUTPUT_DIR,
+            filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
+        };
+        const memoryOptions: InMemoryMemoryOptions = {};
+        agentMemory = createCompositeMemoryModule({
+            primary: createPersistentMemoryModule(persistentOptions),
+            secondary: createInMemoryMemoryModule(memoryOptions),
+            headers: { primary: "persistent memory", secondary: "in-memory memory" },
+        });
+    } else {
+        // Default backend: persistent (disk-backed) memory when ELAGENT_MEMORY_TYPE
+        // is unset or explicitly "persistent".
         const persistentOptions: PersistentMemoryOptions = {
             outputDir: process.env.ELAGENT_MEMORY_OUTPUT_DIR,
             filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
         };
         agentMemory = createPersistentMemoryModule(persistentOptions);
-    } else {
-        const memoryOptions: InMemoryMemoryOptions = {};
-        agentMemory = createInMemoryMemoryModule(memoryOptions);
     }
 }
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
@@ -1864,22 +1894,34 @@ async function rememberAgentStep(options: {
 }
 
 /**
- * End-of-plan memory lifecycle: when the swappable MemoryModule is a
- * PersistentMemoryModule, summarise and persist the full per-session memory to
- * a durable file. This is the "persist and summarise at end of plan" step: it
- * runs only for the persistent backend (ELAGENT_MEMORY_TYPE=persistent) and is
- * a no-op for the in-memory and graph modules (which keep their store solely in
- * process memory). Fail-safe: a finalize() failure is reported as a non-fatal
- * warning and never aborts or changes the plan's completion.
+ * End-of-plan memory lifecycle: when the swappable MemoryModule exposes an
+ * end-of-plan finalize (a `PersistentMemoryModule`, or a
+ * `CompositeMemoryModule`/concatenation wrapper whose durable primary does),
+ * summarise and persist the full per-session memory to a durable file. This is
+ * the "persist and summarise at end of plan" step: it runs for the persistent
+ * backend (ELAGENT_MEMORY_TYPE=persistent or unset) and for concatenation
+ * (ELAGENT_MEMORY_TYPE=concat|both, via the composite's finalize passthrough),
+ * and is a no-op for the in-memory and graph modules (which keep their store
+ * solely in process memory). Fail-safe: a finalize() failure is reported as a
+ * non-fatal warning and never aborts or changes the plan's completion.
  *
- * The persisted payload is built by PersistentMemoryModule from the same
+ * The persisted payload is built by the durable module from the same
  * non-secret episodic data remember() already carried (session id, step
  * actions, outcome, reasoning, plan label), so nothing secret is written.
  */
 async function finalizePersistentMemory(): Promise<void> {
-    if (!agentMemory || !(agentMemory instanceof PersistentMemoryModule)) return;
+    if (!agentMemory) return;
+    // The base MemoryModule interface has no finalize(); only durable modules
+    // (PersistentMemoryModule) and the composite concatenation wrapper expose
+    // it. Detect by capability so both the direct persistent backend and the
+    // concat wrapper (whose primary is persistent) are persisted at end of plan.
+    const finalizable = agentMemory as Partial<FinalizableMemoryModule>;
+    if (typeof finalizable.finalize !== "function") return;
     try {
-        const path = await agentMemory.finalize(agentSessionId);
+        const result = await finalizable.finalize(agentSessionId);
+        const path = typeof result === "string" && result.length > 0
+            ? result
+            : "end-of-plan memory";
         status.success(`Persisted end-of-plan memory to ${path}`);
     } catch (error) {
         status.warning(`End-of-plan memory finalize failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
