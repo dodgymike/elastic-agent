@@ -31,7 +31,17 @@ import {
 import { detectDocker, describeDockerDetection } from "./docker-detection.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
-import type { MemoryModule } from "./memory/types.js";
+import {
+    createInMemoryMemoryModule,
+    type InMemoryMemoryOptions,
+} from "./memory/inMemory.js";
+import type {
+    MemoryAction,
+    MemoryJsonValue,
+    MemoryModule,
+    MemoryOutcomeStatus,
+    RememberInput,
+} from "./memory/types.js";
 import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-necessity.js";
 import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
@@ -229,12 +239,34 @@ process.on("SIGTERM", () => {
 });
 let client: MultiTurnLlmRuntime;
 // Module-level swappable MemoryModule + session id for LLM prompt context.
-// Step 5 instantiates the in-memory store and calls remember() after each plan
-// step; the runtime reads getContext() to inject summarized context into
-// prompts. Both are optional/fail-safe: with no memory attached the LLM prompts
-// proceed unchanged.
-let agentMemory: MemoryModule | null = null;
-let agentSessionId: string | undefined;
+// We instantiate the in-memory store here (swappable via dependency injection:
+// an operator could supply a different MemoryModule factory / delegating chain
+// in the future) and derive a stable session id for this process run. The plan
+// execution loop calls agentMemory().remember() after every plan step (see
+// rememberAgentStep below), and the LLM runtime reads getContext() to inject
+// the summarized context back into subsequent prompts. The integration is
+// optional and fail-safe: if memory cannot be attached (or a remember() call
+// fails) the LLM prompts and plan loop proceed unchanged.
+let agentMemory: MemoryModule | null;
+let agentSessionId: string;
+{
+    // A dedicated per-run session id scopes this run's remembered context.
+    agentSessionId = `run-${randomUUID()}`;
+    // ELAGENT_MEMORY_DISABLE=1 opts out entirely (fail-open): the plan loop
+    // and LLM prompts run exactly as they did before this integration. When
+    // enabled, the in-memory MemoryModule is created here (swappable via
+    // dependency injection — an operator could supply a different factory or a
+    // delegating chain in the future) without the need to create a module.
+    const disabled =
+        process.env.ELAGENT_MEMORY_DISABLE === "1" ||
+        process.env.ELAGENT_MEMORY_DISABLE === "true";
+    if (disabled) {
+        agentMemory = null;
+    } else {
+        const memoryOptions: InMemoryMemoryOptions = {};
+        agentMemory = createInMemoryMemoryModule(memoryOptions);
+    }
+}
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
 const dataFilename = "/tmp/data.json";
 const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
@@ -1709,6 +1741,88 @@ async function dispatchToolCall(output, configData, goalKey) {
     }
 }
 
+/**
+ * Normalize a step's execution-feedback `stepStatus` (completed / partial /
+ * blocked / failed) into the memory contract's outcome status
+ * (completed / failed / aborted / skipped / unknown). Unknown/partial values
+ * map conservatively: anything that is not a plain success is recorded as
+ * failed so the summary reflects that the step did not fully complete.
+ */
+function memoryOutcomeFromFeedback(stepStatus: string): MemoryOutcomeStatus {
+    switch (stepStatus) {
+        case "completed":
+            return "completed";
+        case "partial":
+        case "failed":
+            return "failed";
+        case "blocked":
+            return "aborted";
+        default:
+            return "unknown";
+    }
+}
+
+/**
+ * Record one completed plan (or direct) step into the swappable MemoryModule.
+ *
+ * Step 5 of the memory integration: the agent plan-execution loop calls this
+ * after every plan step completes so the in-memory store (and anything chained
+ * behind it via a delegate) records what the agent did. The LLM runtime reads
+ * getContext() back out on the next initial turn and injects the summarized
+ * context into the prompt.
+ *
+ * The call is fail-safe and explicitly non-fatal: if memory is disabled, the
+ * summarizer/delegate throws, or remember() rejects, the plan loop continues
+ * unchanged and a single non-fatal warning is surfaced. The input is built
+ * from plan/execution metadata already in the loop (never from data.json or
+ * secret payloads), so it is safe to persist even where a durable backend
+ * later stores it.
+ */
+async function rememberAgentStep(options: {
+    /** Zero-based plan step index (unused for direct single-step run). */
+    readonly index: number;
+    /** The plan step text that was executed. */
+    readonly step: string;
+    /** The formatted plan the step belongs to (opaque to memory). */
+    readonly plan: string;
+    /** Opaque snapshot of the current plan execution state. */
+    readonly planState: unknown;
+    /** The normalized how-it-ended status. */
+    readonly outcome: MemoryOutcomeStatus;
+    /** Optional free-form details about the outcome (error, result, etc.). */
+    readonly outcomeDetail?: unknown;
+    /** The step's reasoning/result narrative (from feedback, when valid). */
+    readonly reasoning?: string;
+}): Promise<void> {
+    if (!agentMemory) return;
+    const actions: MemoryAction[] = [
+        {
+            name: `plan-step-${options.index + 1}`,
+            description: options.step.slice(0, 500),
+        },
+    ];
+    const input: RememberInput = {
+        context: {
+            session_id: agentSessionId,
+            user_id: runMode.mode === "task" ? runMode.taskId : undefined,
+            plan: options.plan,
+            planState: options.planState,
+            context: { step: options.index + 1 },
+        },
+        actions,
+        outcome: options.outcome,
+        // outcomeDetail is serialized as a portable JSON value by the store.
+        outcomeDetail: options.outcomeDetail as MemoryJsonValue | undefined,
+        reasoning: options.reasoning,
+        timestamp: new Date().toISOString(),
+    };
+    try {
+        await agentMemory.remember(input);
+    } catch (error) {
+        status.warning(`Memory remember() failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
 async function executePlanStep(step, index, steps, plan, configData, executionContext) {
     const color = terminalColor;
     for (const line of buildPrettyStepLines(index, steps.length, step, { color, remainingSteps: steps.slice(index + 1) })) {
@@ -1816,6 +1930,27 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             }
             const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
             configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null });
+            // Memory integration (step 5): record this completed plan step into
+            // the swappable MemoryModule. The outcome/status is derived from the
+            // step's execution feedback when it parsed; otherwise it is a plain
+            // completed step. Fail-safe: rememberAgentStep never throws, so the
+            // plan loop continues even if memory is disabled or fails.
+            await rememberAgentStep({
+                index,
+                step: executedStep,
+                plan,
+                planState: {
+                    completedSteps: configData.completedSteps?.length ?? 0,
+                    activePlanSteps: configData.activePlanSteps ?? [],
+                },
+                outcome: feedbackEntry?.valid ? memoryOutcomeFromFeedback(feedbackEntry.feedback.stepStatus) : "completed",
+                outcomeDetail: feedbackEntry?.valid
+                    ? { findings: feedbackEntry.feedback.findings ?? [] }
+                    : { invalid: true, validationError: feedbackEntry?.validationError ?? "unknown" },
+                reasoning: feedbackEntry?.valid && feedbackEntry.feedback.summary
+                    ? feedbackEntry.feedback.summary
+                    : undefined,
+            });
             if (specKeeperState?.stepTasks?.[index]) {
                 const stepStatus = feedbackEntry?.valid && feedbackEntry.feedback?.stepStatus === "blocked" ? "blocked" : "done";
                 const stepNote = feedbackEntry?.valid
@@ -2039,6 +2174,17 @@ async function runSingleStep(
                         note: directStatusNote,
                     });
                 }
+                // Memory integration (step 5): record the completed direct
+                // (no-plan) step into the swappable MemoryModule so context
+                // from it can be re-injected into later turns. Fail-safe.
+                await rememberAgentStep({
+                    index: 0,
+                    step: stepText,
+                    plan: stepText,
+                    planState: { completedSteps: 1, activePlanSteps: [stepText] },
+                    outcome: "completed",
+                    reasoning: "Direct single-step execution completed.",
+                });
                 status.success("Direct execution step completed.", hierarchyIndent("contentInStep"));
                 return;
             }
