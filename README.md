@@ -36,7 +36,10 @@ the execution flow of the agent.
 | --- | --- |
 | `memory/types.ts` | The transport-agnostic contract: `MemoryModule`, `MemoryContext`, `RememberInput`, `ContextRequest`, `MemoryContextResult`, `MemoryModuleFactory`. |
 | `memory/inMemory.ts` | `InMemoryMemoryModule` (the default store), its `MemorySummarizer` type, the default renderer, `mergeContextResults`, and the `createInMemoryMemoryModule` factory. |
+| `memory/graph-store.ts` | The logical graph schema (`GraphNode`, `GraphEdge`, `GraphAttributes`), the `GraphStore` storage interface, and the default in-memory adjacency store `InMemoryGraphStore`. |
+| `memory/graph-memory.ts` | `GraphMemoryModule` (the graph-backed store), `GraphMemoryOptions`, `createGraphMemoryModule`, the default chain renderer, and the `GraphFailureReport`. |
 | `test/memory.test.ts` | Focused tests: interface conformance, in-memory store + summarizer, chaining, LLM integration, remember-after-step. |
+| `test/graph-memory.test.ts` | Focused tests for `GraphMemoryModule`: node creation/upsert, chain edges, `getContext`, chaining, empty-input fail-safe. |
 | `test/multi-turn-memory.test.ts` | Tests for the LLM runtime memory-context injection. |
 
 ## The interface (`memory/types.ts`)
@@ -135,6 +138,77 @@ const memory = createInMemoryMemoryModule({ delegate: durableBackend });
 // replaced without touching the execution flow.
 ```
 
+## The graph-backed implementation (`memory/graph-memory.ts`)
+
+`GraphMemoryModule` is an alternative `MemoryModule` that uses the same
+transport-agnostic contract but models each remembered plan step as **graph
+nodes and typed edges**, following the logical data model in
+`GRAPH_DATA_MODEL.md` (the design is captured in `GRAPH_MEMORY_MODULE_DESIGN.md`).
+Instead of a flat per-session history, it stores:
+
+- a `plan` **entity** node, created the first time a session remembers a step
+  (upsert by session + plan reference);
+- a step `claim` node per plan step, keyed by `sessionId + stepIndex` — the
+  **step key**. Re-remembering the same session/step updates that node rather
+  than duplicating it (idempotent `upsert`);
+- typed, directed **edges**: each step `depends_on` the plan, and consecutive
+  steps in a session are linked with `depends_on` / `derived_from` so
+  `getContext()` can walk the recent chain of related steps.
+
+Actions, reasoning, and outcome detail are stored as bounded, sanitized
+labels/attributes on the step claim — never raw transcripts or secrets. The
+graph lives in process memory behind a narrow `GraphStore` interface
+(`memory/graph-store.ts`) so a persistent backend (file, SQLite, remote) can be
+swapped in later without changing `GraphMemoryModule`.
+
+- **Schema** — `GraphNode` (`entity`/`claim`, controlled `type`, status,
+  timestamps, bounded attributes) and `GraphEdge` (`depends_on`,
+  `derived_from`, `about`, `predicate`, `supports`, `supersedes`,
+  `related_to`, `scoped_to`). `GraphAttributeValue` allows scalars or bounded
+  arrays (e.g. a list of action names) without a lossy stringification.
+- **Summarizer injection** — reuses the same `MemorySummarizer` function type
+  as the in-memory module; when none is injected it falls back to a
+  deterministic `defaultChainRenderer` over the recent chain.
+- **Chaining / swapping** — `createGraphMemoryModule(options)` is a
+  `MemoryModuleFactory`, accepts an optional `delegate` (forwarded and merged
+  via `mergeContextResults`), an optional injected `store`, and honors the same
+  fail-safe semantics (`lastFailure` is a `GraphFailureReport`; failures never
+  reject).
+- **Options** — `GraphMemoryOptions`: `store`, `summarizer`, `delegate`,
+  `recentSteps` (default 5) and `maxChars` (default 2000).
+- **Interface** — identical `remember()/getContext()` contract, so every call
+  site (plan loop `rememberAgentStep`, LLM `getContext()` injection) works
+  unchanged.
+
+### How it differs from the in-memory module
+
+| Aspect | InMemoryMemoryModule | GraphMemoryModule |
+| --- | --- | --- |
+| Storage | ordered list per session | adjacency graph (nodes + typed edges) |
+| `remember()` | append + re-summarize list | upsert nodes/edges (idempotent per step key) + link chain |
+| Recall | flat per-session summary | recent chain walk + predecessor relationships |
+| Re-remember same step | duplicates an entry | updates the same node (`upsert`) |
+| Backend extension | none | `GraphStore` interface for a persistent backend |
+
+### Selecting the graph module
+
+The runtime selects the backend at startup (in `main.ts`) via the
+`ELAGENT_MEMORY_TYPE` environment variable. The default remains the in-memory
+module (`createInMemoryMemoryModule`); set it to `graph` to use
+`createGraphMemoryModule`. `ELAGENT_MEMORY_DISABLE=1/true` disables memory
+entirely for both backends.
+
+```sh
+# default: in-memory
+ELAGENT_MEMORY_TYPE=          npm run build
+
+# graph-backed
+ELAGENT_MEMORY_TYPE=graph     npm run build
+
+# disabled (fail-open)
+ELAGENT_MEMORY_DISABLE=1      npm run build
+```
+
 ## LLM integration
 
 `MultiTurnLlmRuntime` (in `llm/multi-turn-runtime.ts`) accepts an optional
@@ -165,9 +239,11 @@ Integration details:
 `main.ts` wires the module end-to-end:
 
 1. On startup it derives a per-run `agentSessionId` (`run-${randomUUID()}`) and
-   creates the in-memory store via `createInMemoryMemoryModule(options)` —
-   swappable via dependency injection. `ELAGENT_MEMORY_DISABLE=1` opts out
-   entirely (fail-open): the plan loop and LLM prompts run exactly as before.
+   selects the backend via `ELAGENT_MEMORY_TYPE` (default in-memory
+   `createInMemoryMemoryModule(options)`, or `createGraphMemoryModule(options)`
+   with `ELAGENT_MEMORY_TYPE=graph`) — swappable via dependency injection.
+   `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely (fail-open): the plan loop
+   and LLM prompts run exactly as before.
 2. The runtime is constructed with `{ memory: agentMemory, sessionId:
    agentSessionId }`, so each initial LLM prompt is prefixed with recalled
    context.
@@ -186,8 +262,9 @@ prompts and the plan loop proceed unchanged with a single non-fatal warning.
 
 ```sh
 npm run test:memory             # interface, in-memory, chaining, LLM, remember-after-step
+npm run test:graph-memory       # graph module: node upsert, chain edges, getContext, chaining, fail-safe
 npm run test:multi-turn-memory  # LLM runtime memory-context injection
-npm run build                   # includes memory/types.ts and memory/inMemory.ts
+npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts
 ```
 
 ## Relationship to legacy memory

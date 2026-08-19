@@ -52,8 +52,9 @@ A new, transport-agnostic **memory module** ships under `memory/` and is wired
 into the runtime plan loop and LLM prompts. It is separate from the legacy
 file/sqlite memory workstream documented in `MEMORY_INVENTORY.md` /
 `MEMORY_WORKFLOW.md` (a write-only sink from `data.json`). The module has a
-defined interface, an in-memory implementation with LLM summarization, and is
-swappable/chainable via dependency injection.
+defined interface, an in-memory implementation with LLM summarization, a
+graph-backed implementation, and is swappable/chainable via dependency
+injection.
 
 - **Interface** (`memory/types.ts`): `MemoryModule` with `remember(RememberInput)`
   and `getContext(ContextRequest)`. Transport-agnostic (no SDK objects or
@@ -62,6 +63,20 @@ swappable/chainable via dependency injection.
   session history, calls an injected `MemorySummarizer` after every `remember()`
   to refresh a concise summary, and falls back to `defaultHistorySummarizer`
   when none is injected. `createInMemoryMemoryModule` is the swappable factory.
+- **Graph-backed store** (`memory/graph-memory.ts` + `memory/graph-store.ts`):
+  `GraphMemoryModule` is the alternative backend that models each plan step as
+  graph nodes and typed edges (following `GRAPH_DATA_MODEL.md`; design in
+  `GRAPH_MEMORY_MODULE_DESIGN.md`). A `plan` entity node plus per-step claim
+  nodes keyed by session + step index (`upsert`, idempotent), linked with
+  `depends_on`/`derived_from` chain edges so `getContext()` walks the recent
+  chain. Reuses the same `MemorySummarizer` contract (falls back to
+  `defaultChainRenderer`), supports an injected `GraphStore` for a future
+  persistent backend, and honors the same chaining/fail-safe semantics.
+  `createGraphMemoryModule` is the swappable factory. See `README.md` for how
+  it differs from the in-memory module.
+- **Selection**: `main.ts` picks the backend with `ELAGENT_MEMORY_TYPE`
+  (default in-memory; `ELAGENT_MEMORY_TYPE=graph` selects the graph module).
+  `ELAGENT_MEMORY_DISABLE=1/true` disables memory entirely for both backends.
 - **Chaining**: an optional `delegate` forwards calls; `getContext()` merges own
   and delegated results via `mergeContextResults`. **Swapping**: the runtime
   constructs memory through the factory so the backend can be replaced without
@@ -69,15 +84,16 @@ swappable/chainable via dependency injection.
 - **LLM integration**: `MultiTurnLlmRuntime` optionally accepts a `MemoryModule`
   + session id, and prepends recalled context (via `getContext`) to the initial
   turn of each phase. `attachMemory()` can attach later; backward compatible.
-- **Plan-loop wiring**: `main.ts` creates the store at startup
-  (`ELAGENT_MEMORY_DISABLE=1` opts out) and calls `rememberAgentStep` →
-  `agentMemory.remember(...)` after every completed plan step. It is fail-safe
-  and non-fatal: disabled or failing memory never aborts the loop or changes
-  prompts.
+- **Plan-loop wiring**: `main.ts` creates the store at startup and calls
+  `rememberAgentStep` → `agentMemory.remember(...)` after every completed plan
+  step. It is fail-safe and non-fatal: disabled or failing memory never aborts
+  the loop or changes prompts.
 - **Tests**: `npm run test:memory` (interface, in-memory, chaining, LLM
-  integration, remember-after-step) and `npm run test:multi-turn-memory` (LLM
-  runtime memory context). `memory/types.ts` and `memory/inMemory.ts` are part
-  of `npm run build`.
+  integration, remember-after-step), `npm run test:graph-memory` (graph node
+  creation/upsert, chain edges, `getContext`, chaining, empty-input fail-safe),
+  and `npm run test:multi-turn-memory` (LLM runtime memory context).
+  `memory/types.ts`, `memory/inMemory.ts`, `memory/graph-store.ts`, and
+  `memory/graph-memory.ts` are part of `npm run build`.
 
 See `README.md` for the full interface, usage, injection, chaining, and a short
 example.
