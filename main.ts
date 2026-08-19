@@ -151,15 +151,20 @@ const outputVerbose = !verbosity.veryQuiet && !verbosity.quiet;
 // site so quiet/very-quiet share one policy:
 //   stepVerbose  - the 'Step N started'/'Step N finished' header lines are the
 //                  only nice-to-have output that survives quiet mode, so they
-//                  print in both normal and quiet (only --very-quiet blanks
-//                  them; its stricter handling lands with the fatal path).
-//   fatalVerbose - fatal error/abort diagnostics remain visible in normal and
-//                  quiet so a real failure is never silently swallowed.
+//                  print in normal and quiet, but are blanked by --very-quiet
+//                  (stepVerbose = !veryQuiet).
+//   fatalVerbose - fatal error/abort diagnostics (the top-level catch for
+//                  unhandled exceptions / deliberate aborts) always print in
+//                  every mode, including --very-quiet. Very-quiet suppresses
+//                  *all nice-to-have* output on success, but a genuine
+//                  catastrophic/fatal failure is the one path that must never
+//                  be silently swallowed, so fatalVerbose is unconditional.
 // Everything else (plan summaries, tool params/results, TLDR, responses,
-// success/feedback/warning/status lines) uses `outputVerbose` and is therefore
-// hidden in quiet mode.
+// success/feedback/warning/status lines, and - in very-quiet - even the step
+// start/finish lines) uses `outputVerbose` (or `stepVerbose`) and is therefore
+// hidden as the mode gets quieter.
 const stepVerbose = !verbosity.veryQuiet;
-const fatalVerbose = !verbosity.veryQuiet;
+const fatalVerbose = true;
 // The prompt is mutable so loop mode can re-enter planning with a relevant
 // Agent Bus message as the new work order (see runAgentReplanLoop / step 5 of
 // the loop-mode plan). The first execution uses the CLI positional prompt.
