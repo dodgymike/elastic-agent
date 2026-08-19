@@ -146,6 +146,20 @@ const verbosity = {
 // veryQuiet is active nothing may print on success, so `quiet` (which would
 // still allow step start/finish lines) must not apply.
 const outputVerbose = !verbosity.veryQuiet && !verbosity.quiet;
+// Per-channel write gates derived from the same verbosity flags (single source
+// of truth). These are consulted by the status helpers and every direct print
+// site so quiet/very-quiet share one policy:
+//   stepVerbose  - the 'Step N started'/'Step N finished' header lines are the
+//                  only nice-to-have output that survives quiet mode, so they
+//                  print in both normal and quiet (only --very-quiet blanks
+//                  them; its stricter handling lands with the fatal path).
+//   fatalVerbose - fatal error/abort diagnostics remain visible in normal and
+//                  quiet so a real failure is never silently swallowed.
+// Everything else (plan summaries, tool params/results, TLDR, responses,
+// success/feedback/warning/status lines) uses `outputVerbose` and is therefore
+// hidden in quiet mode.
+const stepVerbose = !verbosity.veryQuiet;
+const fatalVerbose = !verbosity.veryQuiet;
 // The prompt is mutable so loop mode can re-enter planning with a relevant
 // Agent Bus message as the new work order (see runAgentReplanLoop / step 5 of
 // the loop-mode plan). The first execution uses the CLI positional prompt.
@@ -243,7 +257,9 @@ const workspaceInit: WorkspaceInit = resolveWorkspaceInit(mainCwd);
 // that follow, and the evidence that produced it is logged immediately.
 const dockerDetection = detectDocker();
 const runtimeConfig = { isDocker: dockerDetection.isDocker };
-console.log(`[DOCKER] ${describeDockerDetection(dockerDetection)}`);
+// Startup diagnostic (its evidence feeds the classifier later); it is
+// non-essential so quiet/very-quiet suppress it.
+if (outputVerbose) console.log(`[DOCKER] ${describeDockerDetection(dockerDetection)}`);
 
 let executionWorktreePath: string | null = null;
 let inExecutionPhase = false;
@@ -523,20 +539,57 @@ function printStatusLine(write: (line: string) => void, label: string, message: 
     for (let index = 1; index < lines.length; index += 1) write(`${prefix}${lines[index]}`);
 }
 
+// Output-verbosity gating for the status channels, derived from the single
+// source of truth (verbosity / outputVerbose / stepVerbose / fatalVerbose).
+//   - step         : the 'Step N started'/'Step N finished' header lines are
+//                    the only nice-to-have output kept in quiet mode, so they
+//                    print unless --very-quiet is active (stepVerbose).
+//   - error/abort  : fatal diagnostics stay visible in quiet mode so a real
+//                    failure is never swallowed (fatalVerbose).
+//   - everything   : plan summaries, tool params/results, TLDR, responses,
+//   else            success/feedback/warning/status lines only print in
+//                    verbose (all flags off) via outputVerbose. In quiet mode
+//                    these are all suppressed.
 const status = {
-    planning: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLAN]"), message, prefix),
-    step: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.yellow.bold("[STEP]"), message, prefix),
-    response: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.gray("[RESPONSE]"), message, prefix),
-    success: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.green.bold("[SUCCESS]"), message, prefix),
-    feedback: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[FEEDBACK]"), message, prefix),
-    change: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLAN CHANGE]"), message, prefix),
-    replan: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[REPLAN]"), message, prefix),
-    warning: (message: string, prefix = "") => printStatusLine((line) => console.warn(line), chalk.yellow.bold("[WARNING]"), message, prefix),
-    error: (message: string, prefix = "") => printStatusLine((line) => console.error(line), chalk.red.bold("[ERROR]"), message, prefix),
-    classification: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLANNING NECESSITY]"), message, prefix),
-    specKeeper: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.magenta.bold("[SPEC KEEPER]"), message, prefix),
-    abort: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.red.bold("[ABORT]"), message, prefix),
-    tldr: (message: string, prefix = "") => printStatusLine((line) => console.log(line), chalk.cyan.bold("[TLDR]"), message, prefix),
+    planning: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLAN]"), message, prefix);
+    },
+    step: (message: string, prefix = "") => {
+        if (stepVerbose) printStatusLine((line) => console.log(line), chalk.yellow.bold("[STEP]"), message, prefix);
+    },
+    response: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.gray("[RESPONSE]"), message, prefix);
+    },
+    success: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.green.bold("[SUCCESS]"), message, prefix);
+    },
+    feedback: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.magenta.bold("[FEEDBACK]"), message, prefix);
+    },
+    change: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLAN CHANGE]"), message, prefix);
+    },
+    replan: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.magenta.bold("[REPLAN]"), message, prefix);
+    },
+    warning: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.warn(line), chalk.yellow.bold("[WARNING]"), message, prefix);
+    },
+    error: (message: string, prefix = "") => {
+        if (fatalVerbose) printStatusLine((line) => console.error(line), chalk.red.bold("[ERROR]"), message, prefix);
+    },
+    classification: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.cyan.bold("[PLANNING NECESSITY]"), message, prefix);
+    },
+    specKeeper: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.magenta.bold("[SPEC KEEPER]"), message, prefix);
+    },
+    abort: (message: string, prefix = "") => {
+        if (fatalVerbose) printStatusLine((line) => console.log(line), chalk.red.bold("[ABORT]"), message, prefix);
+    },
+    tldr: (message: string, prefix = "") => {
+        if (outputVerbose) printStatusLine((line) => console.log(line), chalk.cyan.bold("[TLDR]"), message, prefix);
+    },
 };
 
 /**
@@ -607,6 +660,7 @@ function hierarchyIndent(level: ConsoleHierarchyLevel): string {
  * before calling this helper.
  */
 function logWithHierarchy(message: string, level: ConsoleHierarchyLevel): void {
+    if (!outputVerbose) return;
     const prefix = hierarchyIndent(level);
     const lines = String(message).split("\n");
     for (const line of lines) console.log(`${prefix}${line}`);
@@ -872,6 +926,7 @@ const toolsAvailable = buildToolsAvailablePrompt(tools);
  * indentation and the write target.
  */
 function emitToolLines(lines: string[], prefix = toolChildIndent): void {
+    if (!outputVerbose) return;
     for (const line of lines) console.log(`${prefix}${line}`);
 }
 
@@ -882,6 +937,7 @@ function emitToolLines(lines: string[], prefix = toolChildIndent): void {
  * prefix, while a tool can still customize or suppress its pending line.
  */
 function renderToolCallPending(toolCall) {
+    if (!outputVerbose) return;
     const lines = renderToolPhase("pending", toolCall, undefined, { color: terminalColor });
     for (const line of lines) console.log(`${hierarchyIndent("contentInStep")}${line}`);
 }
@@ -916,6 +972,7 @@ class CompatibleResponseWrapper {
     response: any;
     constructor(response) { this.response = response; }
     print(prefix = "") {
+        if (!outputVerbose) return; // Response bodies / reasoning are non-essential.
         const text = responseDisplayText(this.response);
         if (!text) return; // Suppress the empty "[RESPONSE] No text response or tool calls." line.
         status.response("", prefix);
@@ -1724,7 +1781,15 @@ async function dispatchToolCall(output, configData, goalKey) {
         return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
     }
 
-    const timer = startToolTimer({ prefix: toolChildIndent, color: terminalColor });
+    // The in-place tool timer line is non-essential tool detail; when output is
+    // not verbose (quiet/very-quiet) it writes to a no-op target so no timing
+    // output leaks, while the timer still measures elapsed time for anything
+    // that needs it.
+    const timer = startToolTimer({
+        prefix: toolChildIndent,
+        color: terminalColor,
+        write: outputVerbose ? undefined : () => undefined,
+    });
     timer.start();
     try {
         const toolResponse = await tool.exec_handler(toolArguments);
@@ -2278,7 +2343,9 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
 
     const planningPrompt = `${prompt}\n\n${planningSuffix}`;
 
-    console.log(planningPrompt);
+    // The planning prompt echo is non-essential diagnostic output; quiet and
+    // very-quiet suppress it (the prompt is still recorded to llm.log).
+    if (outputVerbose) console.log(planningPrompt);
 
     let planParseFailure: string | null = null;
     let parsedPlanningResponse: ReturnType<typeof parsePlanOrAbort> = { valid: false, reason: "Planning did not produce a response." };
@@ -2304,7 +2371,9 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
     if (parsedPlanningResponse.result.kind === "abort") {
         throw new RunAbortError("unable-to-complete", "planning", parsedPlanningResponse.result.reason);
     }
-    printPlan(parsedPlanningResponse.result.plan);
+    // The full plan summary is non-essential output; quiet/very-quiet suppress
+    // it by passing a no-op write callback (the plan is still parsed/recorded).
+    if (outputVerbose) printPlan(parsedPlanningResponse.result.plan);
     const activeSteps = planStepsFromObject(parsedPlanningResponse.result.plan);
     if (activeSteps.length === 0) {
         throw new RunAbortError("unable-to-complete", "planning", "Planning response JSON had steps without usable text.");
