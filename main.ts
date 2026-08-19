@@ -21,6 +21,13 @@ import {
 import { defaultBusCursorFilePath, watchAgentBusOnce } from "./loop-busctl-read.js";
 import { resolveToolSafetyConfig, startDirPathWarning } from "./tool-safety-config.js";
 import { buildPrompt, renderPrompt } from "./prompt-builder.js";
+import {
+    buildPlanningPrompt,
+    buildPlanningRetryPrompt,
+    buildReviewPlanPrompt,
+    buildReplanPrompt,
+    buildReplanRetryPrompt,
+} from "./planner-prompt.js";
 import { detectDocker, describeDockerDetection } from "./docker-detection.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
@@ -1290,14 +1297,14 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
     const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
     const currentPhase = configData.planPhase === undefined ? "(none)" : String(configData.planPhase);
-    const request = renderPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps, currentPhase });
+    const request = buildReplanPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps, currentPhase });
     let lastFailure = "unknown";
     try {
         for (let parseAttempt = 0; parseAttempt <= maxReplanParseRetries; parseAttempt += 1) {
             throwIfAborted(abortController.signal, "replan", step);
             const promptToSend = parseAttempt === 0
                 ? request
-                : `${request}\n\nThe previous revised plan response was not valid JSON. Here's the error: ${lastFailure}. Please return valid JSON following the requested structure.`;
+                : buildReplanRetryPrompt(request, lastFailure);
             const response = await client.create({ input: promptToSend, abortPhase: "replan" });
             new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
             recordUsage(configData, response);
@@ -1968,7 +1975,7 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, orig
     const reviewPlanGoal =
         "Plan how to conduct a review of the just-executed work. Assess the original prompt request, " +
         "the end-result quality, SDLC.md compliance, and record any learnings. Return a concise step-by-step plan.";
-    const reviewPlanPrompt = `${reviewPlanGoal}\n\n${planningSuffix}`;
+    const reviewPlanPrompt = buildReviewPlanPrompt(reviewPlanGoal, planningSuffix);
     const reviewPlanResponse = await client.create({ input: reviewPlanPrompt, abortPhase: "review-plan" });
     new CompatibleResponseWrapper(reviewPlanResponse).print();
     recordUsage(configData, reviewPlanResponse);
@@ -2321,7 +2328,7 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
     throwIfAborted(abortController.signal, "planning");
     status.planning("Creating an execution plan...");
 
-    const planningPrompt = `${prompt}\n\n${planningSuffix}`;
+    const planningPrompt = buildPlanningPrompt(prompt, planningSuffix);
 
     // The planning prompt echo is non-essential diagnostic output; quiet and
     // very-quiet suppress it (the prompt is still recorded to llm.log).
@@ -2333,7 +2340,7 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
         throwIfAborted(abortController.signal, "planning");
         const promptToSend = attempt === 0
             ? planningPrompt
-            : `${planningPrompt}\n\nThe previous response was not valid plan JSON. Here's the error: ${planParseFailure}. Please return either a valid plan JSON object or an abort object.`;
+            : buildPlanningRetryPrompt(planningPrompt, planParseFailure);
         const planningResponse = await client.create({ input: promptToSend, abortPhase: "planning" });
         new CompatibleResponseWrapper(planningResponse).print();
         recordUsage(configData, planningResponse);
