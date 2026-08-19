@@ -121,5 +121,30 @@ const samplePlan = {
     check("no PHASE line when phase absent", !noPhase.text.includes("PHASE:"));
 }
 
+// 8. printPlan serializes object-valued fields as JSON instead of "[object Object]".
+//    A plan's top-level tldr (and other free-form fields) may be an object if the
+//    LLM returns a structured summary; it must not render as the mangled
+//    String() form "[object Object]".
+{
+    const objectTldrPlan = {
+        tldr: { summary: "Add pretty-printing", priority: "high" },
+        steps: [
+            {
+                step_number: 1,
+                tldr: "Inspect output",
+                justification: { why: "need to know where the plan is generated" },
+                details: ["Open main.ts", "find PLAN prompt"],
+            },
+        ],
+        expected_outcome: { status: "done", note: "formatted plan" },
+    };
+    const { text: outText } = capture((w) => printPlan(objectTldrPlan, w));
+    check("object tldr does not render as [object Object]", !outText.includes("[object Object]"));
+    check("object tldr renders its JSON shape", outText.includes('"summary":"Add pretty-printing"') && outText.includes('"priority":"high"'));
+    check("object justification renders its JSON shape", outText.includes('"why":"need to know where the plan is generated"'));
+    check("array details renders as JSON array", outText.includes('["Open main.ts","find PLAN prompt"]') || outText.includes('"Open main.ts"'));
+    check("object expected_outcome renders its JSON shape", outText.includes('"status":"done"'));
+}
+
 if (failures === 0) { console.log("\nAll plan-print tests passed."); process.exit(0); }
 else { console.error(`\n${failures} test(s) failed.`); process.exit(1); }

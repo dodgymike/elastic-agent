@@ -322,10 +322,29 @@ export function parsePlanOrAbort(text: string, options: PlanJsonOptions = {}): P
     }
 }
 
-/** Coerce a value to a non-empty single-line string, or return fallback. */
+/** Best-effort single-line serialization of a plan field that never throws. */
+function stringify(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (value && typeof value === "object") {
+        try {
+            const serialized = JSON.stringify(value);
+            if (serialized !== undefined) return serialized;
+        } catch {
+            // Fall through to a defensive representation below.
+        }
+    }
+    return String(value);
+}
+
+/**
+ * Coerce a plan field value to a non-empty single-line string, or return the
+ * fallback. Object and array values are serialized as compact JSON rather than
+ * being mangled by `String()` into "[object Object]".
+ */
 function text(value: unknown, fallback = "(not provided)"): string {
     if (value === undefined || value === null) return fallback;
-    const s = String(value).replace(/\s+/g, " ").trim();
+    const s = stringify(value).replace(/\s+/g, " ").trim();
     return s.length > 0 ? s : fallback;
 }
 
