@@ -156,6 +156,13 @@ program
     .option("--allow-agent-source-modifications", "Allow edit-capable tools to modify files inside the agent source and start directories", false)
     .option("-q, --quiet", "Suppress non-essential output (tool call params/results, plan summaries, TLDR, status messages); keep 'Step N started' and 'Step N finished' messages", false)
     .option("--very-quiet", "Suppress all standard output on success; only a catastrophic/fatal error may print (overrides --quiet)", false)
+    .option("--log-prompts", "Write every LLM prompt (including any session-memory context) to prompt.log in the working directory (or PROMPT_LOG_PATH)", false)
+    .addHelpText("after", `
+Prompt logging:
+  --log-prompts    append every LLM prompt to prompt.log in the working directory
+                   (override the path with PROMPT_LOG_PATH). May contain sensitive
+                   session-memory content; handle with care and keep out of the repo.
+`)
     .addHelpText("after", `
 Output verbosity:
   --quiet / -q     show only step start/finish messages plus fatal errors.
@@ -2313,12 +2320,12 @@ async function runSingleStep(
     }
 }
 
-async function main(options: { review?: boolean; loop?: boolean } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
+async function main(options: { review?: boolean; loop?: boolean; logPrompts?: boolean } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
     client = new MultiTurnLlmRuntime(
         await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
         modelConfiguration.model,
         abortController.signal,
-        { memory: agentMemory ?? undefined, sessionId: agentSessionId },
+        { memory: agentMemory ?? undefined, sessionId: agentSessionId, logPrompts: options.logPrompts === true },
     );
     let configData = readData();
     if (!configData) configData = { responseIds: [] };
@@ -2880,7 +2887,7 @@ function loopReplanSafetyChecks(): {
  * staged work is carried forward rather than lost; it is cleaned up only after
  * the loop finishes or when an abort/failure handler runs.
  */
-async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean } = {}): Promise<{ success: boolean }> {
+async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean; logPrompts?: boolean } = {}): Promise<{ success: boolean }> {
     // Only loop mode ever interrupts for a replan; without --loop we run once.
     if (!options.loop) {
         return main(options);

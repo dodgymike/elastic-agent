@@ -21,6 +21,13 @@ import {
   REQUEST_TYPE_TOOL_CONTINUATION,
   type LlmLogRecord,
 } from "./llm-log.js";
+import {
+  appendPromptLog,
+  formatPrompt as formatPromptForLog,
+  PROMPT_REQUEST_TYPE_INITIAL,
+  PROMPT_REQUEST_TYPE_TOOL_CONTINUATION,
+  type PromptLogRecord,
+} from "./prompt-logger.js";
 
 /** OpenAI-Responses-shaped subset consumed by the legacy main.ts executor. */
 export interface CompatibleResponse {
@@ -121,14 +128,16 @@ export class MultiTurnLlmRuntime {
   private readonly responseStates = new Map<string, ResponseState>();
   private memory?: MemoryModule;
   private sessionId?: string;
+  private readonly logPrompts: boolean;
   constructor(
     private readonly adapter: LlmAdapter,
     private readonly model: string,
     readonly signal?: AbortSignal,
-    options: { memory?: MemoryModule; sessionId?: string } = {},
+    options: { memory?: MemoryModule; sessionId?: string; logPrompts?: boolean } = {},
   ) {
     this.memory = options.memory;
     this.sessionId = options.sessionId;
+    this.logPrompts = options.logPrompts === true;
   }
 
   /**
@@ -175,6 +184,17 @@ export class MultiTurnLlmRuntime {
     }
     const messages = prior ? [...prior.messages, ...continuation] : [textMessage("user", initialInput as string)];
     const requestType = prior ? REQUEST_TYPE_TOOL_CONTINUATION : REQUEST_TYPE_INITIAL;
+    // When --log-prompts is enabled, record the finalized prompt (including any
+    // memory-injected context) immediately before it is sent to the model.
+    if (this.logPrompts) {
+      const promptRecord: PromptLogRecord = {
+        timestamp: nowIso(),
+        requestType: prior ? PROMPT_REQUEST_TYPE_TOOL_CONTINUATION : PROMPT_REQUEST_TYPE_INITIAL,
+        model: this.model,
+        prompt: formatPromptForLog(messages),
+      };
+      appendPromptLog(promptRecord);
+    }
     let generated: GenerateResponse;
     try {
       generated = await this.adapter.generate({ model: this.model, messages, tools: request.tools, signal });
