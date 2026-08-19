@@ -1385,10 +1385,23 @@ function fightingDenialCount(configData): number {
 }
 
 /**
+ * Normalize a plan's top-level `tldr` field (which may be a string, an object,
+ * or absent) into a short single-line human summary suitable for the
+ * end-of-run implementation tldr. Object-valued tldrs are serialized to JSON so
+ * they never render as "[object Object]".
+ */
+function planTldrSummary(value: unknown): string {
+    if (value === undefined || value === null) return "";
+    const s = stringify(value).replace(/\s+/g, " ").trim();
+    return s.length > 0 ? s : "";
+}
+
+/**
  * Build and print a concise end-of-plan summary (the implementation tldr) of
  * what actually happened during execution, just before the terminal "Plan
  * complete." line. It surfaces the information the operator most wants from a
  * finished plan in one place:
+ *   - the original prompt and a short summary of the final plan;
  *   - how many of the plan's steps were completed;
  *   - every replan that occurred (applied focused replans vs failed ones) plus
  *     any loop-mode replan directives issued from classifier denials;
@@ -1414,7 +1427,20 @@ function reportImplementationTldr(
     const appliedReplans = replans.filter((entry) => entry && entry.applied === true);
     const failedReplans = replans.filter((entry) => entry && entry.applied === false);
 
+    // A short recap of the original prompt and the final plan. `activePlanSteps`
+    // is the plan as it stood when execution finished (replans and suggested
+    // updates already applied), and `planTldr` is the plan's top-level summary.
+    const activePlanSteps = Array.isArray(configData?.activePlanSteps) ? configData.activePlanSteps : [];
+    const promptSummary = truncate(String(originalPrompt ?? "").replace(/\s+/g, " ").trim(), 160);
+    const planTldr = truncate(String(configData?.planTldr ?? "").replace(/\s+/g, " ").trim(), 160);
+
     const summaryLines: string[] = [];
+    if (promptSummary) summaryLines.push(`Prompt: ${promptSummary}`);
+    if (planTldr) {
+        summaryLines.push(`Final plan: ${planTldr} (${activePlanSteps.length} step${activePlanSteps.length === 1 ? "" : "s"}).`);
+    } else if (activePlanSteps.length > 0) {
+        summaryLines.push(`Final plan: ${activePlanSteps.length} step${activePlanSteps.length === 1 ? "" : "s"}.`);
+    }
     summaryLines.push(`Steps completed: ${completedSteps.length}.`);
 
     if (appliedReplans.length > 0) {
@@ -1462,7 +1488,6 @@ function reportImplementationTldr(
     summaryLines.push(`Evaluation: ${evaluation}`);
 
     status.tldr(summaryLines.join("\n"), prefix);
-    void originalPrompt; // originalPrompt is intentionally accepted for future use; not printed (avoids echoing the full prompt).
 }
 
 function recordUsage(configData, response) {
@@ -2264,6 +2289,10 @@ async function main(options: { review?: boolean; loop?: boolean } = {}): Promise
     // change from a later replan (which restarts the whole plan). Only
     // very-high-complexity plans carry a phase; absent stays undefined.
     configData.planPhase = parsedPlanningResponse.result.plan.phase;
+    // Persist the plan's top-level tldr (a short human summary of the whole
+    // plan) so the end-of-run implementation tldr can recap the plan. The tldr
+    // may be an object, so it is normalized to a plain single-line string.
+    configData.planTldr = planTldrSummary(parsedPlanningResponse.result.plan.tldr);
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
     configData.consecutiveNoProgressReplans = 0;
