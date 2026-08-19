@@ -35,7 +35,8 @@ import { determinePlanningNecessity, selectExecutionMode } from "./llm/planning-
 import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abort.js";
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
-import { parsePlanOrAbort, indent, planStepsFromObject, printPlan } from "./plan-printer.js";
+import { parsePlanOrAbort, planStepsFromObject } from "./prompt-parser.js";
+import { indent, printPlan } from "./plan-printer.js";
 import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
 import {
     nextConsecutiveNoProgressReplans,
