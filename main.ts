@@ -1,6 +1,7 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
+import { translateCliArgs, resolveOutputGates } from "./output-verbosity.ts";
 import { defaultBusQueueFilePath, drainBusQueue } from "./loop-queue.js";
 import { classifyAgentBusMessage, messageToSearchableText } from "./loop-mode.js";
 import {
@@ -126,45 +127,19 @@ Selected-provider configuration:
 
 Credentials must be supplied through the runtime environment or secret manager, never command-line arguments or source control.
 `);
-// The short form -qq is not expressible as a distinct commander short flag
-// (commander treats one-char short flags, so -qq would collapse to -q -q ==
-// --quiet). Translate the exact token before parsing so -qq behaves exactly
-// like --very-quiet while -q continues to mean --quiet.
-const cliArgs = process.argv.map((arg) => (arg === "-qq" ? "--very-quiet" : arg));
+// Output-verbosity flags are the single source of truth for quiet/very-quiet
+// filtering, resolved here and used by every print site. The pure policy lives
+// in output-verbosity.ts (resolveOutputGates) so the CLI wiring and its tests
+// share one implementation; only the commander option definitions and the raw
+// flag hand-off happen in main.ts.
+const cliArgs = translateCliArgs(process.argv);
 program.parse(cliArgs);
 const options = program.opts();
-// Output-verbosity flags, resolved once here so the output-filtering logic
-// (quiet/very-quiet modes) shares a single source of truth. Both default to
-// false. --very-quiet takes precedence over --quiet: when both are requested
-// the stronger very-quiet mode wins (it suppresses everything on success, so
-// the quieter/quieter split below stays consistent with that precedence).
-const verbosity = {
-    quiet: options.quiet === true,
-    veryQuiet: options.veryQuiet === true,
-};
-// Effective write gate for standard output. veryQuiet overrides quiet: when
-// veryQuiet is active nothing may print on success, so `quiet` (which would
-// still allow step start/finish lines) must not apply.
-const outputVerbose = !verbosity.veryQuiet && !verbosity.quiet;
-// Per-channel write gates derived from the same verbosity flags (single source
-// of truth). These are consulted by the status helpers and every direct print
-// site so quiet/very-quiet share one policy:
-//   stepVerbose  - the 'Step N started'/'Step N finished' header lines are the
-//                  only nice-to-have output that survives quiet mode, so they
-//                  print in normal and quiet, but are blanked by --very-quiet
-//                  (stepVerbose = !veryQuiet).
-//   fatalVerbose - fatal error/abort diagnostics (the top-level catch for
-//                  unhandled exceptions / deliberate aborts) always print in
-//                  every mode, including --very-quiet. Very-quiet suppresses
-//                  *all nice-to-have* output on success, but a genuine
-//                  catastrophic/fatal failure is the one path that must never
-//                  be silently swallowed, so fatalVerbose is unconditional.
-// Everything else (plan summaries, tool params/results, TLDR, responses,
-// success/feedback/warning/status lines, and - in very-quiet - even the step
-// start/finish lines) uses `outputVerbose` (or `stepVerbose`) and is therefore
-// hidden as the mode gets quieter.
-const stepVerbose = !verbosity.veryQuiet;
-const fatalVerbose = true;
+const {
+    outputVerbose,
+    stepVerbose,
+    fatalVerbose,
+} = resolveOutputGates(options);
 // The prompt is mutable so loop mode can re-enter planning with a relevant
 // Agent Bus message as the new work order (see runAgentReplanLoop / step 5 of
 // the loop-mode plan). The first execution uses the CLI positional prompt.
