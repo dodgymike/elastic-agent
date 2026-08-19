@@ -730,6 +730,50 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 5d2. --start-dir confinement: when the classifier is handed ONLY the
+    //     canonical start directory as its workspace root / allowed directory
+    //     (main.ts removes the process's original start-up directory from the
+    //     set when --start-dir is configured), every form of path that stays
+    //     inside the start dir is accepted — canonical absolute, symlinked
+    //     absolute, and cwd-relative — while anything that resolves into the
+    //     original start-up directory (a sibling outside the start dir) is
+    //     blocked. This is the containment contract step 3b enforces.
+    // ------------------------------------------------------------------
+    // The original start-up directory is a sibling of the canonical start dir
+    // (and, critically, is *not* in the allowed set), so a path under it must
+    // be refused even though it is a legitimate "working directory"-shaped
+    // target.
+    const originalStartupDir = join(tmpDir, "original-startup", "workspace");
+    const startDirOnlyRoot = join(tmpDir, "startdir-only", "workspace");
+    mkdirSync(originalStartupDir, { recursive: true });
+    mkdirSync(startDirOnlyRoot, { recursive: true });
+    writeFileSync(join(startDirOnlyRoot, "package.json"), "{}", "utf8");
+    const startDirOnlyOptions = {
+      workspaceRoot: startDirOnlyRoot,
+      allowedDirectories: [startDirOnlyRoot],
+    };
+    check(
+      "start-dir only: canonical absolute path inside the start dir is allowed",
+      classifyToolCallStatically("Read", { path: join(startDirOnlyRoot, "package.json") }, startDirOnlyOptions).decision === "safe",
+    );
+    check(
+      "start-dir only: cwd-relative path inside the start dir is allowed",
+      classifyToolCallStatically("Read", { path: "package.json" }, startDirOnlyOptions).decision === "safe",
+    );
+    check(
+      "start-dir only: path under the original start-up directory is blocked (start-up dir removed)",
+      classifyToolCallStatically("Read", { path: join(originalStartupDir, "main.ts") }, startDirOnlyOptions).decision === "unsafe",
+    );
+    check(
+      "start-dir only: canonical absolute path outside is blocked",
+      classifyToolCallStatically("Read", { path: join(tmpDir, "outside.txt") }, startDirOnlyOptions).decision === "unsafe",
+    );
+    check(
+      "start-dir only: relative traversal out of the start dir is blocked",
+      classifyToolCallStatically("Read", { path: "../original-startup/workspace/main.ts" }, startDirOnlyOptions).decision === "unsafe",
+    );
+
+    // ------------------------------------------------------------------
     // 5e. Docker prompt-variant selection: the runtime's isDocker flag (or
     //     AGENT_IN_DOCKER) selects the Docker or non-Docker filesystem-policy
     //     addendum, which is composed with the shared base prompt and included

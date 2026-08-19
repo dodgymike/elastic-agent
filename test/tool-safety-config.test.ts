@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveToolSafetyConfig, startDirPathWarning } from "../tool-safety-config.js";
@@ -142,6 +142,46 @@ try {
     startDirPathWarning({ startDir: resolve(sandbox), startDirConfigured: false }, true),
     "",
   );
+
+  // Directory values are canonicalized (symlink-resolved) so the classifier and
+  // tool working-directory logic compare against the real location rather than
+  // a lexical spelling that may alias it (for example /home -> /mnt). A
+  // symlinked --start-dir/--agent-source-dir resolves to its canonical target,
+  // which is the exact canonical workspace root / tool-cwd step 3b relies on.
+  const canonTarget = join(sandbox, "canonical-target");
+  mkdirSync(canonTarget);
+  const aliasLink = join(sandbox, "alias");
+  let aliasResolves = false;
+  try {
+    symlinkSync(canonTarget, aliasLink, "dir");
+    aliasResolves = realpathSync(aliasLink) === realpathSync(canonTarget);
+  } catch {
+    // Symlinks unsupported on this platform: the alias-based assertions below
+    // are skipped (the non-alias canonicalization checks still run).
+    aliasResolves = false;
+  }
+  if (aliasResolves) {
+    const canonicalResolved = resolveToolSafetyConfig({ startDir: aliasLink, agentSourceDir: aliasLink }, sandbox);
+    assert.equal(canonicalResolved.startDirConfigured, true);
+    // The resolved start dir / agent source dir is the canonical target, not
+    // the symlink alias, which is the canonical workspace root / tool-cwd step
+    // 3b relies on.
+    assert.equal(canonicalResolved.startDir, realpathSync(canonTarget));
+    assert.equal(canonicalResolved.agentSourceDir, canonicalResolved.startDir);
+    // The start-dir path warning reflects the canonical directory, so the model
+    // is told to prefix relative paths with the canonical workspace root.
+    assert.equal(
+      startDirPathWarning(canonicalResolved),
+      `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${canonicalResolved.startDir}.`,
+    );
+  }
+
+  // The non-canonical (default) case still canonicalizes the runtime cwd. When
+  // the sandbox is not itself a symlink these are equal; canonicalization never
+  // breaks a real directory's own path.
+  const defaultCanonical = resolveToolSafetyConfig({}, sandbox);
+  assert.equal(defaultCanonical.startDir, realpathSync(sandbox));
+  assert.equal(defaultCanonical.agentSourceDir, realpathSync(sandbox));
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }

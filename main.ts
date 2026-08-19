@@ -1478,16 +1478,32 @@ async function dispatchToolCall(output, configData, goalKey) {
         }
     }
 
+    // Classifier trusted-root selection. When --start-dir is explicitly
+    // configured, all work is confined to that single directory: the workspace
+    // root becomes the canonical start directory and the process's original
+    // start-up directory is *removed* from the allowed set, so neither the
+    // logical pwd nor its canonical form are trusted any longer. When no
+    // --start-dir is given, the running directory and its canonical form from
+    // workspace-init are the trusted "local" roots.
+    const classifierWorkspaceRoot = toolSafetyConfig.startDirConfigured
+        ? toolSafetyConfig.startDir
+        : process.cwd();
+    const classifierAllowedDirectories = toolSafetyConfig.startDirConfigured
+        ? [toolSafetyConfig.startDir]
+        : workspaceInit.allowedDirectories;
+
     let classification;
     try {
         classification = await classifyToolCall(output.name, toolArguments, {
             runtime: client,
-            workspaceRoot: process.cwd(),
-            // The starting-directory init provides both the logical cwd (pwd)
-            // and the canonical (symlink-resolved) path as trusted "local"
-            // roots. Both are handed to the classifier as allowed directories
-            // so legitimate calls that stay within either form are accepted.
-            allowedDirectories: workspaceInit.allowedDirectories,
+            workspaceRoot: classifierWorkspaceRoot,
+            // Without --start-dir, the starting-directory init provides both
+            // the logical cwd (pwd) and the canonical (symlink-resolved) path
+            // as trusted "local" roots so legitimate calls that stay within
+            // either form are accepted. With --start-dir, only the canonical
+            // start directory is trusted (computed above); the original
+            // start-up directory and its canonical form are excluded.
+            allowedDirectories: classifierAllowedDirectories,
             // Tool-safety CLI flags resolved once at startup (enabled,
             // agentSourceDir, startDir, allowAgentSourceModifications) are
             // threaded into the classifier so its edit/write policy and

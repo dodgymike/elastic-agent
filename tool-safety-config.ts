@@ -17,7 +17,7 @@
  * so they can be unit tested without booting the agent loop.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 /**
@@ -74,7 +74,18 @@ function resolveDirectoryOption(value: string | undefined, flagName: string, fal
   if (!stats.isDirectory()) {
     throw new Error(`Usage: ${flagName} '${candidate.trim()}' is not a directory (resolved to '${absolute}').`);
   }
-  return absolute;
+  // Canonicalize (symlink-resolve) the directory so the classifier and tool
+  // working-directory logic always compare against the real location rather
+  // than a lexical spelling that may alias it (for example /home -> /mnt).
+  // When realpath fails (a virtual/overlay mount or a removed directory) we
+  // degrade to the validated absolute path so startup still proceeds.
+  let canonical = absolute;
+  try {
+    canonical = realpathSync(absolute);
+  } catch {
+    canonical = absolute;
+  }
+  return canonical;
 }
 
 /**
