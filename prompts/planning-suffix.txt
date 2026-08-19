@@ -14,6 +14,18 @@ EXAMPLE RESPONSE:
   "expected_outcome": ""
 }
 
+OPTIONAL TOP-LEVEL FIELD "phase":
+- "phase" is a top-level JSON field that identifies a major stage of work with
+  its own steps (for example "phase": 1 or "phase": "design").
+- It may only be present when the request has VERY HIGH complexity and genuinely
+  needs multiple phases and multiple steps. For low- or medium-complexity work
+  the field must be omitted.
+- A phase represents a major stage: a distinct chunk of the overall plan, each
+  with its own set of steps. Do not use "phase" to label an individual step; use
+  it only to label a large grouping of steps.
+- When present it must be a non-empty string or integer. The phase currently
+  being planned is reported as the value of this field.
+
 If you cannot honestly produce a usable plan, do NOT invent one. Instead return exactly:
 {
   "abort": true,

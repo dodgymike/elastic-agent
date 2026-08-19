@@ -124,6 +124,21 @@ const planningResponse = await client.create({ input: `${prompt}\n\n${planningSu
 
 Plain text; no interpolation.
 
+The required plan JSON shape is `{ "tldr", "steps", "expected_outcome" }`.
+The suffix also documents an **optional top-level `phase` field** (e.g.
+`"phase": 1` or `"phase": "design"`) that identifies a major stage of work
+with its own steps. `phase` may only be present for plans with **very high
+complexity** that genuinely need multiple phases and multiple steps; for
+low-/medium-complexity work it must be omitted. When present it must be a
+non-empty string or integer. This field forms the contract that the
+planning-response parser (`plan-printer.ts`) and the phase-aware handler logic
+in `main.ts` rely on.
+
+The same `phase` field is documented in the replanner prompt
+(`replan-prompt.txt`), where a proposed phase change is treated as a signal to
+fully restart the plan, while changes confined to the current phase do not
+restart it.
+
 ### `execution-feedback-format.txt`
 
 The machine-readable execution-feedback contract appended to each step-execution
