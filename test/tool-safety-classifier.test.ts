@@ -1254,6 +1254,53 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 5e. Agent-source static allow list. The agent must be able to read its
+    //     own tool definitions and any other files in the directory that
+    //     contains main.ts (the agent-source root) without an LLM safety
+    //     call. main.ts hands this root to the classifier via
+    //     `allowedDirectories` in every mode, so a read-only file tool whose
+    //     target resolves under the agent-source root is classified `safe`
+    //     statically even when that root is a separate directory from the
+    //     workspace root. Write tools must NOT be silently widened by the
+    //     same root when --allow-agent-source-modifications is not set (the
+    //     edit/write policy still gates them).
+    // ------------------------------------------------------------------
+    const agentSourceToolsDir = join(tmpDir, "agent-source-tools");
+    mkdirSync(agentSourceToolsDir, { recursive: true });
+    writeFileSync(join(agentSourceToolsDir, "read-usage.md"), "Read usage.", "utf8");
+    // The workspace root (`/workspace`) differs from the agent-source root, so
+    // without the allow-listed root these reads would resolve "outside the
+    // workspace"; with it they are statically safe (no LLM classifier).
+    check(
+      "agent-source root: Read of a tool definition is statically allowed",
+      staticVerdictWithRoots("Read", { path: join(agentSourceToolsDir, "read-usage.md") }, [agentSourceToolsDir]).decision === "safe",
+    );
+    check(
+      "agent-source root: FileSize of a tool definition is statically allowed",
+      staticVerdictWithRoots("FileSize", { path: join(agentSourceToolsDir, "read-usage.md") }, [agentSourceToolsDir]).decision === "safe",
+    );
+    check(
+      "agent-source root: ListDirectory of the tool directory is statically allowed",
+      staticVerdictWithRoots("ListDirectory", { directory: agentSourceToolsDir }, [agentSourceToolsDir]).decision === "safe",
+    );
+    // A relative path under the agent-source root resolves inside it too.
+    check(
+      "agent-source root: a tree-relative path inside the agent-source root is statically allowed",
+      classifyToolCallStatically("Read", { path: "read-usage.md" }, { workspaceRoot: WORKSPACE, allowedDirectories: [agentSourceToolsDir] }).decision === "safe",
+    );
+    // A Write to the same directory is still gated by the edit/write policy:
+    // without --allow-agent-source-modifications it stays denied, so adding
+    // the agent-source root to allowedDirectories must not widen writes.
+    check(
+      "agent-source root does NOT widen Write without --allow-agent-source-modifications",
+      staticVerdictWithConfig(
+        "Write",
+        { path: join(agentSourceToolsDir, "notes.md"), content: "x" },
+        denyEditsConfig,
+      ).decision === "unsafe",
+    );
+
+    // ------------------------------------------------------------------
     // 6. Permission denials: protected files, credentials, and secrets.
     // ------------------------------------------------------------------
     check(

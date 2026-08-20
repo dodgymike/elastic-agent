@@ -95,6 +95,7 @@ import { startToolTimer } from "./tool-timer.js";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, basename, isAbsolute, join, resolve as pathResolve } from "node:path";
 import { resolveWorkspaceInit, loadWorkspaceInit, workspaceInitToState, writeWorkspaceInitMarkdown, type WorkspaceInit } from "./workspace-init.ts";
+import { findAgentSourceRoot } from "./tool-source-root.ts";
 import { randomUUID } from "node:crypto";
 import Write from "./tools/Write.ts";
 import Read, { ReadParameters } from "./tools/Read.ts";
@@ -383,6 +384,16 @@ const mainCwd = process.cwd();
 // during execution) do not shift what the runtime treats as the authoritative
 // starting directory.
 const workspaceInit: WorkspaceInit = resolveWorkspaceInit(mainCwd);
+// The agent-source root is the directory containing the agent's own main.ts
+// entry module. It is resolved once at startup (it never changes during a
+// run) and is always added to the tool-classifier's trusted roots so the
+// agent can statically read its own tool definitions (for example
+// tools/read-usage.md) and any other files in that directory without an LLM
+// safety call (see dispatchToolCall below).
+const agentSourceRoot = findAgentSourceRoot(
+    pathResolve(process.argv[1] ?? "main.ts"),
+    mainCwd,
+);
 
 // Docker/container detection: resolve once at startup so the tool-safety
 // classifier and prompt-building code can choose the right filesystem policy
@@ -1713,11 +1724,27 @@ async function dispatchToolCall(output, configData, goalKey) {
         : toolSafetyConfig.allowAgentSourceModifications
             ? toolSafetyConfig.agentSourceDir
             : process.cwd();
-    const classifierAllowedDirectories = toolSafetyConfig.startDirConfigured
-        ? [toolSafetyConfig.startDir]
-        : toolSafetyConfig.allowAgentSourceModifications
-            ? [toolSafetyConfig.agentSourceDir]
-            : workspaceInit.allowedDirectories;
+    // The agent-source root (the directory containing main.ts) is always a
+    // trusted root for reads, put on the *static* allow list so no LLM safety
+    // call is required. The agent must be able to read its own tool
+    // definitions (for example tools/read-usage.md via the usage_prompt
+    // filenames advertised in the tools-available prompt) and any other files
+    // in that directory even when the runtime was launched from a different
+    // working directory or a --start-dir confines reads to another location.
+    // The classifier's read-only file tools (Read/FileSize/ListDirectory/
+    // Find/Grep) treat these roots as trusted, so paths under the agent-source
+    // root classify statically safe. Write tools remain governed by the
+    // edit/write policy (which still requires --allow-agent-source-modifications),
+    // so adding this root never widens what the agent may modify. `agentSourceRoot`
+    // is resolved once at module scope (see its declaration near workspaceInit).
+    const classifierAllowedDirectories = Array.from(new Set([
+        agentSourceRoot,
+        ...(toolSafetyConfig.startDirConfigured
+            ? [toolSafetyConfig.startDir]
+            : toolSafetyConfig.allowAgentSourceModifications
+                ? [toolSafetyConfig.agentSourceDir]
+                : workspaceInit.allowedDirectories),
+    ]));
 
     let classification;
     try {
