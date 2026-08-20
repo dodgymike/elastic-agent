@@ -79,6 +79,7 @@ type TestToolSafetyConfig = {
   startDir: string;
   startDirConfigured: boolean;
   allowAgentSourceModifications: boolean;
+  safeDirs?: readonly string[];
 };
 
 /** Like staticVerdict but with a resolved tool-safety CLI config. */
@@ -987,6 +988,74 @@ async function main(): Promise<void> {
     check(
       "5c2 canonical vs symlink start dir resolve to the same real root",
       !boundary5c2AliasResolves || realpathSync(boundary5c2AliasStart) === boundary5c2Root,
+    );
+
+    // 5c-3. --safe-dir grants an authorized editable location even without
+    //       --allow-agent-source-modifications. A user-declared safe directory
+    //       is the flag's whole purpose: it lets the agent write/edit/delete
+    //       (and run file-modifying commands) inside the named directories
+    //       without enabling blanket agent-source editing or requiring the
+    //       mutually exclusive --start-dir/--allow-agent-source-modifications
+    //       combination. Safe directories remain subject to the protected-file
+    //       and data.json checks, so they never widen what may be written past
+    //       the existing filesystem policy.
+    const safeMkdirRoot = join(tmpDir, "safe-dirs", "work");
+    mkdirSync(safeMkdirRoot, { recursive: true });
+    const safeOutsideRoot = join(tmpDir, "safe-dirs", "other");
+    mkdirSync(safeOutsideRoot, { recursive: true });
+    const safeDirConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir,
+      startDir,
+      startDirConfigured: false,
+      allowAgentSourceModifications: false,
+      safeDirs: [safeMkdirRoot],
+    };
+    check(
+      "safe-dir: Write inside a --safe-dir is allowed without the allow flag",
+      staticVerdictWithConfig("Write", { path: join(safeMkdirRoot, "notes.md"), content: "x" }, safeDirConfig).decision === "safe",
+    );
+    check(
+      "safe-dir: Edit inside a --safe-dir is allowed without the allow flag",
+      staticVerdictWithConfig("Edit", { path: join(safeMkdirRoot, "notes.md"), old_string: "a", new_string: "b" }, safeDirConfig).decision === "safe",
+    );
+    check(
+      "safe-dir: Delete inside a --safe-dir is allowed without the allow flag",
+      staticVerdictWithConfig("Delete", { path: join(safeMkdirRoot, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, safeDirConfig).decision === "safe",
+    );
+    check(
+      "safe-dir: file-modifying ExecuteCommand inside a --safe-dir is not statically denied",
+      staticVerdictWithConfig("ExecuteCommand", { command: `touch ${join(safeMkdirRoot, "created.txt")}` }, safeDirConfig).decision !== "unsafe",
+    );
+    check(
+      "safe-dir: Read inside a --safe-dir is accepted",
+      staticVerdictWithConfig("Read", { path: join(safeMkdirRoot, "notes.md") }, safeDirConfig).decision === "safe",
+    );
+    check(
+      "safe-dir: Write outside every declared safe dir is denied",
+      staticVerdictWithConfig("Write", { path: join(safeOutsideRoot, "notes.md"), content: "x" }, safeDirConfig).decision === "unsafe",
+    );
+    check(
+      "safe-dir: Edit outside every declared safe dir is denied",
+      staticVerdictWithConfig("Edit", { path: join(safeOutsideRoot, "notes.md"), old_string: "a", new_string: "b" }, safeDirConfig).decision === "unsafe",
+    );
+    check(
+      "safe-dir: data.json inside a --safe-dir stays blocked",
+      staticVerdictWithConfig("Read", { path: join(safeMkdirRoot, "data.json") }, safeDirConfig).decision === "unsafe",
+    );
+    check(
+      "safe-dir: a protected .env inside a --safe-dir stays blocked",
+      staticVerdictWithConfig("Read", { path: join(safeMkdirRoot, ".env") }, safeDirConfig).decision === "unsafe",
+    );
+    // The safe-dir boundary holds even when --allow-agent-source-modifications
+    // is set: safe dirs add to the editable roots rather than being removed.
+    const safeDirAllowConfig: TestToolSafetyConfig = {
+      ...safeDirConfig,
+      allowAgentSourceModifications: true,
+    };
+    check(
+      "safe-dir: Write inside a --safe-dir stays allowed with the allow flag also set",
+      staticVerdictWithConfig("Write", { path: join(safeMkdirRoot, "notes.md"), content: "x" }, safeDirAllowConfig).decision === "safe",
     );
 
     // ------------------------------------------------------------------

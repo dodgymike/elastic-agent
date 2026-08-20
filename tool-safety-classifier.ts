@@ -434,12 +434,16 @@ function isInsideAnyBoundary(target: string, dirs: readonly string[], cwd = proc
  * The config values are already canonicalized at CLI-resolution time
  * (`resolveDirectoryOption` symlink-resolves them), but `canonicalAbsolutePath`
  * is applied again here so the boundary comparison always runs against the real
- * location and stays robust even if a config value arrives non-canonical.
+ * location and stays robust even if a config value arrives non-canonical. Any
+ * user-declared `--safe-dir` directories are included so the edit boundary
+ * treats them as authorized writable locations as well.
  */
 function editableRoots(config: ToolSafetyConfig): string[] {
+  const safeDirs = (config.safeDirs ?? []).map((dir) => canonicalAbsolutePath(dir));
   return Array.from(new Set([
     canonicalAbsolutePath(config.agentSourceDir),
     canonicalAbsolutePath(config.startDir),
+    ...safeDirs,
   ]));
 }
 
@@ -458,6 +462,17 @@ function fileEditPolicyVerdict(
   allowOutsideWorkspace: boolean,
 ): StaticToolSafetyVerdict | null {
   if (target === null || target.trim() === "") return null;
+  // A user-declared --safe-dir directory is an authorized editable location
+  // even without --allow-agent-source-modifications. This is the flag's whole
+  // purpose: it grants write access to the named directories (for example a
+  // target project directory) without enabling blanket agent-source editing or
+  // requiring the mutually exclusive --start-dir/--allow-agent-source-modifications
+  // combination. Safe directories remain subject to the protected-file checks
+  // in classifyFileTool, so they never widen what may be written there.
+  const safeDirs = config.safeDirs ?? [];
+  if (safeDirs.length > 0 && isInsideAnyBoundary(target, safeDirs)) {
+    return null;
+  }
   if (!config.allowAgentSourceModifications) {
     // When a start dir is configured, --start-dir and
     // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
@@ -767,6 +782,17 @@ function executeCommandEditPolicyVerdict(
   allowOutsideWorkspace: boolean,
 ): StaticToolSafetyVerdict | null {
   if (!isFileModifyingCommand(command)) return null;
+  // A --safe-dir directory is an authorized editable location even without
+  // --allow-agent-source-modifications. When every modification target of the
+  // command falls inside the declared safe directories, the edit policy allows
+  // it (the remaining protected-file and destructive-command checks still run).
+  const safeDirs = config.safeDirs ?? [];
+  if (safeDirs.length > 0) {
+    const targets = fileModificationTargets(command);
+    if (targets.every((target) => isInsideAnyBoundary(target, safeDirs))) {
+      return null;
+    }
+  }
   if (!config.allowAgentSourceModifications) {
     // When a start dir is configured, --start-dir and
     // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
@@ -1509,7 +1535,12 @@ export function classifyToolCallStatically(
     case "ListDirectory":
     case "Find":
     case "Grep":
-      return classifyFileTool(toolName, record, roots, allowOutsideWorkspace);
+      // Use the combined roots (workspace/trusted roots plus the config's
+      // editable roots, which include any --safe-dir directories) so read-only
+      // file tools can reach user-declared safe directories. In the production
+      // path main.ts already threads safe dirs into allowedDirectories; this
+      // keeps the classifier self-consistent when a config is passed directly.
+      return classifyFileTool(toolName, record, combinedRoots, allowOutsideWorkspace);
     case "Write":
     case "Edit":
     case "Delete":

@@ -14,9 +14,11 @@ directory are permitted, subject to the deny rules above.
   target a protected file or secret.
 - Edit/write boundary: when `--allow-agent-source-modifications` is set, edits
   are allowed inside the configured directories (--agent-source-dir and
-  --start-dir). Outside those directories, file writes are additionally
-  permitted for the running container session, provided the target is not a
-  protected file and the write does not destroy container-critical data.
+  --start-dir). A user-declared `--safe-dir` directory is an authorized scoped
+  edit target and is editable even without the blanket flag. Outside the
+  configured directories, file writes are additionally permitted for the
+  running container session, provided the target is not a protected file and
+  the write does not destroy container-critical data.
 - The read-only allow patterns listed above are permitted inside the
   working/startup directory and may also access container-local paths outside
   that directory, provided they do not target protected files or secrets.

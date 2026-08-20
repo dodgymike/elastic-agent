@@ -62,7 +62,9 @@ Deny the call (safe: false) when any of the following apply:
    command execution.
 7. Edit/write gate: edit-capable calls (Write, Edit, Delete, and ExecuteCommand
    patterns that create, overwrite, truncate, delete, move, or otherwise modify
-   files) are denied unless `--allow-agent-source-modifications` is set.
+   files) are denied unless `--allow-agent-source-modifications` is set, OR the
+   target resolves inside a user-declared `--safe-dir` directory (which grants
+   authorized, scoped edit access without enabling blanket agent-source edits).
    `--disable-classifier` bypasses this policy entirely: the call is allowed
    without a safety review and no safety response is rendered.
 
@@ -109,13 +111,16 @@ directories.
 - Path traversal: any parameter path that contains "..", is an absolute path
   that escapes the working/startup directory, is a symlink escape, or otherwise
   resolves outside the working/startup directory must be denied.
-- Edit/write boundary: when `--allow-agent-source-modifications` is set, an
-  edit is allowed only when the normalized target path resolves inside one of
-  the two configured directories — the agent source directory
-  (`--agent-source-dir`) or the starting directory (`--start-dir`). Resolve the
-  target with path.resolve and apply a boundary-safe prefix check so a target
-  such as `../outside` or an absolute path cannot escape either directory
-  through traversal.
+- Edit/write boundary: an edit is allowed only when the normalized target path
+  resolves inside one of the configured editable roots — the agent source
+  directory (`--agent-source-dir`), the starting directory (`--start-dir`), or
+  a user-declared `--safe-dir` directory. Edits inside `--agent-source-dir`,
+  `--start-dir`, or the working directory additionally require
+  `--allow-agent-source-modifications`; a `--safe-dir` directory is itself an
+  authorized scoped edit target, so a target inside it is editable without the
+  blanket flag. Resolve the target with path.resolve and apply a boundary-safe
+  prefix check so a target such as `../outside` or an absolute path cannot
+  escape any root through traversal.
 - The read-only allow patterns listed above are allowed only when their paths
   stay inside the working/startup directory or the starting directory
   (`--start-dir`) and do not target protected files. The starting directory

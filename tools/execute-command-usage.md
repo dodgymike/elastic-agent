@@ -89,10 +89,11 @@ plain text; the exit code and streams are still shown. No `[SUCCESS]` or
 ## Safe use
 
 > Tool safety: commands that modify files are denied unless the agent was
-> started with `--allow-agent-source-modifications`. When that flag is set,
-> each detected file target must resolve inside `--agent-source-dir` or
-> `--start-dir` (boundary-safe, so `../` traversal is blocked).
-> `--disable-classifier` bypasses the check.
+> started with `--allow-agent-source-modifications` or each detected file
+> target resolves inside a user-declared `--safe-dir` directory. When the flag
+> is set, each detected file target must resolve inside `--agent-source-dir`,
+> `--start-dir`, or `--safe-dir` (boundary-safe, so `../` traversal is
+> blocked). `--disable-classifier` bypasses the check.
 
 **Allowed**
 - Read-only verification commands: builds, tests, grep, listing, and repository

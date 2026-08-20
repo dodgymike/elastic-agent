@@ -62,7 +62,9 @@ Deny the call (safe: false) when any of the following apply:
    command execution.
 7. Edit/write gate: edit-capable calls (Write, Edit, Delete, and ExecuteCommand
    patterns that create, overwrite, truncate, delete, move, or otherwise modify
-   files) are denied unless `--allow-agent-source-modifications` is set.
+   files) are denied unless `--allow-agent-source-modifications` is set, OR the
+   target resolves inside a user-declared `--safe-dir` directory (which grants
+   authorized, scoped edit access without enabling blanket agent-source edits).
    `--disable-classifier` bypasses this policy entirely: the call is allowed
    without a safety review and no safety response is rendered.
 

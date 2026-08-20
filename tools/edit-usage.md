@@ -111,9 +111,11 @@ Edit rejects invalid calls by throwing (it does not return an `error` field).
 ## Safe use
 
 > Tool safety: edits are denied unless the agent was started with
-> `--allow-agent-source-modifications`. When that flag is set, the target path
-> must resolve inside `--agent-source-dir` or `--start-dir` (boundary-safe, so
-> `../` traversal is blocked). `--disable-classifier` bypasses the check.
+> `--allow-agent-source-modifications` or the target resolves inside a
+> user-declared `--safe-dir` directory. When the flag is set, the target path
+> must resolve inside `--agent-source-dir`, `--start-dir`, or `--safe-dir`
+> (boundary-safe, so `../` traversal is blocked). `--disable-classifier`
+> bypasses the check.
 
 **Allowed**
 - Surgical in-place edits to workspace files using a fresh `read_hash`.

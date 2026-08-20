@@ -8,6 +8,7 @@
  *   --agent-source-dir <dir>
  *   --start-dir <dir>
  *   --allow-agent-source-modifications
+ *   --safe-dir <dir1,dir2,...>
  *
  * The parsed commander options are resolved once at startup into an immutable
  * `ToolSafetyConfig`. Directory flags are normalized to absolute paths and
@@ -39,6 +40,13 @@ export interface ToolSafetyConfig {
   readonly startDirConfigured: boolean;
   /** True when edit-capable tools are allowed to modify files under the configured directories. */
   readonly allowAgentSourceModifications: boolean;
+  /**
+   * Absolute paths of additional user-declared safe (editable) directories
+   * from --safe-dir. `resolveToolSafetyConfig` always sets this to an array
+   * (empty when the flag is absent); it is optional in the interface only so
+   * callers that construct a partial config are treated as having no safe dirs.
+   */
+  readonly safeDirs?: readonly string[];
 }
 
 /** Parsed commander option subset consumed by `resolveToolSafetyConfig`. */
@@ -47,6 +55,8 @@ export interface RawToolSafetyOptions {
   readonly agentSourceDir?: string;
   readonly startDir?: string;
   readonly allowAgentSourceModifications?: boolean;
+  /** Comma-separated list of additional safe/editable directories. */
+  readonly safeDirs?: string;
 }
 
 function absoluteDirectoryPath(candidate: string, baseCwd: string): string {
@@ -93,6 +103,28 @@ function resolveDirectoryOption(value: string | undefined, flagName: string, fal
 }
 
 /**
+ * Resolve the comma-separated `--safe-dir` list into an array of canonical,
+ * absolute, validated directory paths. Each entry is resolved and validated
+ * just like a single directory flag (`resolveDirectoryOption`), so a missing
+ * or non-directory entry fails at startup with a clear usage error. Empty
+ * entries (for example a trailing comma or doubled separator) are skipped so
+ * the flag is forgiving of simple punctuation mistakes. Returns an empty array
+ * when the flag is absent.
+ */
+function resolveSafeDirList(value: string | undefined, flagName: string, baseCwd: string): string[] {
+  if (value === undefined || value.trim() === "") return [];
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  const dirs: string[] = [];
+  for (const entry of entries) {
+    dirs.push(resolveDirectoryOption(entry, flagName, baseCwd));
+  }
+  return Array.from(new Set(dirs));
+}
+
+/**
  * Resolve and validate the tool-safety CLI flags into a `ToolSafetyConfig`.
  *
  * Defaults:
@@ -111,6 +143,13 @@ export function resolveToolSafetyConfig(
   const fallback = absoluteDirectoryPath(runtimeCwd, process.cwd());
   const startDirConfigured = options.startDir !== undefined;
   const allowAgentSourceModifications = options.allowAgentSourceModifications === true;
+  // The --safe-dir list is resolved against the runtime working directory (the
+  // same base as the other directory flags) so relative entries normalize to
+  // absolute canonical paths. It is independent of the edit/modifications flags
+  // and is threaded into both config branches below, including the mods root
+  // branch where it adds user-declared safe directories on top of the
+  // authoritative agent-source root.
+  const safeDirs = resolveSafeDirList(options.safeDirs, "--safe-dir", fallback);
   // --start-dir scopes all tool work to a single directory, which is mutually
   // exclusive with allowing modifications across the agent source tree. Reject
   // the conflicting combination up front so the CLI reports a clear usage error
@@ -143,6 +182,7 @@ export function resolveToolSafetyConfig(
       startDir: sourceRoot.root,
       startDirConfigured: false,
       allowAgentSourceModifications: true,
+      safeDirs,
     };
   }
   const agentSourceDir = resolveDirectoryOption(options.agentSourceDir, "--agent-source-dir", fallback);
@@ -153,6 +193,7 @@ export function resolveToolSafetyConfig(
     startDir,
     startDirConfigured,
     allowAgentSourceModifications,
+    safeDirs,
   };
 }
 

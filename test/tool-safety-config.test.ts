@@ -222,6 +222,50 @@ try {
     () => resolveToolSafetyConfig({ allowAgentSourceModifications: true }, srcRoot),
     /--allow-agent-source-modifications requires the main entry module path to resolve the agent source root/,
   );
+
+  // --safe-dir resolves a comma-separated list of directories into canonical
+  // absolute paths, independent of the edit/modifications flags.
+  const safeA = join(sandbox, "safe-a");
+  const safeB = join(sandbox, "safe-b");
+  mkdirSync(safeA);
+  mkdirSync(safeB);
+  const withSafeDirs = resolveToolSafetyConfig({ safeDirs: `safe-a,${safeB}` }, sandbox);
+  assert.deepEqual(
+    withSafeDirs.safeDirs,
+    [realpathSync(safeA), realpathSync(safeB)],
+  );
+  assert.equal(withSafeDirs.allowAgentSourceModifications, false);
+
+  // Relative + absolute entries, whitespace trimming, and de-duplication are
+  // handled by the resolver. Empty entries (trailing/doubled commas) are
+  // skipped, never producing empty paths.
+  const withManySafe = resolveToolSafetyConfig(
+    { safeDirs: ` safe-a , ${safeB}, ,safe-a` },
+    sandbox,
+  );
+  assert.deepEqual(
+    withManySafe.safeDirs,
+    [realpathSync(safeA), realpathSync(safeB)],
+  );
+
+  // A missing --safe-dir entry fails with a clear usage error naming the flag.
+  assert.throws(
+    () => resolveToolSafetyConfig({ safeDirs: `safe-a,missing-one` }, sandbox),
+    /--safe-dir 'missing-one' does not exist/,
+  );
+
+  // safeDirs stays an empty array when the flag is absent.
+  assert.deepEqual(resolveToolSafetyConfig({}, sandbox).safeDirs, []);
+
+  // --safe-dir is threaded through the --allow-agent-source-modifications
+  // branch as well, adding to the authoritative agent-source root.
+  const modsWithSafe = resolveToolSafetyConfig(
+    { allowAgentSourceModifications: true, safeDirs: safeA },
+    srcRoot,
+    mainEntry,
+  );
+  assert.equal(modsWithSafe.allowAgentSourceModifications, true);
+  assert.deepEqual(modsWithSafe.safeDirs, [realpathSync(safeA)]);
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }
