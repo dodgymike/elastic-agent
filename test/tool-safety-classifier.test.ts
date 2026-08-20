@@ -1016,6 +1016,99 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // 5d4. Characterization regression: --allow-agent-source-modifications
+    //     with the canonical agent-source root. When the flag is set,
+    //     resolveToolSafetyConfig sets BOTH agentSourceDir and startDir to the
+    //     canonical agent-source root (the directory containing main.ts) and
+    //     clears startDirConfigured (the flag is mutually exclusive with
+    //     --start-dir). This block is the passing characterization for the
+    //     reported scenario: a write/edit/delete to a file *inside* the start
+    //     dir must be ALLOWED — never denied with the
+    //     '--allow-agent-source-modifications is not set' message — under all
+    //     three path spellings (canonical absolute, symlinked alias, and
+    //     cwd-relative). The denial message fires only when the flag is
+    //     genuinely absent (covered in section 5c).
+    // ------------------------------------------------------------------
+    const srcRoot = join(tmpDir, "char-src-root");
+    mkdirSync(srcRoot, { recursive: true });
+    writeFileSync(join(srcRoot, "main.ts"), "// main\n", "utf8");
+    // The alias is a symlinked-boundary spelling of the same canonical root
+    // (mirroring /home -> /mnt/sdb4), so the classifier must accept a target
+    // that realpath-resolves into the editable root.
+    const srcAliasParent = join(tmpDir, "char-home");
+    let srcAlias = srcRoot;
+    let srcSymlinkResolves = false;
+    try {
+      symlinkSync(srcRoot, srcAliasParent, "dir");
+      srcAlias = srcAliasParent;
+      srcSymlinkResolves = realpathSync(srcAlias) === srcRoot;
+    } catch {
+      srcAlias = srcRoot;
+    }
+    // Production config shape when --allow-agent-source-modifications is set:
+    // both roots canonical, startDirConfigured false.
+    const charAllowConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir: srcRoot,
+      startDir: srcRoot,
+      startDirConfigured: false,
+      allowAgentSourceModifications: true,
+    };
+    const charOptions = {
+      workspaceRoot: srcAlias,
+      allowedDirectories: [srcRoot],
+    };
+    check(
+      "char: canonical agent-source root used as the editable root",
+      realpathSync(srcRoot) === srcRoot,
+    );
+    check(
+      "char: alias resolves to the canonical agent-source root",
+      !srcSymlinkResolves || realpathSync(srcAlias) === srcRoot,
+    );
+    // (a) Canonical absolute in-root Write/Edit/Delete are allowed.
+    check(
+      "char: canonical Write inside the agent-source root is allowed with --allow-agent-source-modifications",
+      classifyToolCallStatically("Write", { path: join(srcRoot, "notes.md"), content: "x" }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "safe",
+    );
+    check(
+      "char: canonical Edit inside the agent-source root is allowed with --allow-agent-source-modifications",
+      classifyToolCallStatically("Edit", { path: join(srcRoot, "main.ts"), old_string: "a", new_string: "b" }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "safe",
+    );
+    check(
+      "char: canonical Delete inside the agent-source root is allowed with --allow-agent-source-modifications",
+      classifyToolCallStatically("Delete", { path: join(srcRoot, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "safe",
+    );
+    // (b) A symlinked-alias spelling resolving into the root is allowed too;
+    //     the flag gate must not short-circuit it into a denial.
+    check(
+      "char: symlinked-alias Write resolving into the agent-source root is allowed",
+      !srcSymlinkResolves
+        || classifyToolCallStatically("Write", { path: join(srcAlias, "main.ts"), content: "x" }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "safe",
+    );
+    check(
+      "char: symlinked-alias Edit resolving into the agent-source root is allowed",
+      !srcSymlinkResolves
+        || classifyToolCallStatically("Edit", { path: join(srcAlias, "main.ts"), old_string: "a", new_string: "b" }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "safe",
+    );
+    check(
+      "char: symlinked-alias Delete resolving into the agent-source root is allowed",
+      !srcSymlinkResolves
+        || classifyToolCallStatically("Delete", { path: join(srcAlias, "main.ts"), file_hash: "0".repeat(64), file_size: 5 }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "safe",
+    );
+    // (c) A cwd-relative in-root edit is allowed as well.
+    check(
+      "char: cwd-relative Write resolving inside the agent-source root is allowed",
+      classifyToolCallStatically("Write", { path: "notes.md", content: "x" }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "safe",
+    );
+    // (d) Outside the root stays refused even with the flag set; the flag
+    //     widens only the agent-source boundary, not the whole filesystem.
+    check(
+      "char: Write outside the agent-source root stays refused despite the allow flag",
+      classifyToolCallStatically("Write", { path: "/etc/agent-notes.md", content: "x" }, { ...charOptions, toolSafetyConfig: charAllowConfig }).decision === "unsafe",
+    );
+
+    // ------------------------------------------------------------------
     // 5e. Docker prompt-variant selection: the runtime's isDocker flag (or
     //     AGENT_IN_DOCKER) selects the Docker or non-Docker filesystem-policy
     //     addendum, which is composed with the shared base prompt and included
