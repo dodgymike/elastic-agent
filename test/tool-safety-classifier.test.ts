@@ -2112,6 +2112,77 @@ async function main(): Promise<void> {
       console.error(`  true-positive regression: ${problem}`);
     }
 
+    // ------------------------------------------------------------------
+    // 5e. Start-dir read containment regression: when --start-dir is
+    //     configured, the canonical start directory is part of the workspace
+    //     (main.ts folds it into the classifier's allowed directories and
+    //     workspace root), so a Read of a file inside the start dir must be
+    //     ACCEPTED while a Read that resolves outside the start dir stays
+    //     blocked. This mirrors the reported start-dir workflow
+    //     (ea-test/test.txt inside the start dir vs /home/mike/source/other
+    //     and /etc/passwd outside it): the classifier must treat the start
+    //     dir as local for reads and never weaken the out-of-root boundary.
+    // ------------------------------------------------------------------
+    // Build a sibling pair under tmpDir: `startDirRoot` is the canonical
+    // --start-dir target; `startDirSibling` is a neighboring directory (the
+    // `other`) that must NOT be readable even though it is a sibling.
+    const startDirRoot = join(tmpDir, "startdir-read", "ea-test");
+    const startDirSibling = join(tmpDir, "startdir-read", "other");
+    mkdirSync(startDirRoot, { recursive: true });
+    mkdirSync(startDirSibling, { recursive: true });
+    writeFileSync(join(startDirRoot, "test.txt"), "inside the start dir\n", "utf8");
+    writeFileSync(join(startDirSibling, "x.txt"), "sibling\n", "utf8");
+    // Production config shape for a --start-dir run: startDirConfigured true,
+    // allowAgentSourceModifications false (the two flags are mutually
+    // exclusive), and the classifier handed the canonical start dir as both
+    // its workspace root and its allowed directory.
+    const startDirReadConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir: startDirRoot,
+      startDir: startDirRoot,
+      startDirConfigured: true,
+      allowAgentSourceModifications: false,
+    };
+    const startDirReadOptions = {
+      workspaceRoot: startDirRoot,
+      allowedDirectories: [startDirRoot],
+      toolSafetyConfig: startDirReadConfig,
+    };
+    check(
+      "start-dir read: absolute path inside --start-dir is accepted",
+      classifyToolCallStatically("Read", { path: join(startDirRoot, "test.txt") }, startDirReadOptions).decision === "safe",
+    );
+    check(
+      "start-dir read: canonical /home-style path inside the start dir is accepted",
+      classifyToolCallStatically("Read", { path: `${startDirRoot}/test.txt` }, startDirReadOptions).decision === "safe",
+    );
+    check(
+      "start-dir read: cwd-relative path inside the start dir is accepted",
+      classifyToolCallStatically("Read", { path: "test.txt" }, startDirReadOptions).decision === "safe",
+    );
+    check(
+      "start-dir read: sibling directory beside the start dir is blocked",
+      classifyToolCallStatically("Read", { path: join(startDirSibling, "x.txt") }, startDirReadOptions).decision === "unsafe",
+    );
+    check(
+      "start-dir read: /etc/passwd is still blocked",
+      classifyToolCallStatically("Read", { path: "/etc/passwd" }, startDirReadOptions).decision === "unsafe",
+    );
+    check(
+      "start-dir read: relative traversal out of the start dir is blocked",
+      classifyToolCallStatically("Read", { path: `../other/x.txt` }, startDirReadOptions).decision === "unsafe",
+    );
+    // The full async classifier flows the same read through without widening
+    // the boundary.
+    const startDirFullRead = await classifyToolCall("Read", { path: join(startDirRoot, "test.txt") }, {
+      ...startDirReadOptions,
+      logger: silentLogger,
+    });
+    check(
+      "start-dir read: classifyToolCall accepts an in-start-dir read (static source)",
+      startDirFullRead.safe === true && startDirFullRead.source === "static",
+    );
+
     // Risk levels drive the dispatch loop's fail-closed behavior.
     check(
       "risk levels mark Write/ExecuteCommand/Delete as mutating and Read as readonly",
