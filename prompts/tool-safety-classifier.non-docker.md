@@ -19,7 +19,10 @@ directories.
   such as `../outside` or an absolute path cannot escape either directory
   through traversal.
 - The read-only allow patterns listed above are allowed only when their paths
-  stay inside the working/startup directory and do not target protected files.
+  stay inside the working/startup directory or the starting directory
+  (`--start-dir`) and do not target protected files. The starting directory
+  (`--start-dir`) is treated as part of the tool workspace, so reads inside it
+  are permitted just like reads inside the working directory.
 - Changing the working directory into the configured starting directory
   (`--start-dir`) or another trusted workspace directory is allowed only when
   the change is followed by read-only or verification commands. A cwd change
