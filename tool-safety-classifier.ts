@@ -462,13 +462,15 @@ function fileEditPolicyVerdict(
     // When a start dir is configured, --start-dir and
     // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
     // time, so the flag is effectively always unset in start-dir runs. For a
-    // target that escapes the configured editable directories, blaming the flag
+    // target outside the main.ts (agent-source) directory, blaming the flag
     // would be actively misleading (setting it would fail startup): the real
-    // reason is that the path is outside --agent-source-dir and --start-dir.
-    // Emit the path-boundary reason in that case; keep the flag-based reason for
-    // a target inside the boundaries (where the flag alone governs the edit) and
-    // for Docker sessions (where the boundary is relaxed).
-    if (config.startDirConfigured && !allowOutsideWorkspace && !isInsideAnyBoundary(target, roots)) {
+    // reason is that the path is outside the configured editable directories.
+    // Prompt #7: when a start dir is specified and the file is outside the
+    // main.ts dir, do NOT mention that flag as a reason to deny. Emit the
+    // path-boundary reason in that case; keep the flag-based reason only for a
+    // target genuinely inside the agent-source (main.ts) directory (where the
+    // flag alone governs the edit) and for Docker sessions (relaxed boundary).
+    if (config.startDirConfigured && !allowOutsideWorkspace && !isInsideAnyBoundary(target, [roots[0]])) {
       return unsafe(`${toolName} target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
     }
     return unsafe(`${toolName} modifies files, which is denied because --allow-agent-source-modifications is not set.`);
@@ -769,15 +771,17 @@ function executeCommandEditPolicyVerdict(
     // When a start dir is configured, --start-dir and
     // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
     // time, so the flag is effectively always unset in start-dir runs. For a
-    // target that escapes the configured editable directories, blaming the flag
-    // would be actively misleading (setting it would fail startup): the real
-    // reason is that the path is outside --agent-source-dir and --start-dir.
-    // Emit the path-boundary reason in that case; keep the flag-based reason for
-    // a target inside the boundaries (where the flag alone governs the edit) and
-    // for Docker sessions (where the boundary is relaxed).
+    // file target outside the main.ts (agent-source) directory, blaming the
+    // flag would be actively misleading (setting it would fail startup): the
+    // real reason is that the path is outside the configured editable
+    // directories. Prompt #7: when a start dir is specified and a target is
+    // outside the main.ts dir, do NOT mention that flag as a reason to deny.
+    // Emit the path-boundary reason in that case; keep the flag-based reason
+    // only for a target genuinely inside the agent-source (main.ts) directory
+    // (where the flag alone governs the edit) and for Docker sessions.
     if (config.startDirConfigured && !allowOutsideWorkspace) {
       const targets = fileModificationTargets(command);
-      const offender = targets.find((target) => !isInsideAnyBoundary(target, roots));
+      const offender = targets.find((target) => !isInsideAnyBoundary(target, [roots[0]]));
       if (offender !== undefined) {
         return unsafe(`ExecuteCommand file target '${offender}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
       }

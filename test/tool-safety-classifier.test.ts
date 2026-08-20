@@ -796,6 +796,199 @@ async function main(): Promise<void> {
         && /--agent-source-dir|--start-dir/.test(outsideExecuteVerdict.reason),
     );
 
+    // 5c-2. Focused regression for the inside-start-dir / outside-main.ts
+    //       denial reason. Prompt #7: when a start dir is specified and the
+    //       write target is OUTSIDE the main.ts (agent-source) directory, the
+    //       denial reason must NOT blame --allow-agent-source-modifications.
+    //       That flag is mutually exclusive with --start-dir at CLI-resolution
+    //       time, so telling the operator to set it would be actively
+    //       misleading (it could never be set in a start-dir invocation). The
+    //       classifier must instead cite the file's real location and the
+    //       configured start dir so the operator can fix the invocation.
+    //
+    //       This is distinct from 5c-1 above, which covers a target outside
+    //       BOTH editable directories. Here the target is INSIDE --start-dir
+    //       but OUTSIDE --agent-source-dir (main.ts's directory): the file is
+    //       still outside main.ts, so the flag must not be blamed even though
+    //       the target lies within one configured root.
+    const startDirOnlyEditConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir,
+      startDir,
+      startDirConfigured: true,
+      allowAgentSourceModifications: false,
+    };
+    const insideStartTarget = join(startDir, "notes.md");
+    const insideStartWriteVerdict = staticVerdictWithConfig(
+      "Write",
+      { path: insideStartTarget, content: "hello" },
+      startDirOnlyEditConfig,
+    );
+    const insideStartEditVerdict = staticVerdictWithConfig(
+      "Edit",
+      { path: insideStartTarget, old_string: "a", new_string: "b" },
+      startDirOnlyEditConfig,
+    );
+    const insideStartDeleteVerdict = staticVerdictWithConfig(
+      "Delete",
+      { path: insideStartTarget, file_hash: "0".repeat(64), file_size: 5 },
+      startDirOnlyEditConfig,
+    );
+    const insideStartExecuteVerdict = staticVerdictWithConfig(
+      "ExecuteCommand",
+      { command: `touch ${insideStartTarget}` },
+      startDirOnlyEditConfig,
+    );
+    // The target is inside --start-dir, so it does NOT escape both editable
+    // directories; without the allow flag it is still denied (the edit/write
+    // policy requires the flag unless it is running in an allow-outside
+    // session).
+    check(
+      "start dir set + write inside start dir but outside main.ts is denied",
+      insideStartWriteVerdict.decision === "unsafe",
+    );
+    check(
+      "start dir set + Edit inside start dir but outside main.ts is denied",
+      insideStartEditVerdict.decision === "unsafe",
+    );
+    check(
+      "start dir set + Delete inside start dir but outside main.ts is denied",
+      insideStartDeleteVerdict.decision === "unsafe",
+    );
+    check(
+      "start dir set + file-modifying ExecuteCommand inside start dir but outside main.ts is denied",
+      insideStartExecuteVerdict.decision === "unsafe",
+    );
+    // Core prompt #7 assertion: none of these denials may blame the flag.
+    check(
+      "start dir set + write inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
+      insideStartWriteVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(insideStartWriteVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(insideStartWriteVerdict.reason),
+    );
+    check(
+      "start dir set + Edit inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
+      insideStartEditVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(insideStartEditVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(insideStartEditVerdict.reason),
+    );
+    check(
+      "start dir set + Delete inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
+      insideStartDeleteVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(insideStartDeleteVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(insideStartDeleteVerdict.reason),
+    );
+    check(
+      "start dir set + file-modifying ExecuteCommand inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
+      insideStartExecuteVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(insideStartExecuteVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(insideStartExecuteVerdict.reason),
+    );
+
+    // The flag-based reason must REMAIN when start dir is NOT configured (the
+    // flag is then genuinely required and settable) — a guard against
+    // overcorrecting and removing the reason where it is truthful.
+    const noStartDirEditConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir,
+      startDir,
+      startDirConfigured: false,
+      allowAgentSourceModifications: false,
+    };
+    const noStartInsideAgentVerdict = staticVerdictWithConfig(
+      "Write",
+      { path: join(agentSourceDir, "notes.md"), content: "hello" },
+      noStartDirEditConfig,
+    );
+    const noStartInsideStartVerdict = staticVerdictWithConfig(
+      "Write",
+      { path: insideStartTarget, content: "hello" },
+      noStartDirEditConfig,
+    );
+    check(
+      "no start dir + write inside agent-source still blames --allow-agent-source-modifications",
+      noStartInsideAgentVerdict.decision === "unsafe"
+        && /allow-agent-source-modifications/.test(noStartInsideAgentVerdict.reason),
+    );
+    check(
+      "no start dir + write inside start-dir-shaped root still blames --allow-agent-source-modifications",
+      noStartInsideStartVerdict.decision === "unsafe"
+        && /allow-agent-source-modifications/.test(noStartInsideStartVerdict.reason),
+    );
+
+    // Within a start-dir run, a target INSIDE the main.ts (agent-source)
+    // directory is not "outside main.ts", so prompt #7 does not require the
+    // reason to change there; the flag-based reason is still truthful because
+    // the edit/write policy gate keys on the allow flag for in-boundary edits.
+    const startDirInsideAgentVerdict = staticVerdictWithConfig(
+      "Write",
+      { path: join(agentSourceDir, "notes.md"), content: "hello" },
+      startDirOnlyEditConfig,
+    );
+    check(
+      "start dir set + write inside main.ts (agent-source) may keep the truthful flag reason",
+      startDirInsideAgentVerdict.decision === "unsafe"
+        && /allow-agent-source-modifications/.test(startDirInsideAgentVerdict.reason),
+    );
+
+    // Canonical vs symlink alias for the inside-start-dir/outside-main.ts
+    // case: a start dir reached through a symlink alias that realpath-resolves
+    // into the canonical start dir must still be treated as "inside the start
+    // dir", so denial reasoning is consistent regardless of path spelling and
+    // the flag is never blamed for a file outside main.ts.
+    const boundary5c2Root = join(tmpDir, "5c2", "canonical");
+    const boundary5c2Agent = join(tmpDir, "5c2", "canonical", "main-src");
+    mkdirSync(boundary5c2Agent, { recursive: true });
+    mkdirSync(boundary5c2Root, { recursive: true });
+    writeFileSync(join(boundary5c2Root, "notes.md"), "x", "utf8");
+    const boundary5c2AliasDir = join(tmpDir, "5c2", "home");
+    let boundary5c2AliasStart = boundary5c2Root;
+    let boundary5c2AliasResolves = false;
+    try {
+      symlinkSync(boundary5c2Root, boundary5c2AliasDir, "dir");
+      boundary5c2AliasStart = boundary5c2AliasDir;
+      boundary5c2AliasResolves = realpathSync(boundary5c2AliasStart) === boundary5c2Root;
+    } catch {
+      boundary5c2AliasStart = boundary5c2Root;
+    }
+    const symlinkStartConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir: boundary5c2Agent,
+      startDir: boundary5c2Root,
+      startDirConfigured: true,
+      allowAgentSourceModifications: false,
+    };
+    // Canonical spelling: target inside canonical start dir, outside main.ts.
+    const canonicalInsideStartVerdict = classifyToolCallStatically(
+      "Write",
+      { path: join(boundary5c2Root, "notes.md"), content: "x" },
+      { workspaceRoot: boundary5c2Root, toolSafetyConfig: symlinkStartConfig },
+    );
+    check(
+      "5c2 canonical: write inside start dir but outside main.ts does NOT blame the flag",
+      canonicalInsideStartVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(canonicalInsideStartVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(canonicalInsideStartVerdict.reason),
+    );
+    // Symlink spelling: target through the alias resolves into the canonical
+    // start dir (outside main.ts) and must get the same, truthful reason.
+    const symlinkInsideStartVerdict = classifyToolCallStatically(
+      "Write",
+      { path: join(boundary5c2AliasStart, "notes.md"), content: "x" },
+      { workspaceRoot: boundary5c2AliasStart, toolSafetyConfig: symlinkStartConfig },
+    );
+    check(
+      "5c2 symlink: write inside start dir (via alias) but outside main.ts does NOT blame the flag",
+      !boundary5c2AliasResolves
+        || (symlinkInsideStartVerdict.decision === "unsafe"
+          && !/allow-agent-source-modifications/.test(symlinkInsideStartVerdict.reason)
+          && /--agent-source-dir|--start-dir/.test(symlinkInsideStartVerdict.reason)),
+    );
+    check(
+      "5c2 canonical vs symlink start dir resolve to the same real root",
+      !boundary5c2AliasResolves || realpathSync(boundary5c2AliasStart) === boundary5c2Root,
+    );
+
     // ------------------------------------------------------------------
     // 5d. Canonical, symlinked, and cwd-relative path forms. This mirrors the
     //     real workspace layout where the logical working directory is a
