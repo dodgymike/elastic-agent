@@ -459,6 +459,18 @@ function fileEditPolicyVerdict(
 ): StaticToolSafetyVerdict | null {
   if (target === null || target.trim() === "") return null;
   if (!config.allowAgentSourceModifications) {
+    // When a start dir is configured, --start-dir and
+    // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
+    // time, so the flag is effectively always unset in start-dir runs. For a
+    // target that escapes the configured editable directories, blaming the flag
+    // would be actively misleading (setting it would fail startup): the real
+    // reason is that the path is outside --agent-source-dir and --start-dir.
+    // Emit the path-boundary reason in that case; keep the flag-based reason for
+    // a target inside the boundaries (where the flag alone governs the edit) and
+    // for Docker sessions (where the boundary is relaxed).
+    if (config.startDirConfigured && !allowOutsideWorkspace && !isInsideAnyBoundary(target, roots)) {
+      return unsafe(`${toolName} target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
+    }
     return unsafe(`${toolName} modifies files, which is denied because --allow-agent-source-modifications is not set.`);
   }
   // Docker mode relaxes the editable-directory boundary: writes are permitted
@@ -754,6 +766,22 @@ function executeCommandEditPolicyVerdict(
 ): StaticToolSafetyVerdict | null {
   if (!isFileModifyingCommand(command)) return null;
   if (!config.allowAgentSourceModifications) {
+    // When a start dir is configured, --start-dir and
+    // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
+    // time, so the flag is effectively always unset in start-dir runs. For a
+    // target that escapes the configured editable directories, blaming the flag
+    // would be actively misleading (setting it would fail startup): the real
+    // reason is that the path is outside --agent-source-dir and --start-dir.
+    // Emit the path-boundary reason in that case; keep the flag-based reason for
+    // a target inside the boundaries (where the flag alone governs the edit) and
+    // for Docker sessions (where the boundary is relaxed).
+    if (config.startDirConfigured && !allowOutsideWorkspace) {
+      const targets = fileModificationTargets(command);
+      const offender = targets.find((target) => !isInsideAnyBoundary(target, roots));
+      if (offender !== undefined) {
+        return unsafe(`ExecuteCommand file target '${offender}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
+      }
+    }
     return unsafe("ExecuteCommand modifies files, which is denied because --allow-agent-source-modifications is not set.");
   }
   // Docker mode relaxes the editable-directory boundary; the remaining static

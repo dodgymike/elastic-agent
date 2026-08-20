@@ -720,6 +720,82 @@ async function main(): Promise<void> {
         && deniedEditCapture.lines.length === 1,
     );
 
+    // 5c-1. Focused regression: when a start dir is configured and the write
+    //       target resolves outside the editable directories, the denial
+    //       reason must NOT mention --allow-agent-source-modifications. That
+    //       flag is mutually exclusive with --start-dir at CLI-resolution time
+    //       (tool-safety-config.ts), so telling the user to set it would be
+    //       actively misleading. The denial should instead cite the
+    //       path-boundary reason (--agent-source-dir and --start-dir).
+    const outsideStartDirConfig: TestToolSafetyConfig = {
+      enabled: true,
+      agentSourceDir,
+      startDir,
+      startDirConfigured: true,
+      allowAgentSourceModifications: false,
+    };
+    const outsideTarget = join(tmpDir, "outside", "notes.md");
+    const outsideWriteVerdict = staticVerdictWithConfig(
+      "Write",
+      { path: outsideTarget, content: "hello" },
+      outsideStartDirConfig,
+    );
+    const outsideEditVerdict = staticVerdictWithConfig(
+      "Edit",
+      { path: outsideTarget, old_string: "a", new_string: "b" },
+      outsideStartDirConfig,
+    );
+    const outsideDeleteVerdict = staticVerdictWithConfig(
+      "Delete",
+      { path: outsideTarget, file_hash: "0".repeat(64), file_size: 5 },
+      outsideStartDirConfig,
+    );
+    const outsideExecuteVerdict = staticVerdictWithConfig(
+      "ExecuteCommand",
+      { command: `touch ${outsideTarget}` },
+      outsideStartDirConfig,
+    );
+    check(
+      "start dir set + write outside boundaries is denied",
+      outsideWriteVerdict.decision === "unsafe",
+    );
+    check(
+      "start dir set + Edit outside boundaries is denied",
+      outsideEditVerdict.decision === "unsafe",
+    );
+    check(
+      "start dir set + Delete outside boundaries is denied",
+      outsideDeleteVerdict.decision === "unsafe",
+    );
+    check(
+      "start dir set + file-modifying ExecuteCommand outside boundaries is denied",
+      outsideExecuteVerdict.decision === "unsafe",
+    );
+    check(
+      "start dir set + write outside boundaries does NOT blame --allow-agent-source-modifications",
+      outsideWriteVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(outsideWriteVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(outsideWriteVerdict.reason),
+    );
+    check(
+      "start dir set + Edit outside boundaries does NOT blame --allow-agent-source-modifications",
+      outsideEditVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(outsideEditVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(outsideEditVerdict.reason),
+    );
+    check(
+      "start dir set + Delete outside boundaries does NOT blame --allow-agent-source-modifications",
+      outsideDeleteVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(outsideDeleteVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(outsideDeleteVerdict.reason),
+    );
+    check(
+      "start dir set + file-modifying ExecuteCommand outside boundaries does NOT blame --allow-agent-source-modifications",
+      outsideExecuteVerdict.decision === "unsafe"
+        && !/allow-agent-source-modifications/.test(outsideExecuteVerdict.reason)
+        && /--agent-source-dir|--start-dir/.test(outsideExecuteVerdict.reason),
+    );
+
     // ------------------------------------------------------------------
     // 5d. Canonical, symlinked, and cwd-relative path forms. This mirrors the
     //     real workspace layout where the logical working directory is a
