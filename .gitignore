@@ -33,6 +33,7 @@ test/.loop-poll-build-verify/
 test/.loop-replan-build-verify/
 test/.loop-queue-build-verify/
 test/.replan-prompt-consistency-build/
+test/.memory-compaction-prompt-build/
 test/.dt-verify/
 test/.planner-prompt-build/
 test/.prompt-parser-build/

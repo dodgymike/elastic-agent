@@ -39,6 +39,7 @@ agent-facing operating instructions are not part of this extraction.
 | `review-prompt.txt`             | `reviewPromptTemplate`                 | `main.ts`     |
 | `json-retry-hint.txt`           | `JSON_RETRY_HINT`                      | `llm/deepseek-v4-adapter.ts` |
 | `self-modification-section.txt` | `selfModificationSection` (flag-gated) | `main.ts`     |
+| `memory-compaction.md`          | `memoryCompactionPrompt` (new)         | memory-compaction runtime   |
 
 ## Tool safety classifier prompts
 
@@ -284,6 +285,28 @@ It tells the model to return pure, well-formed JSON with no prose, fences,
 comments, trailing commas, or unescaped characters.
 
 Plain text; no interpolation.
+
+### `memory-compaction.md`
+
+The memory-compaction prompt used to compress an overgrown per-session memory
+summary down to a reusable size before it is re-injected into a prompt. It is
+a `${...}` interpolation template with a stable `[MEMORY-COMPACTION]` marker.
+The prompt is intended to be rendered with `renderPrompt` and sent to the
+highest-capability model so the compression preserves important detail.
+
+Interpolation points:
+
+| Expression | Variable |
+|------------|----------|
+| `${plan}` | the active plan (for context) |
+| `${memory}` | the current session memory to compress |
+
+The prompt instructs the model to preserve all important facts, decisions,
+constraints, and outstanding work while removing redundancy and low-value
+detail, and it forbids JSON output, code fences, and echoing the input back —
+the response is the plain-text summary that replaces the memory. Tests in
+`test/memory-compaction-prompt.test.ts` assert the placeholder and compression
+contract.
 
 ## Editing prompts
 
