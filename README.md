@@ -41,7 +41,7 @@ the execution flow of the agent.
 | `memory/graph-memory.ts` | `GraphMemoryModule` (the graph-backed store), `GraphMemoryOptions`, `createGraphMemoryModule`, the default chain renderer, and the `GraphFailureReport`. |
 | `memory/persistent.ts` | `PersistentMemoryModule` (the end-of-plan persistent store and **default backend**), `PersistentMemoryOptions`, `createPersistentMemoryModule`, `PersistentMemoryDocument`, and `PersistentFailureReport`. |
 | `memory/compositeMemory.ts` | `CompositeMemoryModule` (concatenation composite), `createCompositeMemoryModule` / `createConcatenationMemoryModule` factories, `CompositeMemoryOptions`, and the `FinalizableMemoryModule`/`CompositeFailureReport` types. |
-| `test/memory.test.ts` | Focused tests: interface conformance, in-memory store + summarizer, chaining, LLM integration, remember-after-step. |
+| `memory/memoryCompaction.ts` | The memory-compaction component: `MemoryCompactor`, `shouldCompactMemory` threshold test, `renderMemoryCompactionPrompt`, `validateCompactedSummary`, and the narrow `CompactionSummaryStore` interface. |
 | `test/graph-memory.test.ts` | Focused tests for `GraphMemoryModule`: node creation/upsert, chain edges, `getContext`, chaining, empty-input fail-safe. |
 | `test/persistent-memory.test.ts` | Focused tests for `PersistentMemoryModule`: contract, summarizer, persist, finalize, fail-safe, factory. |
 | `test/composite-memory.test.ts` | Focused tests for `CompositeMemoryModule`: ordering, separators, remember to both, failure handling, finalize passthrough, chainable. |
@@ -422,6 +422,90 @@ The integration is **optional and fail-safe**: if memory is disabled, the
 summarizer/delegate throws, or `remember()`/`getContext()` fails, the LLM
 prompts and the plan loop proceed unchanged with a single non-fatal warning.
 
+## Memory compaction (`memory/memoryCompaction.ts`)
+
+As a run progresses, a session's per-session summary (the string
+`getContext()` re-injects into every LLM prompt) can grow until it occupies a
+significant fraction of the model's context window, degrading prompt quality
+and eventually overflowing the window. Memory compaction detection keeps the
+summary within bounds.
+
+### Behavior
+
+- **Trigger (threshold):** after every `remember()` (the post-memory-update
+  hook in `rememberAgentStep`), the runtime checks whether
+  `summary.length / contextWindow` is **strictly greater than** the threshold,
+  **default `0.5` (50%)**. A summary exactly at 50% is **not** compacted; it
+  must strictly exceed the threshold. An empty/absent summary or a non-positive
+  window is never compacted.
+- **Compaction flow:** when the threshold is exceeded, the highest-capability
+  model for the active provider is called with the
+  [`prompts/memory-compaction.md`](prompts/memory-compaction.md) prompt (rendered
+  with `${plan}` and `${memory}`). The model returns a single plain-text
+  compressed summary that preserves all important facts, decisions,
+  constraints, and outstanding work while dropping redundancy. On success the
+  session summary is **atomically replaced** in place of the current summary —
+  the remembered step history is untouched, so nothing is lost.
+- **Highest model:** compaction uses the provider's "highest" model resolved by
+  `resolveHighestModelConfiguration` in `llm/model-defaults.ts` (per-provider
+  defaults, overridable via `<PROVIDER>_MODEL_HIGHEST`, e.g.
+  `OPENAI_MODEL_HIGHEST`, `DEEPSEEK_MODEL_HIGHEST`,
+  `BEDROCK_CLAUDE_MODEL_HIGHEST`), falling back to the default model when the
+  highest one cannot be resolved.
+- **Prompt path:** `prompts/memory-compaction.md` — the stable
+  `[MEMORY-COMPACTION]` template documented in `prompts/PROMPTS.md`.
+
+### Safety / fail-open semantics
+
+Compaction is **fail-open by design** — it can never corrupt or lose session
+memory. Any of the following preserves the original summary unchanged and logs
+an actionable diagnostic (never aborting the plan loop):
+
+- the memory backend does not expose the narrow summary read/write interface
+  (`CompactionSummaryStore` — today only the in-memory and persistent backends
+  do; graph and composite backends skip compaction);
+- the prompt file is missing or the prompt fails to render;
+- the model call fails or is unavailable;
+- the returned output is invalid — empty, a JSON document, or a fenced code
+  block (all rejected by `validateCompactedSummary`);
+- the "compaction" does not actually shrink the summary (its length is not
+  strictly less than the original — guarding against an echo);
+- the store read/write throws.
+
+The compactor is built lazily once on first use and `maybeCompact` never throws.
+
+### Configuration
+
+The compactor's two size knobs are constructor options (`MemoryCompactorOptions`):
+
+| Option | Effect | Default |
+| --- | --- | --- |
+| `contextWindow` | Context-window size in **characters** used for the threshold check | `120_000` (`DEFAULT_CONTEXT_WINDOW`) |
+| `threshold` | Fraction of the window above which compaction fires (strictly-greater) | `0.5` (`MEMORY_COMPACTION_THRESHOLD`) |
+| `highestModel` | Highest model id used for compaction (see `resolveHighestModelConfiguration`) | resolved per provider |
+
+`main.ts` currently constructs the compactor with the defaults (120,000-char
+window, 50% threshold); `contextWindow`/`threshold` are exposed on the
+`MemoryCompactor` constructor so deployments that wire their own compaction can
+tune them. The highest model is configured via the provider's `<PROVIDER>_MODEL_HIGHEST`
+environment override (e.g. `OPENAI_MODEL_HIGHEST`), falling back to the
+per-provider highest default in `llm/model-defaults.ts`.
+
+> The context window is a conservative character proxy: the memory modules
+> measure summary size as the summary string's `.length`, so the default window
+> is given in characters (`DEFAULT_CONTEXT_WINDOW`). A deployment that knows its
+> true window should pass a matching `contextWindow`.
+
+### Example artifact
+
+`docs/examples/elastic-agent-memory-aaaa-1112-0001.json` is an **artificial,
+non-secret** example memory document (in the `PersistentMemoryDocument` schema)
+for the session id `aaaa-1112-0001`, drawn with a summary long enough to exceed
+the 50% threshold so the compaction hook would fire. It is clearly marked as a
+synthetic fixture and is **not** real runtime data — the real runtime output
+lives under the gitignored `memory-output/` directory. The same session id is
+exercised in `test/memory-compaction.test.ts`.
+
 ## Tests
 
 ```sh
@@ -430,8 +514,11 @@ npm run test:graph-memory       # graph module: node upsert, chain edges, getCon
 npm run test:persistent-memory  # persistent module: contract, summarizer, persist, finalize, fail-safe, factory
 npm run test:composite-memory   # concatenation composite: ordering, separators, failure handling, finalize passthrough
 npm run test:multi-turn-memory  # LLM runtime memory-context injection
+npm run test:memory-compaction  # compaction detection + invocation: 50% threshold boundary, highest-model call, fail-open
+npm run test:memory-compaction-prompt  # prompts/memory-compaction.md: placeholders + compress-without-losing-detail contract
+npm run test:model-defaults     # highest-model resolution used by compaction (resolveHighestModelConfiguration)
 npm run test:prompt-logger      # prompt.log writer (--log-prompts)
-npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts, persistent.ts, compositeMemory.ts
+npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts, persistent.ts, compositeMemory.ts, memoryCompaction.ts
 ```
 
 ## Relationship to legacy memory

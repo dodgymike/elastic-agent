@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "session_id": "aaaa-1112-0001",
+  "user_id": "docs-example",
+  "plan": "1. Reproduce the memory-growth scenario on a small fixture.\n2. Let the session summary grow past 50% of the configured context window.\n3. Observe the memory-compaction hook fire with the highest model.",
+  "persistedAt": "2026-08-21T00:00:00.000Z",
+  "stepCount": 4,
+  "summary": "ARTIFICIAL EXAMPLE — NOT REAL SESSION DATA. This document is a synthetic fixture used by the memory-compaction example. The session summary below is intentionally written long enough that its character length exceeds 50% of the default 120_000-char context window, so the detection hook would trigger a compaction. (In practice a real summary would only need to exceed 50% of the effective window; this placeholder simply illustrates the shape.) Important facts to preserve across compaction: (1) this project is a TypeScript/Node (ESM, nodenext) runtime, not Go; (2) memory is a transport-agnostic MemoryModule with persistent default and in-memory/graph/composite backends; (3) compaction triggers only when summary.length / contextWindow is strictly greater than 0.5; (4) compaction uses the highest model via resolveHighestModelConfiguration and the prompts/memory-compaction.md prompt; (5) compaction is fail-open — any failure preserves the original memory and logs an actionable diagnostic; (6) the example session id aaaa-1112-0001 is exercised in test/memory-compaction.test.ts. Additional filler sentences are included here purely to inflate the placeholder length to a realistic over-threshold size for illustration; none of this content is real or sensitive.",
+  "steps": [
+    {
+      "index": 1,
+      "action": "probe",
+      "description": "Create placeholder session fixture (ARTIFICIAL EXAMPLES ONLY)",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    },
+    {
+      "index": 2,
+      "action": "probe",
+      "description": "Grow the summary past the 50% compaction threshold",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    },
+    {
+      "index": 3,
+      "action": "probe",
+      "description": "Trigger memory compaction with the highest model",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    },
+    {
+      "index": 4,
+      "action": "probe",
+      "description": "Persist the compacted summary (fail-open semantics)",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    }
+  ]
+}
