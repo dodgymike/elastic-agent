@@ -1626,6 +1626,40 @@ function reportImplementationTldr(
     }
     summaryLines.push(`Steps completed: ${completedSteps.length}.`);
 
+    // Per-step results/comments. Each completed step may carry a `result`
+    // derived from the model's execution feedback (stepStatus/summary/findings)
+    // or a validation error; it never includes file contents, data.json, or
+    // secrets. When a step has no recorded result we note that it ran without
+    // captured feedback rather than fabricating one.
+    const stepResultLines: string[] = [];
+    for (const entry of completedSteps) {
+        const stepLabel = `Step ${entry.step}: ${truncate(String(entry.text ?? "").replace(/\s+/g, " ").trim(), 200)}`;
+        const result = entry && typeof entry.result === "object" && entry.result !== null ? entry.result : null;
+        if (!result) {
+            stepResultLines.push(stepLabel);
+            stepResultLines.push("  Result: no per-step feedback recorded.");
+            continue;
+        }
+        const statusStr = result.stepStatus ? ` (${result.stepStatus})` : "";
+        stepResultLines.push(`${stepLabel}${statusStr}`);
+        if (result.summary) {
+            stepResultLines.push(`  Summary: ${truncate(String(result.summary).replace(/\s+/g, " ").trim(), 240)}`);
+        }
+        if (Array.isArray(result.findings) && result.findings.length > 0) {
+            const findings = result.findings
+                .slice(0, 5)
+                .map((f) => truncate(String(f).replace(/\s+/g, " ").trim(), 240))
+                .filter(Boolean);
+            if (findings.length > 0) {
+                stepResultLines.push(`  Findings: ${findings.join(" | ")}${result.findings.length > 5 ? " | ..." : ""}`);
+            }
+        }
+    }
+    if (stepResultLines.length > 0) {
+        summaryLines.push("Step results/comments:");
+        summaryLines.push(...stepResultLines);
+    }
+
     if (appliedReplans.length > 0) {
         const detail = appliedReplans
             .map((entry) => truncate(String(entry.reason ?? ""), 120))
