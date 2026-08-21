@@ -417,6 +417,14 @@ Integration details:
    never throwing. The input is built from plan/execution metadata already in
    the loop — never from `data.json` or secret payloads — so it is safe to
    persist even where a durable backend later stores it.
+4. Independently of memory, the execution loop records each step's **result**
+   (its `stepStatus`/`summary`/`findings` from the model's execution-feedback
+   block, or a validation error when feedback did not parse) alongside the
+   step number and text on `configData.completedSteps`. The final
+   `reportImplementationTldr` console recap reads these and prints a
+   `Step results/comments:` section. Like the memory input, the result is
+   derived only from execution feedback — never from file contents,
+   `data.json`, or secrets — so it is safe to surface in the tldr.
 
 The integration is **optional and fail-safe**: if memory is disabled, the
 summarizer/delegate throws, or `remember()`/`getContext()` fails, the LLM

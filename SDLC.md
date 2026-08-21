@@ -22,6 +22,20 @@ a mandatory post-plan **review phase**. The lifecycle is:
    retry budget remains, restart the **execution** phase (not the planning
    phase) with the review feedback and learnings injected; otherwise fail.
 
+### Step results and the final tldr
+
+After each step completes, the execution loop appends the step's **result** —
+derived only from the model's execution-feedback block (`stepStatus`, `summary`,
+`findings`) or a validation error when feedback did not parse — alongside the
+step number and text on `configData.completedSteps`. This per-step result is
+secret-safe: it never includes file contents, `data.json`, or credentials.
+
+At the end of a run, `reportImplementationTldr` (the final console recap) reads
+those completed steps and prints a **`Step results/comments:`** section listing
+each step's summary/findings (or a "no per-step feedback recorded" note when a
+step ran without captured feedback). Existing consumers that only read a step's
+number/text are unaffected by the added `result` field.
+
 ## Module structure
 
 `main.ts` is the CLI orchestrator: it parses command-line arguments and options,
