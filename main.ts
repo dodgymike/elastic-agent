@@ -154,7 +154,7 @@ program
     .option("--disable-classifier", "Bypass the tool safety classifier", false)
     .option("--agent-source-dir <dir>", "Agent source directory whose files may be edited (default: resolved agent source directory)")
     .option("--start-dir <dir>", "Starting directory whose files may be edited (default: runtime working directory)")
-    .option("--safe-dir <dirs>", "Comma-separated list of additional safe directories the classifier treats as readable and editable (e.g. --safe-dir /path/a,/path/b)")
+    .option("--safe-dirs <dirs>", "Comma-separated list of additional safe directories the classifier treats as readable and editable (e.g. --safe-dir /path/a,/path/b)")
     .option("--allow-agent-source-modifications", "Allow edit-capable tools to modify files inside the agent source and start directories", false)
     .option("-q, --quiet", "Suppress non-essential output (tool call params/results, plan summaries, TLDR, status messages); keep 'Step N started' and 'Step N finished' messages", false)
     .option("--very-quiet", "Suppress all standard output on success; only a catastrophic/fatal error may print (overrides --quiet)", false)

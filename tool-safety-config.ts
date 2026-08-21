@@ -113,14 +113,22 @@ function resolveDirectoryOption(value: string | undefined, flagName: string, fal
  */
 function resolveSafeDirList(value: string | undefined, flagName: string, baseCwd: string): string[] {
   if (value === undefined || value.trim() === "") return [];
+
   const entries = value
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+
+  // Each entry contributes both its canonical resolved path (which is what the
+  // classifier matches against) and the raw trimmed form (in case a read tool
+  // is presented the path exactly as the user typed it). Deduping keeps the
+  // resulting allow-list compact and free of duplicates.
   const dirs: string[] = [];
   for (const entry of entries) {
     dirs.push(resolveDirectoryOption(entry, flagName, baseCwd));
+    dirs.push(entry);
   }
+
   return Array.from(new Set(dirs));
 }
 
@@ -149,7 +157,7 @@ export function resolveToolSafetyConfig(
   // and is threaded into both config branches below, including the mods root
   // branch where it adds user-declared safe directories on top of the
   // authoritative agent-source root.
-  const safeDirs = resolveSafeDirList(options.safeDirs, "--safe-dir", fallback);
+  const safeDirs = resolveSafeDirList(options.safeDirs, "--safe-dirs", fallback);
   // --start-dir scopes all tool work to a single directory, which is mutually
   // exclusive with allowing modifications across the agent source tree. Reject
   // the conflicting combination up front so the CLI reports a clear usage error
