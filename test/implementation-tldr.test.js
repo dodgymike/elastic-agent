@@ -37,4 +37,27 @@ assert.ok(source.includes("never render as \"[object Object]\""), "planTldrSumma
 //    status.tldr helper so the full recap prints under the plan hierarchy.
 assert.ok(tldrFn.includes("status.tldr(summaryLines.join(\"\\n\"), prefix);"), "tldr must print through the shared status.tldr helper");
 
+// 5. Each completed step may carry a `result` derived from the model's
+//    execution feedback (stepStatus/summary/findings) or a validation error;
+//    the tldr must surface those per-step results/comments under a dedicated
+//    heading rather than fabricating feedback.
+assert.ok(tldrFn.includes("summaryLines.push(\"Step results/comments:\")"), "tldr must print a 'Step results/comments:' heading when per-step feedback exists");
+assert.ok(tldrFn.includes("`Step ${entry.step}: ${truncate(String(entry.text ?? \"\")"), "tldr must label each result line with its step number and text");
+assert.ok(tldrFn.includes("\"  Result: no per-step feedback recorded.\""), "tldr must fall back to a no-feedback note when a step has no recorded result");
+assert.ok(tldrFn.includes("\`  Summary: ${truncate(String(result.summary)"), "tldr must render each step's result summary");
+assert.ok(tldrFn.includes("\`  Findings: ${findings.join(\" | \")}"), "tldr must render each step's result findings");
+assert.ok(tldrFn.includes("never includes file contents, data.json, or"), "tldr must not surface secrets in step results");
+
+// 6. The execution loop records each step's result alongside its text so the
+//    tldr can consume them. The result is derived only from the model's
+//    execution feedback (stepStatus/summary/findings) or the validation error,
+//    never from file contents, data.json, or secrets.
+const pushRe = /configData\.completedSteps\.push\(\{[^}]*result:/;
+assert.match(source, pushRe, "completedSteps.push must include a per-step `result` field");
+assert.ok(source.includes("const stepResult = feedbackEntry?.valid"), "step result must branch on whether execution feedback parsed");
+assert.ok(source.includes("stepStatus: feedbackEntry.feedback.stepStatus"), "a valid step result must record the execution stepStatus");
+assert.ok(source.includes("findings: Array.isArray(feedbackEntry.feedback.findings)"), "a valid step result must record the execution findings");
+assert.ok(source.includes("stepStatus: \"failed\""), "an invalid/validation-error step result must be marked failed");
+assert.ok(source.includes("invalid response: ${feedbackEntry.validationError}"), "a failed step result must surface the validation error as a finding");
+
 console.log("implementation-tldr structure passed");
