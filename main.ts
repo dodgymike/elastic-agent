@@ -2169,7 +2169,23 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                 );
             }
             const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
-            configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null });
+            // Record each step's result/comment alongside the step text so later
+            // consumers (final tldr, replan, review) can surface what actually
+            // happened per step. The result is derived only from the model's
+            // execution feedback (stepStatus/summary/findings) or the validation
+            // error; it never carries file contents, data.json, or secrets.
+            const stepResult = feedbackEntry?.valid
+                ? {
+                      stepStatus: feedbackEntry.feedback.stepStatus ?? "completed",
+                      summary: feedbackEntry.feedback.summary ?? "",
+                      findings: Array.isArray(feedbackEntry.feedback.findings) ? feedbackEntry.feedback.findings : [],
+                  }
+                : {
+                      stepStatus: "failed",
+                      summary: "",
+                      findings: feedbackEntry?.validationError ? [`invalid response: ${feedbackEntry.validationError}`] : [],
+                  };
+            configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null, result: stepResult });
             // Memory integration (step 5): record this completed plan step into
             // the swappable MemoryModule. The outcome/status is derived from the
             // step's execution feedback when it parsed; otherwise it is a plain
