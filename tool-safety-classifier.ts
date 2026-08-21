@@ -476,18 +476,23 @@ function fileEditPolicyVerdict(
   if (!config.allowAgentSourceModifications) {
     // When a start dir is configured, --start-dir and
     // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
-    // time, so the flag is effectively always unset in start-dir runs. For a
-    // target outside the main.ts (agent-source) directory, blaming the flag
-    // would be actively misleading (setting it would fail startup): the real
-    // reason is that the path is outside the configured editable directories.
-    // Prompt #7: when a start dir is specified and the file is outside the
-    // main.ts dir, do NOT mention that flag as a reason to deny. Emit the
-    // path-boundary reason in that case; keep the flag-based reason only for a
-    // target genuinely inside the agent-source (main.ts) directory (where the
-    // flag alone governs the edit) and for Docker sessions (relaxed boundary).
-    if (config.startDirConfigured && !allowOutsideWorkspace && !isInsideAnyBoundary(target, [roots[0]])) {
-      return unsafe(`${toolName} target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
+    // time, so the flag is effectively always unset in start-dir runs. In such
+    // runs the editable boundary is the full editable roots (--agent-source-dir
+    // AND --start-dir, plus any declared safe dirs): a write inside any of them
+    // is permitted, while a write outside every root is denied with a
+    // path-boundary reason. Prompt #7: never blame the flag in a start-dir run
+    // (setting it would fail startup); always cite the real path boundary.
+    if (config.startDirConfigured) {
+      if (!allowOutsideWorkspace && !isInsideAnyBoundary(target, roots)) {
+        return unsafe(`${toolName} target '${target}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
+      }
+      // Inside the editable boundary (agent-source dir, start dir, or a declared
+      // safe dir) the write is permitted even without the flag.
+      return null;
     }
+    // No start dir: --allow-agent-source-modifications is the sole gate, so the
+    // flag-based reason is truthful and settable for a target in the
+    // agent-source directory.
     return unsafe(`${toolName} modifies files, which is denied because --allow-agent-source-modifications is not set.`);
   }
   // Docker mode relaxes the editable-directory boundary: writes are permitted
@@ -796,22 +801,27 @@ function executeCommandEditPolicyVerdict(
   if (!config.allowAgentSourceModifications) {
     // When a start dir is configured, --start-dir and
     // --allow-agent-source-modifications are mutually exclusive at CLI-resolution
-    // time, so the flag is effectively always unset in start-dir runs. For a
-    // file target outside the main.ts (agent-source) directory, blaming the
-    // flag would be actively misleading (setting it would fail startup): the
-    // real reason is that the path is outside the configured editable
-    // directories. Prompt #7: when a start dir is specified and a target is
-    // outside the main.ts dir, do NOT mention that flag as a reason to deny.
-    // Emit the path-boundary reason in that case; keep the flag-based reason
-    // only for a target genuinely inside the agent-source (main.ts) directory
-    // (where the flag alone governs the edit) and for Docker sessions.
-    if (config.startDirConfigured && !allowOutsideWorkspace) {
+    // time, so the flag is effectively always unset in start-dir runs. In such
+    // runs the editable boundary is the full editable roots (--agent-source-dir
+    // AND --start-dir, plus any declared safe dirs): a file modification inside
+    // any of them is permitted, while a target outside every root is denied with
+    // a path-boundary reason. Prompt #7: never blame the flag in a start-dir run
+    // (setting it would fail startup); always cite the real path boundary.
+    if (config.startDirConfigured) {
       const targets = fileModificationTargets(command);
-      const offender = targets.find((target) => !isInsideAnyBoundary(target, [roots[0]]));
+      const offender = !allowOutsideWorkspace
+        ? targets.find((target) => !isInsideAnyBoundary(target, roots))
+        : undefined;
       if (offender !== undefined) {
         return unsafe(`ExecuteCommand file target '${offender}' resolves outside the configured editable directories (--agent-source-dir and --start-dir).`);
       }
+      // All modification targets stay inside the configured editable boundary,
+      // so the command is permitted even without the flag.
+      return null;
     }
+    // No start dir: --allow-agent-source-modifications is the sole gate, so the
+    // flag-based reason is truthful and settable for a target in the
+    // agent-source directory.
     return unsafe("ExecuteCommand modifies files, which is denied because --allow-agent-source-modifications is not set.");
   }
   // Docker mode relaxes the editable-directory boundary; the remaining static

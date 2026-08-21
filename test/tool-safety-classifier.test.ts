@@ -253,8 +253,12 @@ async function main(): Promise<void> {
       staticVerdict("Mkdir", { path: "tmp/build", recursive: true }).decision === "safe",
     );
     check(
-      "Mkdir and Rmdir without the allow flag are denied (file-mutating gate)",
+      "Mkdir and Rmdir without the allow flag are denied outside the editable roots (file-mutating gate)",
       (() => {
+        // A start-dir run treats the configured --start-dir (and the
+        // --agent-source-dir) as editable roots, so a file-mutating Mkdir/Rmdir
+        // inside those roots is permitted; a target that resolves outside EVERY
+        // editable root stays denied by the file-mutating gate.
         const denyConfig: TestToolSafetyConfig = {
           enabled: true,
           agentSourceDir,
@@ -262,8 +266,12 @@ async function main(): Promise<void> {
           startDirConfigured: true,
           allowAgentSourceModifications: false,
         };
-        return staticVerdictWithConfig("Mkdir", { path: "notes.md" }, denyConfig).decision === "unsafe"
-          && staticVerdictWithConfig("Rmdir", { path: "notes.md" }, denyConfig).decision === "unsafe";
+        const insideRoot = staticVerdictWithConfig("Mkdir", { path: join(startDir, "new", "dir"), recursive: true }, denyConfig).decision === "safe"
+          && staticVerdictWithConfig("Rmdir", { path: join(startDir, "new", "dir"), recursive: true }, denyConfig).decision === "safe";
+        const outsideRoot = join(tmpDir, "gate-outside", "notes.md");
+        return insideRoot
+          && staticVerdictWithConfig("Mkdir", { path: outsideRoot }, denyConfig).decision === "unsafe"
+          && staticVerdictWithConfig("Rmdir", { path: outsideRoot }, denyConfig).decision === "unsafe";
       })(),
     );
     check(
@@ -627,21 +635,24 @@ async function main(): Promise<void> {
     };
     const privateKeyBlock = ["-----BEGIN ", "RSA PRIVATE KEY-----"].join("");
 
+    // In a --start-dir run the editable boundary is the full editable roots
+    // (--agent-source-dir AND --start-dir), so a Write/Edit/Delete inside any
+    // of them is permitted even without --allow-agent-source-modifications.
     check(
-      "no allow flag denies Write even inside the configured directories",
-      staticVerdictWithConfig("Write", { path: join(agentSourceDir, "notes.md"), content: "hello" }, denyEditsConfig).decision === "unsafe",
+      "no allow flag + start-dir run: Write inside the configured directories is safe",
+      staticVerdictWithConfig("Write", { path: join(agentSourceDir, "notes.md"), content: "hello" }, denyEditsConfig).decision === "safe",
     );
     check(
-      "no allow flag denies Edit inside the configured directories",
-      staticVerdictWithConfig("Edit", { path: join(startDir, "notes.md"), old_string: "a", new_string: "b" }, denyEditsConfig).decision === "unsafe",
+      "no allow flag + start-dir run: Edit inside the configured directories is safe",
+      staticVerdictWithConfig("Edit", { path: join(startDir, "notes.md"), old_string: "a", new_string: "b" }, denyEditsConfig).decision === "safe",
     );
     check(
-      "no allow flag denies Delete inside the configured directories",
-      staticVerdictWithConfig("Delete", { path: join(startDir, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, denyEditsConfig).decision === "unsafe",
+      "no allow flag + start-dir run: Delete inside the configured directories is safe",
+      staticVerdictWithConfig("Delete", { path: join(startDir, "notes.md"), file_hash: "0".repeat(64), file_size: 5 }, denyEditsConfig).decision === "safe",
     );
     check(
-      "no allow flag denies file-modifying ExecuteCommand",
-      staticVerdictWithConfig("ExecuteCommand", { command: `touch ${join(startDir, "created.txt")}` }, denyEditsConfig).decision === "unsafe",
+      "no allow flag + start-dir run: file-modifying ExecuteCommand inside the configured directories is not statically denied",
+      staticVerdictWithConfig("ExecuteCommand", { command: `touch ${join(startDir, "created.txt")}` }, denyEditsConfig).decision !== "unsafe",
     );
 
     check(
@@ -707,10 +718,19 @@ async function main(): Promise<void> {
       bypassResult.safe === true && bypassResult.source === "static" && bypassCapture.lines.length === 0,
     );
 
+    // The denial-render path is driven by the flag-based gate, which only fires
+    // when no separate --start-dir is configured (the flag is then genuinely
+    // required and settable). In a --start-dir run the in-editable-root write is
+    // allowed statically, so to exercise the denial render we use the no-start-
+    // dir config where the flag-based reason governs.
+    const flagDenyRenderConfig: TestToolSafetyConfig = {
+      ...denyEditsConfig,
+      startDirConfigured: false,
+    };
     const deniedEditCapture = capturingLogger();
     const deniedEdit = await classifyToolCall("Write", { path: join(agentSourceDir, "notes.md"), content: "hello" }, {
       workspaceRoot: WORKSPACE,
-      toolSafetyConfig: denyEditsConfig,
+      toolSafetyConfig: flagDenyRenderConfig,
       logger: deniedEditCapture.logger,
     });
     check(
@@ -798,20 +818,22 @@ async function main(): Promise<void> {
     );
 
     // 5c-2. Focused regression for the inside-start-dir / outside-main.ts
-    //       denial reason. Prompt #7: when a start dir is specified and the
-    //       write target is OUTSIDE the main.ts (agent-source) directory, the
-    //       denial reason must NOT blame --allow-agent-source-modifications.
-    //       That flag is mutually exclusive with --start-dir at CLI-resolution
-    //       time, so telling the operator to set it would be actively
-    //       misleading (it could never be set in a start-dir invocation). The
-    //       classifier must instead cite the file's real location and the
-    //       configured start dir so the operator can fix the invocation.
+    //       case. Prompt #7: when a start dir is specified (mutually exclusive
+    //       with --allow-agent-source-modifications at CLI-resolution time),
+    //       the editable boundary is the FULL editable roots — the
+    //       --agent-source-dir AND the --start-dir. A file inside the
+    //       configured --start-dir is therefore a permitted edit/write/delete
+    //       (and permitted file-modifying command) even without the allow flag,
+    //       and the denial reason must never blame --allow-agent-source-
+    //       modifications (telling the operator to set a flag that could never
+    //       be set in a start-dir invocation would be actively misleading).
     //
     //       This is distinct from 5c-1 above, which covers a target outside
-    //       BOTH editable directories. Here the target is INSIDE --start-dir
-    //       but OUTSIDE --agent-source-dir (main.ts's directory): the file is
-    //       still outside main.ts, so the flag must not be blamed even though
-    //       the target lies within one configured root.
+    //       BOTH editable directories (still denied with a path-boundary
+    //       reason). Here the target is INSIDE --start-dir but OUTSIDE
+    //       --agent-source-dir (main.ts's directory): with the fix the write is
+    //       allowed because --start-dir is an editable root, and it must not be
+    //       blamed on the (unsettable) flag.
     const startDirOnlyEditConfig: TestToolSafetyConfig = {
       enabled: true,
       agentSourceDir,
@@ -840,50 +862,47 @@ async function main(): Promise<void> {
       { command: `touch ${insideStartTarget}` },
       startDirOnlyEditConfig,
     );
-    // The target is inside --start-dir, so it does NOT escape both editable
-    // directories; without the allow flag it is still denied (the edit/write
-    // policy requires the flag unless it is running in an allow-outside
-    // session).
+    // The target is inside the configured --start-dir, which is an editable
+    // root in a start-dir run, so it is permitted even without the allow flag.
     check(
-      "start dir set + write inside start dir but outside main.ts is denied",
-      insideStartWriteVerdict.decision === "unsafe",
+      "start dir set + write inside start dir but outside main.ts is safe",
+      insideStartWriteVerdict.decision === "safe",
     );
     check(
-      "start dir set + Edit inside start dir but outside main.ts is denied",
-      insideStartEditVerdict.decision === "unsafe",
+      "start dir set + Edit inside start dir but outside main.ts is safe",
+      insideStartEditVerdict.decision === "safe",
     );
     check(
-      "start dir set + Delete inside start dir but outside main.ts is denied",
-      insideStartDeleteVerdict.decision === "unsafe",
+      "start dir set + Delete inside start dir but outside main.ts is safe",
+      insideStartDeleteVerdict.decision === "safe",
     );
     check(
-      "start dir set + file-modifying ExecuteCommand inside start dir but outside main.ts is denied",
-      insideStartExecuteVerdict.decision === "unsafe",
+      "start dir set + file-modifying ExecuteCommand inside start dir but outside main.ts is not statically denied",
+      insideStartExecuteVerdict.decision !== "unsafe",
     );
-    // Core prompt #7 assertion: none of these denials may blame the flag.
+    // Guard: even when a start-dir write is permitted, it must never be
+    // attributed to (or blamed on) --allow-agent-source-modifications, since
+    // that flag could never be set in a start-dir invocation. A safe verdict
+    // that somehow carried a misleading flag reason would be a regression.
     check(
       "start dir set + write inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
-      insideStartWriteVerdict.decision === "unsafe"
-        && !/allow-agent-source-modifications/.test(insideStartWriteVerdict.reason)
-        && /--agent-source-dir|--start-dir/.test(insideStartWriteVerdict.reason),
+      insideStartWriteVerdict.decision === "safe"
+        && !/allow-agent-source-modifications/.test(insideStartWriteVerdict.reason),
     );
     check(
       "start dir set + Edit inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
-      insideStartEditVerdict.decision === "unsafe"
-        && !/allow-agent-source-modifications/.test(insideStartEditVerdict.reason)
-        && /--agent-source-dir|--start-dir/.test(insideStartEditVerdict.reason),
+      insideStartEditVerdict.decision === "safe"
+        && !/allow-agent-source-modifications/.test(insideStartEditVerdict.reason),
     );
     check(
       "start dir set + Delete inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
-      insideStartDeleteVerdict.decision === "unsafe"
-        && !/allow-agent-source-modifications/.test(insideStartDeleteVerdict.reason)
-        && /--agent-source-dir|--start-dir/.test(insideStartDeleteVerdict.reason),
+      insideStartDeleteVerdict.decision === "safe"
+        && !/allow-agent-source-modifications/.test(insideStartDeleteVerdict.reason),
     );
     check(
       "start dir set + file-modifying ExecuteCommand inside start dir but outside main.ts does NOT blame --allow-agent-source-modifications",
-      insideStartExecuteVerdict.decision === "unsafe"
-        && !/allow-agent-source-modifications/.test(insideStartExecuteVerdict.reason)
-        && /--agent-source-dir|--start-dir/.test(insideStartExecuteVerdict.reason),
+      insideStartExecuteVerdict.decision !== "unsafe"
+        && !/allow-agent-source-modifications/.test(insideStartExecuteVerdict.reason),
     );
 
     // The flag-based reason must REMAIN when start dir is NOT configured (the
@@ -918,18 +937,18 @@ async function main(): Promise<void> {
     );
 
     // Within a start-dir run, a target INSIDE the main.ts (agent-source)
-    // directory is not "outside main.ts", so prompt #7 does not require the
-    // reason to change there; the flag-based reason is still truthful because
-    // the edit/write policy gate keys on the allow flag for in-boundary edits.
+    // directory is inside the editable roots, so it is permitted even without
+    // the flag (the whole --agent-source-dir is an editable root). It therefore
+    // carries no flag-based denial reason at all.
     const startDirInsideAgentVerdict = staticVerdictWithConfig(
       "Write",
       { path: join(agentSourceDir, "notes.md"), content: "hello" },
       startDirOnlyEditConfig,
     );
     check(
-      "start dir set + write inside main.ts (agent-source) may keep the truthful flag reason",
-      startDirInsideAgentVerdict.decision === "unsafe"
-        && /allow-agent-source-modifications/.test(startDirInsideAgentVerdict.reason),
+      "start dir set + write inside main.ts (agent-source) is safe and does not blame the flag",
+      startDirInsideAgentVerdict.decision === "safe"
+        && !/allow-agent-source-modifications/.test(startDirInsideAgentVerdict.reason),
     );
 
     // Canonical vs symlink alias for the inside-start-dir/outside-main.ts
@@ -966,24 +985,23 @@ async function main(): Promise<void> {
       { workspaceRoot: boundary5c2Root, toolSafetyConfig: symlinkStartConfig },
     );
     check(
-      "5c2 canonical: write inside start dir but outside main.ts does NOT blame the flag",
-      canonicalInsideStartVerdict.decision === "unsafe"
-        && !/allow-agent-source-modifications/.test(canonicalInsideStartVerdict.reason)
-        && /--agent-source-dir|--start-dir/.test(canonicalInsideStartVerdict.reason),
+      "5c2 canonical: write inside start dir but outside main.ts is safe",
+      canonicalInsideStartVerdict.decision === "safe"
+        && !/allow-agent-source-modifications/.test(canonicalInsideStartVerdict.reason),
     );
     // Symlink spelling: target through the alias resolves into the canonical
-    // start dir (outside main.ts) and must get the same, truthful reason.
+    // start dir (outside main.ts) and must be treated the same way — safe and
+    // never blamed on the flag.
     const symlinkInsideStartVerdict = classifyToolCallStatically(
       "Write",
       { path: join(boundary5c2AliasStart, "notes.md"), content: "x" },
       { workspaceRoot: boundary5c2AliasStart, toolSafetyConfig: symlinkStartConfig },
     );
     check(
-      "5c2 symlink: write inside start dir (via alias) but outside main.ts does NOT blame the flag",
+      "5c2 symlink: write inside start dir (via alias) but outside main.ts is safe",
       !boundary5c2AliasResolves
-        || (symlinkInsideStartVerdict.decision === "unsafe"
-          && !/allow-agent-source-modifications/.test(symlinkInsideStartVerdict.reason)
-          && /--agent-source-dir|--start-dir/.test(symlinkInsideStartVerdict.reason)),
+        || (symlinkInsideStartVerdict.decision === "safe"
+          && !/allow-agent-source-modifications/.test(symlinkInsideStartVerdict.reason)),
     );
     check(
       "5c2 canonical vs symlink start dir resolve to the same real root",
@@ -1666,12 +1684,16 @@ async function main(): Promise<void> {
       "Docker Read of a protected .env file stays denied",
       staticVerdictWithDocker("Read", { path: "/etc/.env" }, true).decision === "unsafe",
     );
+    // Docker relaxes the boundary only when a start dir is NOT configured; a
+    // --start-dir run under Docker treats the editable-boundary writes as
+    // permitted. The flag-based gate that Docker does NOT bypass is the
+    // no-start-dir path, so we assert that here.
     check(
       "Docker Write outside the configured directories still requires --allow-agent-source-modifications",
       staticVerdictWithConfigAndDocker(
         "Write",
         { path: "/etc/agent-notes.md", content: "hello" },
-        denyEditsConfig,
+        { ...denyEditsConfig, startDirConfigured: false },
         true,
       ).decision === "unsafe",
     );
@@ -2096,11 +2118,17 @@ async function main(): Promise<void> {
     const denialFixturePath = join(repoRoot, "tmp", "denial-categorization-2026-08-14-to-2026-08-16.jsonl");
     const historicalWorkspaceRoot = "/elastic-agent";
     const historicalAllowedDirectories = [historicalWorkspaceRoot, "/mnt/sdb4/mike/mike/source/elastic-agent"];
+    // The historical fixture's edit-policy true positives were recorded under
+    // the default production edit gate (no --start-dir configured), where an
+    // edit without --allow-agent-source-modifications is denied. Setting
+    // startDirConfigured:false restores that flag-based gate so an in-root edit
+    // is denied (the new start-dir editable-boundary behavior only applies when
+    // a separate --start-dir is explicitly configured).
     const historicalProductionConfig: TestToolSafetyConfig = {
       enabled: true,
       agentSourceDir: historicalWorkspaceRoot,
       startDir: historicalWorkspaceRoot,
-      startDirConfigured: true,
+      startDirConfigured: false,
       allowAgentSourceModifications: false,
     };
 
