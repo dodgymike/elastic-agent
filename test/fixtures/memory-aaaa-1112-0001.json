@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "session_id": "aaaa-1112-0001",
+  "user_id": "test-fixture",
+  "plan": "1. Build a canned session state whose summary is large enough to exceed 50% of the test-configured context window.\n2. Load the memory-compaction prompt from prompts/memory-compaction.md.\n3. Trigger compaction with a stubbed highest-model call and assert plan + memory are both passed.\n4. Assert the compacted summary replaces the original memory.\n5. Keep the fixture deterministic: canned values only, no real or sensitive data.",
+  "persistedAt": "2026-08-21T00:00:00.000Z",
+  "stepCount": 4,
+  "summary": "ARTIFICIAL TEST FIXTURE — NOT REAL SESSION DATA. This is a canned, safe fixture mirroring the shape of the docs example (docs/examples/elastic-agent-memory-aaaa-1112-0001.json) so tests can exercise the full memory-compaction flow against a stable payload. Important facts that a compaction must preserve: (1) this is a TypeScript/Node (ESM, nodenext) project; (2) memory is a transport-agnostic MemoryModule; (3) compaction triggers only when summary.length / contextWindow is strictly greater than 0.5; (4) compaction uses the highest model and the prompts/memory-compaction.md prompt; (5) compaction is fail-open — a failure preserves the original memory. All content here is synthetic placeholder text used only for deterministic tests.",
+  "steps": [
+    {
+      "index": 1,
+      "action": "probe",
+      "description": "Create canned session fixture (ARTIFICIAL TEST DATA ONLY)",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    },
+    {
+      "index": 2,
+      "action": "probe",
+      "description": "Grow the summary past the 50% compaction threshold",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    },
+    {
+      "index": 3,
+      "action": "probe",
+      "description": "Trigger memory compaction with the highest model",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    },
+    {
+      "index": 4,
+      "action": "probe",
+      "description": "Persist the compacted summary (fail-open semantics)",
+      "outcome": "completed",
+      "reasoning": "Stand in for a real remembered step; content is synthetic."
+    }
+  ]
+}

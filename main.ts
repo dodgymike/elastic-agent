@@ -379,11 +379,27 @@ try {
 }
 let memoryCompactorInitialized = false;
 
-/** True when a memory backend exposes the narrow summary read/set interface the compactor needs. */
+/**
+ * True when a memory backend exposes the narrow summary read/set interface the
+ * compactor needs. Recognizes both the `CompactionSummaryStore` method names
+ * (`getSummary`/`setSummary`) and the real backends' native names
+ * (`summaryForSession`/`setSummaryForSession`) so runtime compaction is not
+ * silently disabled for either a future `CompactionSummaryStore`-styled store or
+ * an `InMemoryMemoryModule`/`PersistentMemoryModule`.
+ */
 function hasCompactionSummaryStore(module: MemoryModule | null): boolean {
     if (!module) return false;
-    const store = module as unknown as Partial<CompactionSummaryStore>;
-    return typeof store?.getSummary === "function" && typeof store?.setSummary === "function";
+    const store = module as unknown as Partial<CompactionSummaryStore> & {
+        summaryForSession?: (id: string) => string | undefined;
+        setSummaryForSession?: (id: string, s: string) => void;
+    };
+    const hasGet =
+        typeof store?.getSummary === "function" ||
+        typeof store?.summaryForSession === "function";
+    const hasSet =
+        typeof store?.setSummary === "function" ||
+        typeof store?.setSummaryForSession === "function";
+    return hasGet && hasSet;
 }
 
 /**

@@ -312,6 +312,21 @@ export class PersistentMemoryModule implements MemoryModule {
     this.summaryBySession.set(sessionId, summary);
   }
 
+  /**
+   * Compactor-facing alias for {@link summaryForSession}. Exposes the narrow
+   * read surface the `MemoryCompactor` needs (its {@link CompactionSummaryStore})
+   * so the persistent backend is directly usable for runtime compaction without
+   * dropping to the `summaryForSession` name.
+   */
+  getSummary(sessionId: string): string | undefined {
+    return this.summaryForSession(sessionId);
+  }
+
+  /** Compactor-facing alias for {@link setSummaryForSession}. */
+  setSummary(sessionId: string, summary: string): void {
+    this.setSummaryForSession(sessionId, summary);
+  }
+
   private ownContext(request: ContextRequest): MemoryContextResult {
     const sessionId = request.session_id;
     const history = this.historyBySession.get(sessionId) ?? [];
