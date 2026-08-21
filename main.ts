@@ -1,4 +1,5 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
+import { resolveHighestModelConfiguration } from "./llm/model-defaults.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { translateCliArgs, resolveOutputGates } from "./output-verbosity.ts";
@@ -47,6 +48,7 @@ import {
     createCompositeMemoryModule,
     type FinalizableMemoryModule,
 } from "./memory/compositeMemory.js";
+import { MemoryCompactor, type CompactionSummaryStore } from "./memory/memoryCompaction.js";
 import type {
     MemoryAction,
     MemoryJsonValue,
@@ -360,6 +362,56 @@ let agentSessionId: string;
             filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
         };
         agentMemory = createPersistentMemoryModule(persistentOptions);
+    }
+}
+// Memory compaction for the summary-based memory backends. The compactor is
+// constructed lazily (on the first rememberAgentStep) and is fail-open: if
+// memory is disabled, the active backend does not expose the read/set summary
+// interface it needs (graph and composite backends do not today), the compaction
+// prompt is missing, or the adapter/model cannot be resolved, compaction is
+// simply disabled and normal execution/memory injection are unaffected.
+let memoryCompactor: MemoryCompactor | null = null;
+let memoryCompactionPrompt = "";
+try {
+    memoryCompactionPrompt = readFileSync("prompts/memory-compaction.md", "utf-8");
+} catch {
+    memoryCompactionPrompt = "";
+}
+let memoryCompactorInitialized = false;
+
+/** True when a memory backend exposes the narrow summary read/set interface the compactor needs. */
+function hasCompactionSummaryStore(module: MemoryModule | null): boolean {
+    if (!module) return false;
+    const store = module as unknown as Partial<CompactionSummaryStore>;
+    return typeof store?.getSummary === "function" && typeof store?.setSummary === "function";
+}
+
+/**
+ * Build the MemoryCompactor once on first use. Never throws; any resolution
+ * failure logs a non-fatal warning and leaves compaction disabled.
+ */
+async function ensureMemoryCompactor(): Promise<void> {
+    if (memoryCompactorInitialized) return;
+    memoryCompactorInitialized = true;
+    if (!hasCompactionSummaryStore(agentMemory) || !memoryCompactionPrompt) return;
+    try {
+        const adapter = await createRuntimeLlmAdapter({ configuration: providerSelection.configuration });
+        let highestModel: string;
+        try {
+            highestModel = resolveHighestModelConfiguration(modelConfiguration.provider, process.env).model;
+        } catch {
+            highestModel = modelConfiguration.model;
+        }
+        memoryCompactor = new MemoryCompactor({
+            store: agentMemory as unknown as CompactionSummaryStore,
+            adapter,
+            highestModel,
+            promptTemplate: memoryCompactionPrompt,
+            label: "memory-compaction",
+        });
+    } catch (error) {
+        status.warning(`Memory compaction disabled (non-fatal, memory unchanged): ${error instanceof Error ? error.message : String(error)}`);
+        memoryCompactor = null;
     }
 }
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
@@ -1942,6 +1994,21 @@ async function rememberAgentStep(options: {
         await agentMemory.remember(input);
     } catch (error) {
         status.warning(`Memory remember() failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // Memory-compaction hook (post-memory-update): after the store records the
+    // new step and refreshes its summary, check whether the summary has grown
+    // past the context-window threshold and, if so, compact it with the highest
+    // model and the compaction prompt (prompts/memory-compaction.md). Fail-open:
+    // compactors are built lazily once, and maybeCompact never throws — any
+    // failure preserves the original memory and logs an actionable diagnostic.
+    if (agentMemory && memoryCompactionPrompt) {
+        await ensureMemoryCompactor();
+        if (memoryCompactor) {
+            const outcome = await memoryCompactor.maybeCompact(agentSessionId, options.plan);
+            if (outcome.compacted) {
+                status.success(`Memory compacted for session ${agentSessionId} (threshold exceeded).`);
+            }
+        }
     }
 }
 

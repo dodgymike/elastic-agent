@@ -241,6 +241,16 @@ export class InMemoryMemoryModule implements MemoryModule {
     return this.summaryBySession.get(sessionId);
   }
 
+  /**
+   * Replace the running summary for a session. Used by the memory-compaction
+   * component to atomically swap in a compacted summary after a validated
+   * compaction. Leaves the underlying history untouched so no remembered step
+   * is lost. Safe on any session (creates an empty slot if absent).
+   */
+  setSummaryForSession(sessionId: string, summary: string): void {
+    this.summaryBySession.set(sessionId, summary);
+  }
+
   private ownContext(request: ContextRequest): MemoryContextResult {
     const sessionId = request.session_id;
     const history = this.historyBySession.get(sessionId) ?? [];

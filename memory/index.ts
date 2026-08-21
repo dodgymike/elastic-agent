@@ -55,3 +55,17 @@ export type {
   CompositeMemoryOptions,
   FinalizableMemoryModule,
 } from "./compositeMemory.js";
+
+export {
+  DEFAULT_CONTEXT_WINDOW,
+  MemoryCompactor,
+  MEMORY_COMPACTION_THRESHOLD,
+  renderMemoryCompactionPrompt,
+  shouldCompactMemory,
+  validateCompactedSummary,
+} from "./memoryCompaction.js";
+export type {
+  CompactionOutcome,
+  CompactionSummaryStore,
+  MemoryCompactorOptions,
+} from "./memoryCompaction.js";
