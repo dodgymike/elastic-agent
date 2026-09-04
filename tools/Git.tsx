@@ -15,6 +15,43 @@ export interface GitCommandResult {
   stderr: string;
 }
 
+/** Failure categories for a git process that did not complete normally. */
+export type GitProcessErrorKind =
+  | "spawn"
+  | "stream"
+  | "timeout"
+  | "signal"
+  | "output_overflow";
+
+/**
+ * Structured error for an abnormal git invocation: startup failure, stream
+ * failure, timeout, signal termination, or output-limit overflow. A normal git
+ * exit — including a nonzero `exitCode` — is never represented by this error;
+ * those are returned as `GitCommandResult`, per ERROR_HANDLING.md. The
+ * lower-level cause is preserved when available, and any captured stdout/stderr
+ * is attached only when it is safe to keep (it is bounded by the stream limit).
+ */
+export class GitProcessError extends Error {
+  readonly kind: GitProcessErrorKind;
+  readonly command: readonly string[];
+  readonly stdout?: string;
+  readonly stderr?: string;
+
+  constructor(
+    kind: GitProcessErrorKind,
+    command: readonly string[],
+    message: string,
+    options: { cause?: unknown; stdout?: string; stderr?: string } = {},
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "GitProcessError";
+    this.kind = kind;
+    this.command = [...command];
+    if (options.stdout !== undefined) this.stdout = options.stdout;
+    if (options.stderr !== undefined) this.stderr = options.stderr;
+  }
+}
+
 /** Options shared by every Git tool call. */
 interface GitBaseOptions {
   /** Repository directory. Defaults to the current working directory. */
@@ -312,6 +349,49 @@ const WORKTREE_SUBCOMMANDS = ["list", "add", "remove", "move", "prune"] as const
 
 type WorktreeSubcommand = (typeof WORKTREE_SUBCOMMANDS)[number];
 
+/** Failure categories for invalid `mode: "worktree"` calls. */
+export type GitWorktreeErrorKind =
+  | "unknown_subcommand"
+  | "unexpected_option"
+  | "invalid_option_type"
+  | "missing_required_field"
+  | "invalid_path"
+  | "path_traversal"
+  | "path_option_like"
+  | "protected_path"
+  | "out_of_workspace"
+  | "outside_worktrees_root"
+  | "invalid_branch_name"
+  | "invalid_commitish";
+
+/**
+ * Structured `TypeError` for invalid `mode: "worktree"` calls. Validation
+ * failures are rejected synchronously at the tool boundary before any git
+ * process runs, per ERROR_HANDLING.md. `kind` identifies the failure category
+ * and `subcommand` identifies the worktree subcommand when one is known.
+ */
+export class GitWorktreeError extends TypeError {
+  readonly kind: GitWorktreeErrorKind;
+  readonly subcommand: WorktreeSubcommand | null;
+
+  constructor(kind: GitWorktreeErrorKind, subcommand: WorktreeSubcommand | null, message: string) {
+    super(message);
+    this.name = "GitWorktreeError";
+    this.kind = kind;
+    this.subcommand = subcommand;
+  }
+}
+
+/** Build a worktree validation error with a stable `Git worktree <subcommand>` prefix. */
+function worktreeError(
+  kind: GitWorktreeErrorKind,
+  subcommand: WorktreeSubcommand | null,
+  detail: string,
+): GitWorktreeError {
+  const operation = subcommand === null ? "Git worktree" : `Git worktree ${subcommand}`;
+  return new GitWorktreeError(kind, subcommand, `${operation}: ${detail}.`);
+}
+
 /** Own enumerable option keys allowed for each worktree subcommand. */
 const WORKTREE_PARAMETER_KEYS: Record<WorktreeSubcommand, readonly string[]> = {
   list: ["mode", "subcommand", "cwd", "porcelain"],
@@ -345,27 +425,27 @@ function buildWorktreeArgs(options: GitWorktreeModeOptions): string[] {
   switch (subcommand) {
     case "list": {
       if (options.porcelain !== undefined && typeof options.porcelain !== "boolean") {
-        throw new TypeError("porcelain must be a boolean when provided.");
+        throw worktreeError("invalid_option_type", subcommand, "porcelain must be a boolean when provided");
       }
       if (options.porcelain === true) args.push("--porcelain");
       return args;
     }
 
     case "add": {
-      const path = requireWorktreeString(options.path, "path");
+      const path = requireWorktreeString(options.path, "path", subcommand);
       if (options.newBranch !== undefined && typeof options.newBranch !== "string") {
-        throw new TypeError("newBranch must be a string when provided.");
+        throw worktreeError("invalid_option_type", subcommand, "newBranch must be a string when provided");
       }
       if (options.detach !== undefined && typeof options.detach !== "boolean") {
-        throw new TypeError("detach must be a boolean when provided.");
+        throw worktreeError("invalid_option_type", subcommand, "detach must be a boolean when provided");
       }
       if (options.commitish !== undefined && typeof options.commitish !== "string") {
-        throw new TypeError("commitish must be a string when provided.");
+        throw worktreeError("invalid_option_type", subcommand, "commitish must be a string when provided");
       }
 
-      validateWorktreePath(path, options.cwd, true);
-      if (options.newBranch !== undefined) validateWorktreeBranchName(options.newBranch);
-      if (options.commitish !== undefined) validateWorktreeCommitish(options.commitish);
+      validateWorktreePath(path, options.cwd, true, subcommand);
+      if (options.newBranch !== undefined) validateWorktreeBranchName(options.newBranch, subcommand);
+      if (options.commitish !== undefined) validateWorktreeCommitish(options.commitish, subcommand);
 
       if (options.detach === true) args.push("--detach");
       if (options.newBranch !== undefined) args.push("-b", options.newBranch);
@@ -375,12 +455,12 @@ function buildWorktreeArgs(options: GitWorktreeModeOptions): string[] {
     }
 
     case "remove": {
-      const path = requireWorktreeString(options.path, "path");
+      const path = requireWorktreeString(options.path, "path", subcommand);
       if (options.force !== undefined && typeof options.force !== "boolean") {
-        throw new TypeError("force must be a boolean when provided.");
+        throw worktreeError("invalid_option_type", subcommand, "force must be a boolean when provided");
       }
 
-      validateWorktreePath(path, options.cwd, false);
+      validateWorktreePath(path, options.cwd, false, subcommand);
 
       if (options.force === true) args.push("--force");
       args.push(path);
@@ -388,11 +468,11 @@ function buildWorktreeArgs(options: GitWorktreeModeOptions): string[] {
     }
 
     case "move": {
-      const oldPath = requireWorktreeString(options.oldPath, "oldPath");
-      const newPath = requireWorktreeString(options.newPath, "newPath");
+      const oldPath = requireWorktreeString(options.oldPath, "oldPath", subcommand);
+      const newPath = requireWorktreeString(options.newPath, "newPath", subcommand);
 
-      validateWorktreePath(oldPath, options.cwd, false);
-      validateWorktreePath(newPath, options.cwd, false);
+      validateWorktreePath(oldPath, options.cwd, false, subcommand);
+      validateWorktreePath(newPath, options.cwd, false, subcommand);
 
       args.push(oldPath, newPath);
       return args;
@@ -407,57 +487,79 @@ function validateWorktreeSubcommand(value: unknown): WorktreeSubcommand {
   if (typeof value === "string" && (WORKTREE_SUBCOMMANDS as readonly string[]).includes(value)) {
     return value as WorktreeSubcommand;
   }
-  throw new TypeError(`Unknown Git worktree subcommand: ${String(value)}.`);
+  throw worktreeError(
+    "unknown_subcommand",
+    null,
+    `unknown subcommand '${String(value)}'; expected one of: ${WORKTREE_SUBCOMMANDS.join(", ")}`,
+  );
 }
 
 function validateWorktreeParameterKeys(subcommand: WorktreeSubcommand, options: GitWorktreeModeOptions): void {
   const allowed = new Set<string>(WORKTREE_PARAMETER_KEYS[subcommand]);
   for (const key of Object.keys(options)) {
     if (!allowed.has(key)) {
-      throw new TypeError(`Unexpected option '${key}' for git worktree ${subcommand}.`);
+      throw worktreeError(
+        "unexpected_option",
+        subcommand,
+        `unexpected option '${key}'; allowed options: ${WORKTREE_PARAMETER_KEYS[subcommand].join(", ")}`,
+      );
     }
   }
 }
 
-function requireWorktreeString(value: string | undefined, field: string): string {
+function requireWorktreeString(value: string | undefined, field: string, subcommand: WorktreeSubcommand): string {
   if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError(`${field} must be a non-empty string.`);
+    throw worktreeError("missing_required_field", subcommand, `${field} must be a non-empty string`);
   }
   return value;
 }
 
-function validateWorktreePath(value: string, cwd: string | undefined, requireUnderWorktreesRoot: boolean): void {
-  validatePath(value);
+function validateWorktreePath(
+  value: string,
+  cwd: string | undefined,
+  requireUnderWorktreesRoot: boolean,
+  subcommand: WorktreeSubcommand,
+): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw worktreeError("invalid_path", subcommand, "worktree path must be a non-empty string");
+  }
+  if (value.includes("\0")) {
+    throw worktreeError("invalid_path", subcommand, "worktree path cannot contain NUL characters");
+  }
 
   if (normalizedPathSegments(value).includes("..")) {
-    throw new TypeError(`Worktree path '${value}' must not contain '..' path traversal.`);
+    throw worktreeError("path_traversal", subcommand, `worktree path '${value}' must not contain '..' path traversal`);
   }
   if (value.startsWith("-")) {
-    throw new TypeError(`Worktree path '${value}' must not start with '-'.`);
+    throw worktreeError("path_option_like", subcommand, `worktree path '${value}' must not start with '-'`);
   }
 
   const protectedReason = worktreeProtectedPathReason(value);
-  if (protectedReason) throw new TypeError(protectedReason);
+  if (protectedReason) throw worktreeError("protected_path", subcommand, protectedReason);
 
   const base = cwd !== undefined ? cwd : process.cwd();
   const canonicalBase = canonicalWorktreePath(base);
   if (!isWithinWorktreeRoot(value, base, canonicalBase)) {
-    throw new TypeError(`Worktree path '${value}' resolves outside the workspace root '${base}'.`);
+    throw worktreeError("out_of_workspace", subcommand, `worktree path '${value}' resolves outside the workspace root '${base}'`);
   }
   if (requireUnderWorktreesRoot) {
     const worktreesRoot = resolve(canonicalBase, WORKTREES_DIR);
     if (!isWithinWorktreeRoot(value, base, worktreesRoot)) {
-      throw new TypeError(`Worktree add path '${value}' must be inside the managed worktrees root '${WORKTREES_DIR}'.`);
+      throw worktreeError(
+        "outside_worktrees_root",
+        subcommand,
+        `worktree add path '${value}' must be inside the managed worktrees root '${WORKTREES_DIR}'`,
+      );
     }
   }
 }
 
-function validateWorktreeBranchName(value: string): void {
+function validateWorktreeBranchName(value: string, subcommand: WorktreeSubcommand): void {
   if (/[\u0000-\u0020\u007f]/.test(value)) {
-    throw new TypeError("newBranch must not contain whitespace or control characters.");
+    throw worktreeError("invalid_branch_name", subcommand, "newBranch must not contain whitespace or control characters");
   }
   if (value.startsWith("-")) {
-    throw new TypeError("newBranch must not start with '-'.");
+    throw worktreeError("invalid_branch_name", subcommand, "newBranch must not start with '-'");
   }
   if (
     value.includes("..") ||
@@ -470,17 +572,26 @@ function validateWorktreeBranchName(value: string): void {
     value.includes("*") ||
     value.includes("[")
   ) {
-    throw new TypeError("newBranch must not contain any of: '..', '@{', '\\', '~', '^', ':', '?', '*', '['.");
+    throw worktreeError(
+      "invalid_branch_name",
+      subcommand,
+      "newBranch must not contain any of: '..', '@{', '\\', '~', '^', ':', '?', '*', '['",
+    );
   }
   if (value.startsWith("/") || value.endsWith("/")) {
-    throw new TypeError("newBranch must not start or end with '/'.");
+    throw worktreeError("invalid_branch_name", subcommand, "newBranch must not start or end with '/'");
   }
 }
 
-function validateWorktreeCommitish(value: string): void {
-  validateNonEmptyString(value, "commitish");
+function validateWorktreeCommitish(value: string, subcommand: WorktreeSubcommand): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw worktreeError("invalid_commitish", subcommand, "commitish must be a non-empty string when provided");
+  }
+  if (value.includes("\0")) {
+    throw worktreeError("invalid_commitish", subcommand, "commitish cannot contain NUL characters");
+  }
   if (value.startsWith("-")) {
-    throw new TypeError("commitish must not start with '-'.");
+    throw worktreeError("invalid_commitish", subcommand, "commitish must not start with '-'");
   }
 }
 
@@ -500,16 +611,16 @@ function worktreeStemOf(base: string): string {
 function worktreeProtectedPathReason(value: string): string | null {
   const base = worktreeBaseNameOf(value);
   if (DATA_JSON_BASENAME.test(base)) {
-    return `Worktree path '${value}' targets the protected file data.json; data.json is never a valid worktree target.`;
+    return `worktree path '${value}' targets the protected file data.json; data.json is never a valid worktree target`;
   }
   if (!base) return null;
   for (const entry of PROTECTED_WORKTREE_BASENAMES) {
     if (entry.pattern.test(base)) {
-      return `Worktree path '${value}' targets protected ${entry.label} '${base}'.`;
+      return `worktree path '${value}' targets protected ${entry.label} '${base}'`;
     }
   }
   if (PROTECTED_WORKTREE_STEM_PATTERN.test(worktreeStemOf(base))) {
-    return `Worktree path '${value}' targets protected credential or secret file '${base}'.`;
+    return `worktree path '${value}' targets protected credential or secret file '${base}'`;
   }
   return null;
 }
@@ -596,6 +707,14 @@ function appendPaths(args: string[], paths: readonly string[]): void {
 /** Default process timeout for a git invocation, per ERROR_HANDLING.md §6. */
 const DEFAULT_GIT_TIMEOUT_MS = 60_000;
 
+/**
+ * Per-stream capture limit for git stdout/stderr. Exceeding it is an abnormal
+ * execution that rejects with a structured `GitProcessError` of kind
+ * `output_overflow`, per ERROR_HANDLING.md §6, instead of accumulating
+ * unbounded output in memory.
+ */
+const MAX_GIT_STREAM_BYTES = 1_048_576;
+
 function runGit(command: string[], cwd?: string): Promise<GitCommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", command, {
@@ -605,8 +724,24 @@ function runGit(command: string[], cwd?: string): Promise<GitCommandResult> {
 
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let outputOverflow = false;
     let timedOut = false;
     let settled = false;
+
+    const fail = (
+      kind: GitProcessErrorKind,
+      message: string,
+      cause?: unknown,
+      capturedStdout?: string,
+      capturedStderr?: string,
+    ): void => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(new GitProcessError(kind, command, message, { cause, stdout: capturedStdout, stderr: capturedStderr }));
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -616,27 +751,64 @@ function runGit(command: string[], cwd?: string): Promise<GitCommandResult> {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
+      const chunkBytes = Buffer.byteLength(chunk, "utf8");
+      if (stdoutBytes + chunkBytes > MAX_GIT_STREAM_BYTES) {
+        outputOverflow = true;
+      } else {
+        stdout += chunk;
+        stdoutBytes += chunkBytes;
+      }
     });
     child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+      const chunkBytes = Buffer.byteLength(chunk, "utf8");
+      if (stderrBytes + chunkBytes > MAX_GIT_STREAM_BYTES) {
+        outputOverflow = true;
+      } else {
+        stderr += chunk;
+        stderrBytes += chunkBytes;
+      }
+    });
+
+    child.stdout.on("error", (error) => {
+      fail("stream", "git stdout stream failed.", error);
+    });
+    child.stderr.on("error", (error) => {
+      fail("stream", "git stderr stream failed.", error);
     });
     child.once("error", (error) => {
-      clearTimeout(timer);
-      if (settled) return;
-      settled = true;
-      reject(error);
+      fail("spawn", "git could not be started.", error);
     });
+
     child.once("close", (exitCode, signal) => {
+      if (outputOverflow) {
+        fail(
+          "output_overflow",
+          `git output exceeded the ${MAX_GIT_STREAM_BYTES}-byte per-stream limit.`,
+          undefined,
+          stdout,
+          stderr,
+        );
+        return;
+      }
       clearTimeout(timer);
       if (settled) return;
       settled = true;
       if (timedOut) {
-        reject(new Error(`git timed out after ${DEFAULT_GIT_TIMEOUT_MS / 1000} seconds.`));
+        reject(new GitProcessError(
+          "timeout",
+          command,
+          `git timed out after ${DEFAULT_GIT_TIMEOUT_MS / 1000} seconds.`,
+          { stdout, stderr },
+        ));
         return;
       }
       if (exitCode === null) {
-        reject(new Error(`git was terminated by signal ${signal ?? "unknown"}`));
+        reject(new GitProcessError(
+          "signal",
+          command,
+          `git was terminated by signal ${signal ?? "unknown"}`,
+          { stdout, stderr },
+        ));
         return;
       }
       resolve({ command, exitCode, stdout, stderr });
