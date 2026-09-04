@@ -1,11 +1,14 @@
 // Unit tests for tools/Git.tsx: the dedicated Git tool that owns read-only
-// repository inspection (status/log/diff/ls-files) plus the two mutating
-// actions (stage/commit). Tests run against a real temp repository so the
-// exact argument vector and real exit behavior are both verified.
+// repository inspection (status/log/diff/ls-files), worktree management
+// (list/add/remove/move/prune), and the two mutating actions (stage/commit).
+// Tests run against a real temp repository so the exact argument vector and
+// real exit behavior are both verified, and they assert the structured
+// GitWorktreeError/GitProcessError contract for invalid worktree calls and
+// abnormal git exits.
 // Compiled and executed standalone by the `test:git-tool` npm script.
-import Git from "../tools/Git.js";
+import Git, { GitProcessError, GitWorktreeError } from "../tools/Git.js";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,6 +34,34 @@ async function throwsTypeError(name: string, call: () => Promise<unknown>): Prom
     await call();
   } catch (error) {
     threw = error instanceof TypeError;
+  }
+  check(name, threw);
+}
+
+async function throwsWorktreeError(
+  name: string,
+  kind: string,
+  subcommand: string | null,
+  call: () => Promise<unknown>,
+): Promise<void> {
+  let threw = false;
+  try {
+    await call();
+  } catch (error) {
+    threw =
+      error instanceof GitWorktreeError &&
+      error.kind === kind &&
+      (subcommand === null ? error.subcommand === null : error.subcommand === subcommand);
+  }
+  check(name, threw);
+}
+
+async function throwsProcessError(name: string, kind: string, call: () => Promise<unknown>): Promise<void> {
+  let threw = false;
+  try {
+    await call();
+  } catch (error) {
+    threw = error instanceof GitProcessError && error.kind === kind;
   }
   check(name, threw);
 }
@@ -237,6 +268,198 @@ async function main(): Promise<void> {
     );
     await throwsTypeError("commit with a whitespace-only message is rejected", async () =>
       Git({ action: "commit", cwd: dir, message: "   " }),
+    );
+
+    // ------------------------------------------------------------------
+    // 5. Worktree mode: the accepted subcommands build the exact whitelisted
+    //    argument vectors and run against the real repository.
+    // ------------------------------------------------------------------
+    const worktreesRoot = join(dir, ".worktrees");
+    mkdirSync(worktreesRoot, { recursive: true });
+
+    const listPlain = await Git({ mode: "worktree", subcommand: "list", cwd: dir });
+    check(
+      "worktree list is accepted read-only with no extra flags",
+      sameArgs(listPlain.command, ["worktree", "list"]),
+    );
+    check("worktree list succeeds inside a repository", listPlain.exitCode === 0);
+
+    const listPorcelain = await Git({ mode: "worktree", subcommand: "list", cwd: dir, porcelain: true });
+    check(
+      "worktree list --porcelain is accepted",
+      sameArgs(listPorcelain.command, ["worktree", "list", "--porcelain"]),
+    );
+    check("worktree list --porcelain succeeds", listPorcelain.exitCode === 0);
+
+    const linkedPath = join(worktreesRoot, "linked");
+    const addLinked = await Git({
+      mode: "worktree",
+      subcommand: "add",
+      cwd: dir,
+      path: linkedPath,
+      newBranch: "linked-branch",
+    });
+    check(
+      "worktree add -b <path> builds the whitelisted argument vector",
+      sameArgs(addLinked.command, ["worktree", "add", "-b", "linked-branch", linkedPath]),
+    );
+    check(
+      "worktree add -b succeeds and creates the worktree",
+      addLinked.exitCode === 0 && existsSync(linkedPath),
+    );
+
+    const linkedList = await Git({ mode: "worktree", subcommand: "list", cwd: dir, porcelain: true });
+    check(
+      "worktree list reports the linked worktree and branch",
+      linkedList.exitCode === 0 &&
+        linkedList.stdout.includes(linkedPath) &&
+        linkedList.stdout.includes("refs/heads/linked-branch"),
+    );
+
+    const detachedPath = join(worktreesRoot, "detached");
+    const addDetached = await Git({
+      mode: "worktree",
+      subcommand: "add",
+      cwd: dir,
+      path: detachedPath,
+      detach: true,
+      commitish: "HEAD",
+    });
+    check(
+      "worktree add --detach <path> <commitish> builds the whitelisted argument vector",
+      sameArgs(addDetached.command, ["worktree", "add", "--detach", detachedPath, "HEAD"]),
+    );
+    check(
+      "worktree add --detach succeeds and creates the worktree",
+      addDetached.exitCode === 0 && existsSync(detachedPath),
+    );
+
+    const movedPath = join(worktreesRoot, "moved");
+    const move = await Git({
+      mode: "worktree",
+      subcommand: "move",
+      cwd: dir,
+      oldPath: linkedPath,
+      newPath: movedPath,
+    });
+    check(
+      "worktree move <old> <new> builds the whitelisted argument vector",
+      sameArgs(move.command, ["worktree", "move", linkedPath, movedPath]),
+    );
+    check(
+      "worktree move succeeds and relocates the worktree",
+      move.exitCode === 0 && existsSync(movedPath) && !existsSync(linkedPath),
+    );
+
+    const removeMoved = await Git({
+      mode: "worktree",
+      subcommand: "remove",
+      cwd: dir,
+      path: movedPath,
+      force: true,
+    });
+    check(
+      "worktree remove --force <path> builds the whitelisted argument vector",
+      sameArgs(removeMoved.command, ["worktree", "remove", "--force", movedPath]),
+    );
+    check(
+      "worktree remove --force succeeds and removes the worktree",
+      removeMoved.exitCode === 0 && !existsSync(movedPath),
+    );
+
+    const removeDetached = await Git({
+      mode: "worktree",
+      subcommand: "remove",
+      cwd: dir,
+      path: detachedPath,
+      force: true,
+    });
+    check(
+      "worktree remove succeeds for the detached worktree",
+      removeDetached.exitCode === 0 && !existsSync(detachedPath),
+    );
+
+    const prune = await Git({ mode: "worktree", subcommand: "prune", cwd: dir });
+    check("worktree prune is accepted with no flags", sameArgs(prune.command, ["worktree", "prune"]));
+    check("worktree prune succeeds", prune.exitCode === 0);
+
+    // ------------------------------------------------------------------
+    // 6. Worktree validation failures are structured GitWorktreeErrors
+    //    (still TypeErrors) before any git process runs.
+    // ------------------------------------------------------------------
+    await throwsWorktreeError("worktree unknown subcommand is refused", "unknown_subcommand", null, async () =>
+      Git({ mode: "worktree", subcommand: "lock" as never, cwd: dir }),
+    );
+    await throwsWorktreeError("worktree missing subcommand is refused", "unknown_subcommand", null, async () =>
+      Git({ mode: "worktree", cwd: dir, subcommand: undefined as never }),
+    );
+    await throwsWorktreeError("worktree list refuses an unexpected option", "unexpected_option", "list", async () =>
+      Git({ mode: "worktree", subcommand: "list", cwd: dir, force: true }),
+    );
+    await throwsWorktreeError("worktree prune refuses an unexpected option", "unexpected_option", "prune", async () =>
+      Git({ mode: "worktree", subcommand: "prune", cwd: dir, force: true }),
+    );
+    await throwsWorktreeError("worktree list refuses a non-boolean porcelain", "invalid_option_type", "list", async () =>
+      Git({ mode: "worktree", subcommand: "list", cwd: dir, porcelain: "yes" as never }),
+    );
+    await throwsWorktreeError("worktree add requires a path", "missing_required_field", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: "" }),
+    );
+    await throwsWorktreeError("worktree remove requires a path", "missing_required_field", "remove", async () =>
+      Git({ mode: "worktree", subcommand: "remove", cwd: dir, path: "" }),
+    );
+    await throwsWorktreeError("worktree move requires both paths", "missing_required_field", "move", async () =>
+      Git({ mode: "worktree", subcommand: "move", cwd: dir, oldPath: join(worktreesRoot, "a"), newPath: "" }),
+    );
+    await throwsWorktreeError("worktree add rejects a NUL path", "invalid_path", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: "\0" }),
+    );
+    await throwsWorktreeError("worktree add rejects path traversal", "path_traversal", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: "../escape" }),
+    );
+    await throwsWorktreeError("worktree remove rejects an option-like path", "path_option_like", "remove", async () =>
+      Git({ mode: "worktree", subcommand: "remove", cwd: dir, path: "-force" }),
+    );
+    await throwsWorktreeError("worktree add rejects data.json as a worktree path", "protected_path", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: join(dir, "data.json") }),
+    );
+    await throwsWorktreeError("worktree add rejects a .env worktree path", "protected_path", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: join(dir, ".env") }),
+    );
+    await throwsWorktreeError("worktree add rejects a secret-named worktree path", "protected_path", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: join(dir, "secret.txt") }),
+    );
+    await throwsWorktreeError("worktree add rejects an out-of-workspace path", "out_of_workspace", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: join(outsideDir, "wt") }),
+    );
+    await throwsWorktreeError("worktree add requires a path inside .worktrees", "outside_worktrees_root", "add", async () =>
+      Git({ mode: "worktree", subcommand: "add", cwd: dir, path: join(dir, "sibling") }),
+    );
+    await throwsWorktreeError("worktree add rejects an invalid branch name", "invalid_branch_name", "add", async () =>
+      Git({
+        mode: "worktree",
+        subcommand: "add",
+        cwd: dir,
+        path: join(worktreesRoot, "wt-branch"),
+        newBranch: "bad branch",
+      }),
+    );
+    await throwsWorktreeError("worktree add rejects an option-like commitish", "invalid_commitish", "add", async () =>
+      Git({
+        mode: "worktree",
+        subcommand: "add",
+        cwd: dir,
+        path: join(worktreesRoot, "wt-commitish"),
+        commitish: "-bad",
+      }),
+    );
+
+    // ------------------------------------------------------------------
+    // 7. Abnormal git exits reject with a structured GitProcessError; normal
+    //    nonzero exits remain GitCommandResult (verified in section 3).
+    // ------------------------------------------------------------------
+    await throwsProcessError("spawn failure rejects with GitProcessError kind spawn", "spawn", async () =>
+      Git({ mode: "status", cwd: join(dir, "missing-subdir") }),
     );
   } finally {
     try {

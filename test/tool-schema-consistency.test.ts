@@ -68,7 +68,7 @@ function main(): void {
 
   // ---------------------------------------------------------------------------
   // 2. The Git schema's action enum includes the retained legacy `list` alias
-  //    and the mode enum matches the handler's read-only modes.
+  //    and the mode enum matches the handler modes (read-only plus worktree).
   // ---------------------------------------------------------------------------
   check("Git schema root declares an object", asRecord(GitParameters).type === "object");
 
@@ -87,9 +87,9 @@ function main(): void {
 
   const modeSchema = asRecord(gitProperties.mode);
   check(
-    "Git mode enum matches the handler read-only modes",
+    "Git mode enum matches the handler modes (read-only plus worktree)",
     JSON.stringify(((modeSchema.enum as string[]) ?? []).sort()) ===
-      JSON.stringify(["diff", "log", "ls-files", "status"].sort()),
+      JSON.stringify(["diff", "log", "ls-files", "status", "worktree"].sort()),
   );
 
   // The anyOf constraint requires one of mode/action, mirroring the handler's
