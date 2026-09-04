@@ -7,7 +7,8 @@ import { normalizeToolParameters, parseToolSafetyClassification } from "./tool-s
  * Preflight router that keeps git commands out of ExecuteCommand.
  *
  * The dedicated `Git` tool owns the supported repository operations (status,
- * log, diff, ls-files, stage, commit). When a model still issues a git command
+ * log, diff, ls-files, worktree list/add/remove/move/prune, stage, commit).
+ * When a model still issues a git command
  * through `ExecuteCommand`, this module decides what should happen before the
  * general safety classifier runs:
  *
@@ -15,9 +16,9 @@ import { normalizeToolParameters, parseToolSafetyClassification } from "./tool-s
  *    the normal ExecuteCommand path.
  * 2. Git commands whose subcommand maps unambiguously to a registered Git tool
  *    mode/action are refused with an actionable "use Git(...)" message.
- * 3. Git commands whose mapping is unclear (for example show, stash, worktree,
- *    tag, branch, checkout, config, check-ignore, rev-parse, push, or
- *    --version) are sent to the LLM classifier together with the available Git
+ * 3. Git commands whose mapping is unclear (for example show, stash, tag,
+ *    branch, checkout, config, check-ignore, rev-parse, push, or --version)
+ *    are sent to the LLM classifier together with the available Git
  *    tool list. The classifier decides whether to allow the ExecuteCommand
  *    call; a refusal is returned verbatim and the call is blocked.
  *
@@ -68,6 +69,11 @@ const GIT_TOOL_LIST_TEXT = [
   'Git({ mode: "log" }) -> git log; params: oneline (boolean), stat (boolean), maxCount (positive integer), all (boolean), revision (string), path (string), paths (string[])',
   'Git({ mode: "diff" }) -> git diff; params: staged (boolean), stat (boolean), check (boolean), revision (string), paths (string[])',
   'Git({ mode: "ls-files" }) -> git ls-files; params: others (boolean), excludeStandard (boolean), paths (string[])',
+  'Git({ mode: "worktree", subcommand: "list" }) -> git worktree list; params: porcelain (boolean)',
+  'Git({ mode: "worktree", subcommand: "add" }) -> git worktree add; params: path (string, must be inside .worktrees), newBranch (string), detach (boolean), commitish (string)',
+  'Git({ mode: "worktree", subcommand: "remove" }) -> git worktree remove; params: path (string), force (boolean)',
+  'Git({ mode: "worktree", subcommand: "move" }) -> git worktree move; params: oldPath (string), newPath (string)',
+  'Git({ mode: "worktree", subcommand: "prune" }) -> git worktree prune; no extra params',
   'Git({ action: "stage" }) -> git add; params: paths (string[]) or all (boolean)',
   'Git({ action: "commit" }) -> git commit; params: message (string)',
 ].join("\n");

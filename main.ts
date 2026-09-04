@@ -1037,7 +1037,7 @@ const tools = [
     {
         type: "function", name: "Git",
         usage_prompt: "tools/git-usage.md",
-        description: "Inspect a Git repository (status, log, diff, ls-files), stage selected changes, or commit staged changes.",
+        description: "Inspect a Git repository (status, log, diff, ls-files), manage linked worktrees (worktree list/add/remove/move/prune), stage selected changes, or commit staged changes.",
         parameters: GitParameters,
         exec_handler: (options) => {
             // In review mode, execution steps stage changes in the worktree and

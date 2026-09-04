@@ -12,6 +12,7 @@ Available Git tool modes/actions:
 - mode: "log" -> git log (oneline, stat, maxCount, all, revision, path/paths)
 - mode: "diff" -> git diff (staged, stat, check, revision, paths)
 - mode: "ls-files" -> git ls-files (others, excludeStandard, paths)
+- mode: "worktree" -> git worktree (subcommand list|add|remove|move|prune; list: porcelain; add: path inside .worktrees, newBranch, detach, commitish; remove: path, force; move: oldPath, newPath; prune: no params)
 - action: "stage" -> git add (paths or all:true)
 - action: "commit" -> git commit (message)
 
