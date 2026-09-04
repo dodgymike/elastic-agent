@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { RunAbortError } from "./llm/run-abort.js";
 import type { ToolSafetyConfig } from "./tool-safety-config.js";
+import { WORKTREES_DIR } from "./worktree.js";
 
 /**
  * Lightweight tool-call safety classifier.
@@ -1334,10 +1335,98 @@ function classifyGit(parameters: Record<string, unknown>, roots: readonly string
     if (secret) return unsafe(`Git commit message is unsafe: ${secret}`);
     return safe("Git commit carries a non-sensitive message.");
   }
+  if (action === "worktree") {
+    return classifyGitWorktree(parameters, roots);
+  }
   if (action === null) {
     return unsafe("Git call has neither a recognized action nor a recognized mode; the tool itself will reject the call.");
   }
   return unsafe(`Git selector '${action}' is not a recognized action or mode; the tool itself will reject the call.`);
+}
+
+/**
+ * Static classification for `mode: "worktree"`. `list` and `prune` are safe;
+ * `add`/`remove`/`move` are safe only when their path arguments pass the same
+ * data.json/protected/traversal/out-of-root checks the tool performs, plus the
+ * managed `.worktrees` root restriction for `add`. Missing or unknown
+ * subcommands are refused deterministically.
+ */
+function classifyGitWorktree(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
+  const subcommand = stringValue(parameters.subcommand);
+  if (subcommand === null || subcommand.trim() === "") {
+    return unsafe("Git worktree requires a subcommand (list, add, remove, move, or prune); the tool itself will reject the call.");
+  }
+
+  if (subcommand === "list") {
+    return safe("Git worktree list is a read-only operation.");
+  }
+  if (subcommand === "prune") {
+    return safe("Git worktree prune removes only stale worktree metadata and takes no path arguments.");
+  }
+  if (subcommand !== "add" && subcommand !== "remove" && subcommand !== "move") {
+    return unsafe(`Git worktree subcommand '${subcommand}' is not supported; the tool itself will reject the call.`);
+  }
+
+  const cwd = stringValue(parameters.cwd);
+  const base = cwd !== null && cwd.trim() !== "" ? cwd : roots[0];
+
+  const pathArgs: Array<{ readonly key: string; readonly value: string; readonly requireWorktreesRoot: boolean }> = [];
+  if (subcommand === "add") {
+    pathArgs.push({ key: "path", value: stringValue(parameters.path) ?? "", requireWorktreesRoot: true });
+  } else if (subcommand === "remove") {
+    pathArgs.push({ key: "path", value: stringValue(parameters.path) ?? "", requireWorktreesRoot: false });
+  } else {
+    pathArgs.push({ key: "oldPath", value: stringValue(parameters.oldPath) ?? "", requireWorktreesRoot: false });
+    pathArgs.push({ key: "newPath", value: stringValue(parameters.newPath) ?? "", requireWorktreesRoot: false });
+  }
+
+  for (const entry of pathArgs) {
+    const violation = worktreePathViolation(entry.value, entry.key, base, roots, entry.requireWorktreesRoot);
+    if (violation) return unsafe(violation);
+  }
+
+  return safe(`Git worktree ${subcommand} paths stay within the workspace and target no protected files.`);
+}
+
+/**
+ * Mirror the Git tool's worktree path policy for static classification.
+ * Returns an actionable reason when the path must be refused, or null when it
+ * passes the data.json/protected/traversal/out-of-root checks (and, for `add`,
+ * the managed `.worktrees` root restriction).
+ */
+function worktreePathViolation(
+  value: string,
+  field: string,
+  base: string,
+  roots: readonly string[],
+  requireWorktreesRoot: boolean,
+): string | null {
+  if (value.length === 0) {
+    return `Git worktree ${field} is missing or empty; the tool itself will reject the call.`;
+  }
+  if (value.includes("\0")) {
+    return `Git worktree ${field} must not contain NUL characters.`;
+  }
+  if (hasPathTraversal(value)) {
+    return `Git worktree ${field} '${value}' contains '..' path traversal.`;
+  }
+  if (value.startsWith("-")) {
+    return `Git worktree ${field} '${value}' must not start with '-'.`;
+  }
+  const dataJson = dataJsonTargetReason(value);
+  if (dataJson) return dataJson;
+  const protectedReason = protectedPathReason(value);
+  if (protectedReason) return `Git worktree ${field} targets a protected file: ${protectedReason}`;
+  if (resolvesOutsideAllTrustedRoots(value, roots)) {
+    return `Git worktree ${field} '${value}' resolves outside the workspace.`;
+  }
+  if (requireWorktreesRoot) {
+    const worktreesRoot = resolve(base, WORKTREES_DIR);
+    if (!isInsideBoundary(resolve(base, value), worktreesRoot, base)) {
+      return `Git worktree add ${field} '${value}' must be inside the managed worktrees root '${WORKTREES_DIR}'.`;
+    }
+  }
+  return null;
 }
 
 function classifyIntegrationTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
