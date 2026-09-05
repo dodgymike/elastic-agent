@@ -315,8 +315,14 @@ in the subsequent steps).
 
 ### File layout
 
-- `specKeeperWorkspaceConfigPath(startDirectory)` returns
-  `<startDirectory>/.spec-keeper/config`.
+- `specKeeperWorkspaceConfigPath(startDirectory?)` returns
+  `<startDirectory>/.spec-keeper/config` when an explicit base directory is
+  supplied; with no argument it defaults to
+  `<main.ts dir>/.spec-keeper/config`, where `specKeeperMainDirectory()` finds
+  the directory containing the agent's `main.ts` entry module (walking upward
+  from the config module's own `__dirname`, independent of `process.cwd()`).
+  `loadSpecKeeperWorkspaceRegistry`/`resolveSpecKeeperWorkspace` accept an
+  explicit `configDirectory` override for tooling and tests.
 - `.spec-keeper/config` is a JSON object keyed by **canonical absolute start
   directory**. Each value is non-secret routing metadata:
 

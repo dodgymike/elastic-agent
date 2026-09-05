@@ -2658,8 +2658,13 @@ async function main(options: { review?: boolean; loop?: boolean; logPrompts?: bo
     // `.spec-keeper/config` workspace mapping (never from stale legacy
     // `.spec-keeper` operational fields), while defaultEpic/defaultTask come
     // from that mapping or the legacy file while migration is still pending.
-    // Secret values are never logged.
-    const specKeeperDefaults = resolveSpecKeeperRuntimeDefaults();
+    // Secret values are never logged. The `.spec-keeper/config` registry is
+    // resolved relative to the directory containing main.ts (never the
+    // process working directory), while the registry key is the canonical
+    // start directory (resolved in a later step).
+    const specKeeperDefaults = resolveSpecKeeperRuntimeDefaults({
+        configDirectory: agentSourceRoot,
+    });
     for (const warning of specKeeperDefaults.warnings) status.warning(warning);
     status.specKeeper(`defaults loaded: ${describeSpecKeeperRuntimeDefaults(specKeeperDefaults)}`);
 

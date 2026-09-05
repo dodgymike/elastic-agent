@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -7,7 +8,7 @@ import {
   writeFileSync,
   type Stats,
 } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 
 /**
  * Non-secret Spec Keeper default configuration.
@@ -502,9 +503,49 @@ export interface ResolvedSpecKeeperWorkspace {
   warnings: string[];
 }
 
-/** Absolute path of the `.spec-keeper/config` registry for a start directory. */
-export function specKeeperWorkspaceConfigPath(startDirectory: string): string {
-  return join(startDirectory, SPEC_KEEPER_WORKSPACE_DIR, SPEC_KEEPER_WORKSPACE_CONFIG_FILE);
+/**
+ * Directory containing the agent's `main.ts` entry module, derived from this
+ * module's own compiled location (`__dirname`) rather than `process.cwd()` so
+ * the `.spec-keeper/config` registry has a stable home even when the process is
+ * started from a different directory.
+ *
+ * The search starts at this module's directory and walks upward for a directory
+ * containing `main.ts` (the agent's source entry). This locates the same source
+ * root whether the runtime executes TypeScript directly or the compiled
+ * `dist/main.js`. When no ancestor contains `main.ts` (for example a bare
+ * deployment that ships only compiled output), the module directory itself is
+ * used as a safe fallback so the resolved path is always non-empty and stable.
+ */
+export function specKeeperMainDirectory(): string {
+  const moduleDir = __dirname;
+  const filesystemRoot = parse(moduleDir).root;
+  let dir = moduleDir;
+  const seen = new Set<string>();
+  while (dir && dir !== filesystemRoot && !seen.has(dir)) {
+    seen.add(dir);
+    if (existsSync(join(dir, "main.ts"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (existsSync(join(filesystemRoot, "main.ts"))) return filesystemRoot;
+  return moduleDir;
+}
+
+/**
+ * Absolute path of the `.spec-keeper/config` registry.
+ *
+ * The default base directory is the directory containing `main.ts` (see
+ * {@link specKeeperMainDirectory}) so the registry location no longer depends
+ * on the process working directory. An explicit base directory can be supplied
+ * for tooling, tests, and non-standard deployments.
+ */
+export function specKeeperWorkspaceConfigPath(startDirectory?: string): string {
+  return join(
+    startDirectory ?? specKeeperMainDirectory(),
+    SPEC_KEEPER_WORKSPACE_DIR,
+    SPEC_KEEPER_WORKSPACE_CONFIG_FILE,
+  );
 }
 
 /**
@@ -689,11 +730,16 @@ function normalizeSpecKeeperWorkspaceEntry(
 /** Parse and normalize the `.spec-keeper/config` workspace registry. */
 export function loadSpecKeeperWorkspaceRegistry(options?: {
   startDirectory?: string;
+  /** Explicit base directory for `.spec-keeper/config`; defaults to the main.ts directory. */
+  configDirectory?: string;
 }): LoadedSpecKeeperWorkspaceRegistry {
   const startDirectory = canonicalizeSpecKeeperStartDirectory(
     options?.startDirectory ?? process.cwd(),
   );
-  const filename = specKeeperWorkspaceConfigPath(startDirectory);
+  const configDirectory = options?.configDirectory
+    ? resolve(options.configDirectory)
+    : undefined;
+  const filename = specKeeperWorkspaceConfigPath(configDirectory);
 
   let raw: unknown;
   try {
@@ -746,11 +792,15 @@ export function loadSpecKeeperWorkspaceRegistry(options?: {
  */
 export function resolveSpecKeeperWorkspace(
   startDirectory?: string,
+  options?: { configDirectory?: string },
 ): ResolvedSpecKeeperWorkspace {
   const canonicalStart = canonicalizeSpecKeeperStartDirectory(
     startDirectory ?? process.cwd(),
   );
-  const loaded = loadSpecKeeperWorkspaceRegistry({ startDirectory: canonicalStart });
+  const loaded = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: canonicalStart,
+    configDirectory: options?.configDirectory,
+  });
   const config = loaded.registry[canonicalStart];
   if (config) {
     return {
@@ -918,6 +968,8 @@ export interface ResolvedSpecKeeperRuntimeDefaults {
  */
 export function resolveSpecKeeperRuntimeDefaults(options?: {
   startDirectory?: string;
+  /** Explicit base directory for `.spec-keeper/config`; defaults to the main.ts directory. */
+  configDirectory?: string;
   env?: NodeJS.ProcessEnv;
 }): ResolvedSpecKeeperRuntimeDefaults {
   const startDirectory = options?.startDirectory ?? process.cwd();
@@ -927,7 +979,9 @@ export function resolveSpecKeeperRuntimeDefaults(options?: {
 
   let workspace: ResolvedSpecKeeperWorkspace | null;
   try {
-    workspace = resolveSpecKeeperWorkspace(startDirectory);
+    workspace = resolveSpecKeeperWorkspace(startDirectory, {
+      configDirectory: options?.configDirectory,
+    });
     warnings.push(...workspace.warnings);
   } catch (error) {
     workspace = null;

@@ -62,13 +62,17 @@ Example `.spec-keeper/config`:
 }
 ```
 
-Lookup canonicalizes the process start directory (absolute-path resolution
-plus symlink resolution) before reading `.spec-keeper/config`. When no mapping
-exists for that directory, the tool fails closed with an actionable error
-that lists the configured workspaces. The referenced `credentialFile` is
-resolved relative to the canonical start directory and loaded only after the
-workspace mapping resolves; a missing, malformed, or group/world-readable
-credential file also fails closed.
+The registry file itself lives at `<main.ts dir>/.spec-keeper/config` by
+default (resolved from the config module's own location, never from
+`process.cwd()`), while its entries are keyed by canonical absolute start
+directory. Lookup canonicalizes the start directory (absolute-path resolution
+plus symlink resolution) and then reads the registry from the main.ts
+directory (or an explicit `configDirectory` override supplied by tooling and
+tests). When no mapping exists for that directory, the tool fails closed with
+an actionable error that lists the configured workspaces. The referenced
+`credentialFile` is resolved relative to the canonical start directory and
+loaded only after the workspace mapping resolves; a missing, malformed, or
+group/world-readable credential file also fails closed.
 
 ### Precedence (resolved per field, highest first)
 
