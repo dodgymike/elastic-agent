@@ -43,6 +43,7 @@ test/.prompt-parser-build/
 test/.plan-handler-build/
 test/.spec-keeper-migration-build/
 test/.spec-keeper-migrate-build/
+test/.tool-call-scheduling-build/
 
 # Agent execution worktrees; keep the staging copies out of the repository.
 .worktrees/
