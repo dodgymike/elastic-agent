@@ -1124,12 +1124,12 @@ const tools = [
         parameters: {
             type: "object",
             properties: {
-                path: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }, body: {},
+                path: { type: "string" }, startDirectory: { type: "string", description: "Workspace start directory used as the .spec-keeper/config lookup key; defaults to --start-dir when configured, otherwise the process working directory." }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }, body: {},
                 accessToken: { type: "string" }, refreshToken: { type: "string" }, username: { type: "string" }, password: { type: "string" },
                 clientId: { type: "string" }, region: { type: "string" }, apiBase: { type: "string" }, projectSlug: { type: "string" }, userAgent: { type: "string" },
             }, required: ["path"],
         },
-        exec_handler: (options) => SpecKeeper(options),
+        exec_handler: (options) => SpecKeeper({ ...options, startDirectory: options.startDirectory ?? (toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined) }),
     },
     {
         type: "function", name: "SpecKeeperEnroll",
@@ -2660,9 +2660,11 @@ async function main(options: { review?: boolean; loop?: boolean; logPrompts?: bo
     // from that mapping or the legacy file while migration is still pending.
     // Secret values are never logged. The `.spec-keeper/config` registry is
     // resolved relative to the directory containing main.ts (never the
-    // process working directory), while the registry key is the canonical
-    // start directory (resolved in a later step).
+    // process working directory), while the registry key is the configured
+    // --start-dir (canonicalized) when present, falling back to the process
+    // working directory when --start-dir is absent.
     const specKeeperDefaults = resolveSpecKeeperRuntimeDefaults({
+        startDirectory: toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined,
         configDirectory: agentSourceRoot,
     });
     for (const warning of specKeeperDefaults.warnings) status.warning(warning);

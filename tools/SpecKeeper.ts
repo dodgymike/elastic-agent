@@ -15,6 +15,13 @@ export type SpecKeeperMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export interface SpecKeeperOptions {
   /** Supported project resource route (for example /tasks) or an absolute /api/v1 route. */
   path: string;
+  /**
+   * Workspace start directory used as the `.spec-keeper/config` lookup key.
+   * It is canonicalized (absolute-path resolution plus symlink resolution)
+   * before lookup. Defaults to the dispatcher's configured `--start-dir`
+   * when supplied by the runtime, otherwise the process working directory.
+   */
+  startDirectory?: string;
   /** Project slug for resource routes. Defaults to the `.spec-keeper/config` workspace mapping. */
   projectSlug?: string;
   /** HTTP method for the requested Spec Keeper endpoint. */
@@ -306,7 +313,7 @@ async function getAccessToken(
  * compatible with evolving Spec Keeper project schemas.
  */
 export default async function specKeeper(options: SpecKeeperOptions): Promise<SpecKeeperResult> {
-  const workspace = resolveSpecKeeperWorkspace();
+  const workspace = resolveSpecKeeperWorkspace(options.startDirectory);
   const {
     path,
     method = "GET",

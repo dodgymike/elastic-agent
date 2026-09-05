@@ -24,6 +24,11 @@ procedures.
 
 - `method` (string): `GET` | `POST` | `PUT` | `PATCH` | `DELETE` (default `GET`).
 - `body` (any): JSON payload for `POST`, `PUT`, and `PATCH`.
+- `startDirectory` (string): workspace start directory used as the
+  `.spec-keeper/config` lookup key. It is canonicalized (absolute-path
+  resolution plus symlink resolution) before lookup. Defaults to the runtime's
+  configured `--start-dir` when present, otherwise the process working
+  directory.
 - `projectSlug` (string): project slug for resource routes. When omitted, it
   resolves from the `.spec-keeper/config` workspace mapping (see
   Configuration).
