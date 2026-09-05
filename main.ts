@@ -137,7 +137,7 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
-import { classifyToolCall, createToolSafetyLogger, toolRiskLevel } from "./tool-safety-classifier.js";
+import { classifyToolCall, createToolSafetyLogger, resolveClassifierModel, toolRiskLevel } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
 import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
@@ -156,6 +156,7 @@ program
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--review", "Run the review stage after execution (default: false)", false)
     .option("--disable-classifier", "Bypass the tool safety classifier", false)
+    .option("--classifier-model <model>", "Model for tool-safety LLM classification (default: deepseek-v4-flash; overrides the classifier default only, not the main LLM model)")
     .option("--agent-source-dir <dir>", "Agent source directory whose files may be edited (default: resolved agent source directory)")
     .option("--start-dir <dir>", "Starting directory whose files may be edited (default: runtime working directory)")
     .option("--safe-dirs <dirs>", "Comma-separated list of additional safe directories the classifier treats as readable and editable (e.g. --safe-dir /path/a,/path/b)")
@@ -218,6 +219,12 @@ const {
     stepVerbose,
     fatalVerbose,
 } = resolveOutputGates(options);
+// Classifier model selection is deliberately separate from the main runtime
+// model. The CLI flag wins when supplied; otherwise the classifier uses its
+// dedicated deepseek-v4-flash default. DEEPSEEK_MODEL (which still selects the
+// main runtime model via resolveRuntimeLlmModel below) is never read here, so
+// it cannot leak into classifier model selection.
+let classifierModel = resolveClassifierModel(options.classifierModel);
 // Tool-call parallelism is resolved and validated before any runtime work
 // starts so an invalid --max-tool-call-parallelism produces a clear CLI error
 // instead of a mid-run failure. The resolved value is carried on runtimeConfig
@@ -1877,6 +1884,10 @@ async function prepareToolCall(output, configData, goalKey) {
     try {
         classification = await classifyToolCall(output.name, toolArguments, {
             runtime: client,
+            // Classifier model resolved once at startup from --classifier-model
+            // (or the classifier's dedicated deepseek-v4-flash default). The
+            // main runtime model (DEEPSEEK_MODEL) is intentionally not used.
+            model: classifierModel,
             workspaceRoot: classifierWorkspaceRoot,
             // Without --start-dir, the starting-directory init provides both
             // the logical cwd (pwd) and the canonical (symlink-resolved) path
