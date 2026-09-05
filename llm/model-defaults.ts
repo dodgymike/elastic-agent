@@ -41,7 +41,7 @@ const PROVIDER_MODEL_DEFAULTS: Readonly<Record<string, ProviderModelDefault>> = 
     environmentVariable: "BEDROCK_CLAUDE_MODEL",
   }),
   "deepseek-v4": Object.freeze({
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     highestModel: "deepseek-v4-pro",
     environmentVariable: "DEEPSEEK_MODEL",
   }),
