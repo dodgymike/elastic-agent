@@ -22,6 +22,13 @@ export interface SpecKeeperOptions {
    * when supplied by the runtime, otherwise the process working directory.
    */
   startDirectory?: string;
+  /**
+   * Explicit base directory for the shared `.spec-keeper/config` registry.
+   * Defaults to the directory containing the agent's `main.ts`, so tooling
+   * and tests can point the lookup at a fixture registry without changing
+   * `process.cwd()` or the runtime's configured start directory.
+   */
+  configDirectory?: string;
   /** Project slug for resource routes. Defaults to the `.spec-keeper/config` workspace mapping. */
   projectSlug?: string;
   /** HTTP method for the requested Spec Keeper endpoint. */
@@ -313,7 +320,9 @@ async function getAccessToken(
  * compatible with evolving Spec Keeper project schemas.
  */
 export default async function specKeeper(options: SpecKeeperOptions): Promise<SpecKeeperResult> {
-  const workspace = resolveSpecKeeperWorkspace(options.startDirectory);
+  const workspace = resolveSpecKeeperWorkspace(options.startDirectory, {
+    configDirectory: options.configDirectory,
+  });
   const {
     path,
     method = "GET",

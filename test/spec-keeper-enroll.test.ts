@@ -81,10 +81,16 @@ const VALID_RECIPE = {
     // never written to disk.
     {
       const workspace = makeWorkspace("happy");
+      const registryHome = join(root, "registry");
+      mkdirSync(registryHome);
       const calls = stubFetch(() => enrollResponse(VALID_RECIPE));
       try {
         const result = await withCwd(workspace, () =>
-          specKeeperEnroll({ token: "single-use-enrollment-token" }),
+          specKeeperEnroll({
+            token: "single-use-enrollment-token",
+            startDirectory: workspace,
+            configDirectory: registryHome,
+          }),
         );
 
         assert.equal(calls.length, 1);
@@ -113,7 +119,7 @@ const VALID_RECIPE = {
         assert.equal(credential.region, "us-east-1");
         assert.equal(credential.client_id, "client-123");
 
-        const configPath = join(canonical, ".spec-keeper", "config");
+        const configPath = join(registryHome, ".spec-keeper", "config");
         assert.ok(existsSync(configPath));
         const configText = readFileSync(configPath, "utf8");
         assert.ok(!configText.includes("single-use-enrollment-token"));
@@ -136,6 +142,7 @@ const VALID_RECIPE = {
       } finally {
         globalThis.fetch = originalFetch;
         rmSync(workspace, { recursive: true, force: true });
+        rmSync(registryHome, { recursive: true, force: true });
       }
     }
 
@@ -146,7 +153,12 @@ const VALID_RECIPE = {
       stubFetch(() => enrollResponse(VALID_RECIPE));
       try {
         await withCwd(workspace, () =>
-          specKeeperEnroll({ token: "t", projectSlug: "explicit-project" }),
+          specKeeperEnroll({
+            token: "t",
+            projectSlug: "explicit-project",
+            startDirectory: workspace,
+            configDirectory: workspace,
+          }),
         );
         const canonical = realpathSync(workspace);
         const credentialPath = join(
@@ -189,7 +201,13 @@ const VALID_RECIPE = {
       );
       stubFetch(() => enrollResponse(VALID_RECIPE));
       try {
-        await withCwd(workspace, () => specKeeperEnroll({ token: "t" }));
+        await withCwd(workspace, () =>
+          specKeeperEnroll({
+            token: "t",
+            startDirectory: workspace,
+            configDirectory: workspace,
+          }),
+        );
         const canonical = realpathSync(workspace);
         const config = readJson(join(canonical, ".spec-keeper", "config")) as Record<
           string,
@@ -299,7 +317,12 @@ const VALID_RECIPE = {
       try {
         await withCwd(workspace, async () => {
           await assert.rejects(
-            () => specKeeperEnroll({ token: "t" }),
+            () =>
+              specKeeperEnroll({
+                token: "t",
+                startDirectory: workspace,
+                configDirectory: workspace,
+              }),
             /Migrate the legacy \.spec-keeper file first/,
           );
         });
@@ -320,7 +343,12 @@ const VALID_RECIPE = {
       try {
         await withCwd(workspace, async () => {
           await assert.rejects(
-            () => specKeeperEnroll({ token: "t" }),
+            () =>
+              specKeeperEnroll({
+                token: "t",
+                startDirectory: workspace,
+                configDirectory: workspace,
+              }),
             /refuses to overwrite malformed/,
           );
         });

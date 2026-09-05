@@ -82,7 +82,11 @@ try {
     );
     const canonical = realpathSync(workspace);
 
-    const report = migrateSpecKeeperWorkspace(workspace);
+    const registryHome = join(root, "registry");
+    mkdirSync(registryHome);
+    const report = migrateSpecKeeperWorkspace(workspace, {
+      configDirectory: registryHome,
+    });
     assert.equal(report.migrated, true);
     assert.equal(report.projectSlug, "legacy-slug");
     assert.equal(report.apiBase, "https://legacy.example");
@@ -91,7 +95,9 @@ try {
     assert.ok(existsSync(join(workspace, ".spec-keeper")));
     assert.ok(statSync(join(workspace, ".spec-keeper")).isDirectory());
 
-    const configPath = join(workspace, ".spec-keeper", "config");
+    const configPath = join(registryHome, ".spec-keeper", "config");
+    assert.equal(report.configPath, configPath);
+    assert.ok(statSync(join(registryHome, ".spec-keeper")).isDirectory());
     const registry = readJson(configPath) as Record<string, Record<string, unknown>>;
     assert.deepEqual(Object.keys(registry), [canonical]);
     assert.equal(registry[canonical].projectSlug, "legacy-slug");
@@ -127,11 +133,16 @@ try {
         credentialStore: ".spec.local.json",
       }),
     );
-    const report = migrateSpecKeeperWorkspace(workspace);
+    const report = migrateSpecKeeperWorkspace(workspace, {
+      configDirectory: workspace,
+    });
     assert.equal(report.migrated, true);
     assert.equal(report.credentialFile, undefined);
     assert.ok(report.warnings.some((warning) => warning.includes("No legacy credential store found")));
-    const registry = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+    const registry = loadSpecKeeperWorkspaceRegistry({
+      startDirectory: workspace,
+      configDirectory: workspace,
+    });
     assert.equal(registry.registry[realpathSync(workspace)].projectSlug, "missing-cred");
     assert.equal(
       registry.registry[realpathSync(workspace)].credentialFile,
@@ -144,7 +155,7 @@ try {
     const workspace = makeWorkspace("malformed-config");
     writeLegacyConfig(workspace, "{ not valid json");
     assert.throws(
-      () => migrateSpecKeeperWorkspace(workspace),
+      () => migrateSpecKeeperWorkspace(workspace, { configDirectory: workspace }),
       /cannot migrate.*not valid JSON/i,
     );
     assert.ok(existsSync(join(workspace, ".spec-keeper")));
@@ -160,7 +171,7 @@ try {
     );
     writeLegacyCredential(workspace, "{ not valid json");
     assert.throws(
-      () => migrateSpecKeeperWorkspace(workspace),
+      () => migrateSpecKeeperWorkspace(workspace, { configDirectory: workspace }),
       /could not read the legacy credential store/i,
     );
     assert.ok(existsSync(join(workspace, ".spec-keeper")));
@@ -171,7 +182,9 @@ try {
   {
     const workspace = makeWorkspace("already-migrated");
     mkdirSync(join(workspace, ".spec-keeper"));
-    const report = migrateSpecKeeperWorkspace(workspace);
+    const report = migrateSpecKeeperWorkspace(workspace, {
+      configDirectory: workspace,
+    });
     assert.equal(report.migrated, false);
     assert.ok(report.warnings.some((warning) => warning.includes("already a directory")));
   }
@@ -179,7 +192,9 @@ try {
   // No legacy file at all is reported as no-op.
   {
     const workspace = makeWorkspace("none");
-    const report = migrateSpecKeeperWorkspace(workspace);
+    const report = migrateSpecKeeperWorkspace(workspace, {
+      configDirectory: workspace,
+    });
     assert.equal(report.migrated, false);
     assert.ok(report.warnings.some((warning) => warning.includes("nothing to migrate")));
   }
@@ -199,9 +214,15 @@ try {
       }),
     );
     writeLegacyCredential(workspace, JSON.stringify({ Username: "u", Password: "p" }), 0o600);
-    const report = migrateSpecKeeperWorkspace(workspace);
+    const report = migrateSpecKeeperWorkspace(workspace, {
+      configDirectory: workspace,
+    });
     assert.equal(report.migrated, true);
-    const defaults = resolveSpecKeeperRuntimeDefaults({ startDirectory: workspace, env: {} });
+    const defaults = resolveSpecKeeperRuntimeDefaults({
+      startDirectory: workspace,
+      configDirectory: workspace,
+      env: {},
+    });
     assert.equal(defaults.workspace?.config.projectSlug, "runtime-slug");
     assert.equal(defaults.projectSlug, "runtime-slug");
     assert.equal(defaults.apiBase, "https://runtime.example");
@@ -213,7 +234,11 @@ try {
   // unconfigured object with an actionable warning instead of throwing.
   {
     const workspace = makeWorkspace("runtime-unconfigured");
-    const defaults = resolveSpecKeeperRuntimeDefaults({ startDirectory: workspace, env: {} });
+    const defaults = resolveSpecKeeperRuntimeDefaults({
+      startDirectory: workspace,
+      configDirectory: workspace,
+      env: {},
+    });
     assert.equal(defaults.workspace, null);
     assert.equal(defaults.projectSlug, undefined);
     assert.equal(defaults.apiBase, "https://api.spec.elasticninja.com");

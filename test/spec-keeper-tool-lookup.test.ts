@@ -59,7 +59,12 @@ async function withCwd(dir: string, run: () => Promise<void> | void): Promise<vo
     try {
       await withCwd(fixture.workspace, async () => {
         await assert.rejects(
-          () => specKeeper({ path: "/tasks", accessToken: "tok" }),
+          () =>
+            specKeeper({
+              path: "/tasks",
+              accessToken: "tok",
+              configDirectory: fixture.workspace,
+            }),
           (error: Error) => {
             assert.match(error.message, /no workspace mapping for start directory/);
             assert.ok(error.message.includes("No .spec-keeper/config was found at"));
@@ -90,7 +95,11 @@ async function withCwd(dir: string, run: () => Promise<void> | void): Promise<vo
     }) as typeof fetch;
     try {
       await withCwd(fixture.workspace, async () => {
-        await specKeeper({ path: "/tasks", accessToken: "tok" });
+        await specKeeper({
+          path: "/tasks",
+          accessToken: "tok",
+          configDirectory: fixture.workspace,
+        });
       });
     } finally {
       globalThis.fetch = originalFetch;
@@ -98,6 +107,42 @@ async function withCwd(dir: string, run: () => Promise<void> | void): Promise<vo
     }
     assert.deepEqual(calls, [
       { url: "https://workspace.example/api/v1/projects/workspace-slug/tasks", method: "GET" },
+    ]);
+  }
+
+  // An explicit startDirectory keys the lookup without relying on process.cwd(),
+  // while the configDirectory override points the registry read at the fixture.
+  {
+    const fixture = makeWorkspace();
+    writeWorkspaceConfig(fixture, {
+      projectSlug: "explicit-start",
+      credentialFile: ".spec-keeper/explicit.json",
+      apiBase: "https://explicit.example/",
+    });
+    writeCredential(fixture, "explicit.json", "{}");
+
+    const otherDir = mkdtempSync(join(tmpdir(), "spec-keeper-tool-lookup-other-"));
+    const calls: Array<{ url: string; method?: string }> = [];
+    globalThis.fetch = (async (url, init) => {
+      calls.push({ url: String(url), method: init?.method });
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      await withCwd(otherDir, async () => {
+        await specKeeper({
+          path: "/tasks",
+          accessToken: "tok",
+          startDirectory: fixture.workspace,
+          configDirectory: fixture.workspace,
+        });
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(otherDir, { recursive: true, force: true });
+      rmSync(fixture.workspace, { recursive: true, force: true });
+    }
+    assert.deepEqual(calls, [
+      { url: "https://explicit.example/api/v1/projects/explicit-start/tasks", method: "GET" },
     ]);
   }
 
@@ -117,7 +162,10 @@ async function withCwd(dir: string, run: () => Promise<void> | void): Promise<vo
     }) as typeof fetch;
     try {
       await withCwd(fixture.workspace, async () => {
-        await specKeeper({ path: "/tasks" });
+        await specKeeper({
+          path: "/tasks",
+          configDirectory: fixture.workspace,
+        });
       });
     } finally {
       globalThis.fetch = originalFetch;
@@ -137,7 +185,12 @@ async function withCwd(dir: string, run: () => Promise<void> | void): Promise<vo
     try {
       await withCwd(fixture.workspace, async () => {
         await assert.rejects(
-          () => specKeeper({ path: "/tasks", accessToken: "tok" }),
+          () =>
+            specKeeper({
+              path: "/tasks",
+              accessToken: "tok",
+              configDirectory: fixture.workspace,
+            }),
           /credential file.*does not exist/i,
         );
       });
@@ -157,7 +210,12 @@ async function withCwd(dir: string, run: () => Promise<void> | void): Promise<vo
     try {
       await withCwd(fixture.workspace, async () => {
         await assert.rejects(
-          () => specKeeper({ path: "/tasks", accessToken: "tok" }),
+          () =>
+            specKeeper({
+              path: "/tasks",
+              accessToken: "tok",
+              configDirectory: fixture.workspace,
+            }),
           /could not load its local credential store/i,
         );
       });
@@ -177,7 +235,12 @@ async function withCwd(dir: string, run: () => Promise<void> | void): Promise<vo
     try {
       await withCwd(fixture.workspace, async () => {
         await assert.rejects(
-          () => specKeeper({ path: "/tasks", accessToken: "tok" }),
+          () =>
+            specKeeper({
+              path: "/tasks",
+              accessToken: "tok",
+              configDirectory: fixture.workspace,
+            }),
           /overly permissive permissions/i,
         );
       });

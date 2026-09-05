@@ -13,6 +13,7 @@ import {
   canonicalizeSpecKeeperStartDirectory,
   loadSpecKeeperWorkspaceRegistry,
   resolveSpecKeeperWorkspace,
+  specKeeperMainDirectory,
   specKeeperWorkspaceConfigPath,
 } from "../specKeeperConfig.js";
 
@@ -64,14 +65,38 @@ try {
     assert.equal(canonicalizeSpecKeeperStartDirectory(alias), realpathSync(target));
   }
 
-  // The config path helper names `.spec-keeper/config` under the start dir.
+  // The config path helper names `.spec-keeper/config` under an explicit base
+  // directory, while its no-argument default is the directory containing
+  // main.ts -- independent of the process working directory.
   assert.equal(
     specKeeperWorkspaceConfigPath(workspace),
     join(workspace, ".spec-keeper", "config"),
   );
+  const mainDirConfigPath = join(specKeeperMainDirectory(), ".spec-keeper", "config");
+  assert.equal(specKeeperWorkspaceConfigPath(), mainDirConfigPath);
+  const unrelatedCwd = mkdtempSync(join(root, "unrelated-cwd-"));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(unrelatedCwd);
+    assert.equal(specKeeperWorkspaceConfigPath(), mainDirConfigPath);
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(unrelatedCwd, { recursive: true, force: true });
+  }
 
-  // A missing registry file reports source "missing" with no warnings.
-  const missingRegistry = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  // Without a configDirectory override, the registry loader reads from the
+  // main.ts directory even when the start directory is elsewhere.
+  assert.equal(
+    loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace }).path,
+    mainDirConfigPath,
+  );
+
+  // A missing registry file (under the explicit configDirectory override)
+  // reports source "missing" with no warnings.
+  const missingRegistry = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: workspace,
+    configDirectory: workspace,
+  });
   assert.equal(missingRegistry.source, "missing");
   assert.deepEqual(missingRegistry.registry, {});
   assert.deepEqual(missingRegistry.warnings, []);
@@ -88,7 +113,10 @@ try {
       },
     }),
   );
-  const loaded = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  const loaded = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: workspace,
+    configDirectory: workspace,
+  });
   assert.equal(loaded.source, "file");
   assert.deepEqual(Object.keys(loaded.registry), [canonicalWorkspace]);
   assert.equal(loaded.registry[canonicalWorkspace].projectSlug, "workspace-slug");
@@ -109,7 +137,10 @@ try {
       },
     }),
   );
-  const aliased = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  const aliased = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: workspace,
+    configDirectory: workspace,
+  });
   assert.equal(aliased.registry[canonicalWorkspace].projectSlug, "aliased-slug");
   assert.equal(
     aliased.registry[canonicalWorkspace].credentialFile,
@@ -118,7 +149,9 @@ try {
   assert.equal(aliased.registry[canonicalWorkspace].apiBase, "https://aliased.example");
 
   // resolveSpecKeeperWorkspace returns the matching mapping.
-  const resolved = resolveSpecKeeperWorkspace(workspace);
+  const resolved = resolveSpecKeeperWorkspace(workspace, {
+    configDirectory: workspace,
+  });
   assert.equal(resolved.startDirectory, canonicalWorkspace);
   assert.equal(resolved.config.projectSlug, "aliased-slug");
   assert.equal(resolved.configPath, join(workspace, ".spec-keeper", "config"));
@@ -134,7 +167,10 @@ try {
       [join(root, "missing-credential")]: { projectSlug: "bad" },
     }),
   );
-  const mixed = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  const mixed = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: workspace,
+    configDirectory: workspace,
+  });
   assert.deepEqual(Object.keys(mixed.registry), [canonicalWorkspace]);
   assert.equal(mixed.registry[canonicalWorkspace].projectSlug, "good");
   assert.ok(
@@ -162,24 +198,36 @@ try {
       },
     }),
   );
-  const collapsed = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  const collapsed = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: workspace,
+    configDirectory: workspace,
+  });
   assert.deepEqual(Object.keys(collapsed.registry), [canonicalWorkspace]);
   assert.equal(collapsed.registry[canonicalWorkspace].projectSlug, "second");
   assert.equal(
     collapsed.registry[canonicalWorkspace].credentialFile,
     ".spec-keeper/second.json",
   );
-  assert.equal(resolveSpecKeeperWorkspace(workspace).config.projectSlug, "second");
+  assert.equal(
+    resolveSpecKeeperWorkspace(workspace, { configDirectory: workspace }).config.projectSlug,
+    "second",
+  );
 
   // Malformed JSON and non-object roots fail closed with a clear warning.
   writeConfig("{ not valid json");
-  const malformed = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  const malformed = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: workspace,
+    configDirectory: workspace,
+  });
   assert.equal(malformed.source, "file");
   assert.deepEqual(malformed.registry, {});
   assert.ok(malformed.warnings.some((warning) => warning.includes("not valid JSON")));
 
   writeConfig("[]");
-  const nonObject = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  const nonObject = loadSpecKeeperWorkspaceRegistry({
+    startDirectory: workspace,
+    configDirectory: workspace,
+  });
   assert.equal(nonObject.source, "file");
   assert.deepEqual(nonObject.registry, {});
   assert.ok(
@@ -197,7 +245,7 @@ try {
     }),
   );
   assert.throws(
-    () => resolveSpecKeeperWorkspace(workspace),
+    () => resolveSpecKeeperWorkspace(workspace, { configDirectory: workspace }),
     (error: Error) => {
       assert.match(error.message, /no workspace mapping for start directory/);
       assert.ok(error.message.includes("Configured workspaces:"));
@@ -214,7 +262,7 @@ try {
   mkdirSync(unconfigured);
   writeFileSync(join(unconfigured, ".spec.local.json"), JSON.stringify({ Project: "sneaky" }));
   assert.throws(
-    () => resolveSpecKeeperWorkspace(unconfigured),
+    () => resolveSpecKeeperWorkspace(unconfigured, { configDirectory: unconfigured }),
     (error: Error) => {
       assert.match(error.message, /no workspace mapping for start directory/);
       assert.ok(error.message.includes("No .spec-keeper/config was found at"));
@@ -222,6 +270,35 @@ try {
       return true;
     },
   );
+
+  // When no start directory is supplied, the lookup falls back to the process
+  // working directory (canonicalized) while still reading the registry from
+  // the explicit configDirectory override.
+  {
+    const fallbackCwd = join(root, "fallback-cwd");
+    mkdirSync(fallbackCwd);
+    mkdirSync(join(fallbackCwd, ".spec-keeper"));
+    writeFileSync(
+      join(fallbackCwd, ".spec-keeper", "config"),
+      JSON.stringify({
+        [realpathSync(fallbackCwd)]: {
+          projectSlug: "fallback-slug",
+          credentialFile: ".spec-keeper/fallback.json",
+        },
+      }),
+    );
+    const fallbackPreviousCwd = process.cwd();
+    try {
+      process.chdir(fallbackCwd);
+      const fallbackResolved = resolveSpecKeeperWorkspace(undefined, {
+        configDirectory: fallbackCwd,
+      });
+      assert.equal(fallbackResolved.startDirectory, realpathSync(fallbackCwd));
+      assert.equal(fallbackResolved.config.projectSlug, "fallback-slug");
+    } finally {
+      process.chdir(fallbackPreviousCwd);
+    }
+  }
 
   console.log("Spec Keeper workspace registry layout and lookup fixtures passed");
 } finally {

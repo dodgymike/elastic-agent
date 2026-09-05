@@ -77,10 +77,22 @@ function makeWorkspaceFixture(prefix: string): {
     }) as typeof fetch;
     try {
       process.chdir(workspace);
-      await specKeeper({ path: "/tasks", projectSlug: slug, accessToken: "test-token", apiBase: "https://spec.example/" });
-      await specKeeper({ path: "/tasks/WORK-1/chain-runs", projectSlug: slug, accessToken: "test-token", apiBase: "https://spec.example" });
+      await specKeeper({
+        path: "/tasks",
+        projectSlug: slug,
+        accessToken: "test-token",
+        apiBase: "https://spec.example/",
+        configDirectory: workspace,
+      });
+      await specKeeper({
+        path: "/tasks/WORK-1/chain-runs",
+        projectSlug: slug,
+        accessToken: "test-token",
+        apiBase: "https://spec.example",
+        configDirectory: workspace,
+      });
       // Without explicit projectSlug/apiBase the `.spec-keeper/config` mapping wins.
-      await specKeeper({ path: "/tasks", accessToken: "test-token" });
+      await specKeeper({ path: "/tasks", accessToken: "test-token", configDirectory: workspace });
     } finally {
       globalThis.fetch = originalFetch;
       process.chdir(previousCwd);
@@ -117,6 +129,7 @@ function makeWorkspaceFixture(prefix: string): {
             projectSlug: slug,
             accessToken: "leaked-access-token",
             apiBase: "https://spec.example/",
+            configDirectory: workspace,
           }),
         (error: Error) => {
           assert.ok(error.message.includes("[REDACTED]"));
