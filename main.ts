@@ -3,6 +3,7 @@ import { resolveHighestModelConfiguration } from "./llm/model-defaults.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { resolveMaxToolCallParallelism } from "./tool-call-parallelism.js";
+import { buildToolCallDag, runScheduledToolCalls } from "./tool-call-scheduler.js";
 import { translateCliArgs, resolveOutputGates } from "./output-verbosity.ts";
 import { defaultBusQueueFilePath, drainBusQueue } from "./loop-queue.js";
 import { classifyAgentBusMessage, messageToSearchableText } from "./loop-mode.js";
@@ -1772,23 +1773,16 @@ function persistDenialTracker(configData, tracker) {
 }
 
 /**
- * Shared tool-call dispatch used by both executePlanStep and runSingleStep.
- * Pending output is emitted before argument parsing, and the safety classifier
- * runs before any exec_handler so an unsafe call never reaches the tool. If the
- * classifier itself fails, mutating and high-risk tools fail closed; read-only
- * tools may proceed only with an explicit warning so the check is never
- * silently bypassed. Once the call is cleared, an in-place timer tracks the
- * command and success/failure output routes through the shared render helper.
+ * Prepare one tool call for execution without running its exec_handler yet.
  *
- * The fighting-with-classifier counter is wired in here: every classifier
- * denial increments a per-goal counter, and when repeated denials for the same
- * goal reach the threshold the denied result carries an explicit REPLAN
- * DIRECTIVE telling the model to stop repeating the blocked action and re-plan.
- * Progress (a successful call) resets the current goal's counter, and the
- * tracker is reset at plan/step boundaries in runExecutionPhase and
- * runSingleStep, so a fresh approach is not mistaken for fighting.
+ * This is the serial prepare phase of the dependency-aware scheduler
+ * (TOOL_CALL_SCHEDULING.md section 7.1): pending rendering, JSON argument
+ * parsing, ExecuteCommand preflight + git routing, and the safety classifier
+ * all run here, in original order, so the shared LLM runtime and the denial
+ * tracker are never touched concurrently. A call that fails preparation
+ * returns a terminal result (`execution === null`) and is never executed.
  */
-async function dispatchToolCall(output, configData, goalKey) {
+async function prepareToolCall(output, configData, goalKey) {
     throwIfAborted(abortController.signal, "execution");
     renderToolCallPending(output);
     const tool = tools.find((candidate) => candidate.name === output.name);
@@ -1798,13 +1792,13 @@ async function dispatchToolCall(output, configData, goalKey) {
     } catch (error) {
         const message = `Tool arguments could not be parsed as JSON: ${error instanceof Error ? error.message : String(error)}`;
         renderToolCallFailed(output, { error: message });
-        return { output, toolArguments: {}, toolResponse: { error: message }, errorMessage: message };
+        return { output, toolArguments: {}, toolResponse: { error: message }, errorMessage: message, execution: null };
     }
 
     if (!tool?.exec_handler) {
         const message = `No exec_handler found for tool: ${output.name}`;
         renderToolCallFailed(output, { error: message });
-        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message, execution: null };
     }
 
     // ExecuteCommand preflight: keep supported git commands on the dedicated
@@ -1828,7 +1822,7 @@ async function dispatchToolCall(output, configData, goalKey) {
         const agentBusDetection = detectAgentBusCommand(commandText);
         if (agentBusDetection.action === "refuse") {
             renderToolCallFailed(output, { error: agentBusDetection.reason });
-            return { output, toolArguments, toolResponse: { error: agentBusDetection.reason }, errorMessage: agentBusDetection.reason };
+            return { output, toolArguments, toolResponse: { error: agentBusDetection.reason }, errorMessage: agentBusDetection.reason, execution: null };
         }
         const routing = await routeGitExecuteCommand(command, {
             runtime: client,
@@ -1838,7 +1832,7 @@ async function dispatchToolCall(output, configData, goalKey) {
         });
         if (routing.action === "refuse") {
             renderToolCallFailed(output, { error: routing.reason });
-            return { output, toolArguments, toolResponse: { error: routing.reason }, errorMessage: routing.reason };
+            return { output, toolArguments, toolResponse: { error: routing.reason }, errorMessage: routing.reason, execution: null };
         }
     }
 
@@ -1911,7 +1905,7 @@ async function dispatchToolCall(output, configData, goalKey) {
         if (risk !== "readonly") {
             const message = `Safety classifier failed for ${output.name} (${risk} tool); refusing to execute: ${reason}`;
             renderToolCallFailed(output, { error: message });
-            return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+            return { output, toolArguments, toolResponse: { error: message }, errorMessage: message, execution: null };
         }
         status.warning(`Safety classifier failed for read-only tool ${output.name}; proceeding with an explicit warning: ${reason}`, toolChildIndent);
     }
@@ -1932,16 +1926,11 @@ async function dispatchToolCall(output, configData, goalKey) {
             ? `${message}\n\n${denial.replanDirective}`
             : message;
         renderToolCallFailed(output, { error: fullMessage });
-        return { output, toolArguments, toolResponse: { error: fullMessage }, errorMessage: fullMessage };
+        return { output, toolArguments, toolResponse: { error: fullMessage }, errorMessage: fullMessage, execution: null };
     }
 
-    // --start-dir tool cwd: run each tool from the configured start directory
-    // and restore the previous working directory afterwards, including when
-    // the tool rejects. The directory is validated at startup, but a chdir
-    // failure here fails the call safely instead of running the tool from an
-    // unexpected directory. The switch happens before the timer starts so a
-    // chdir failure never leaves an instrumented call running.
-    //
+    // --start-dir tool cwd is resolved during prepare but switched during
+    // execute so a concurrent batch never interleaves process.chdir() calls.
     // The AgentBus tool is excluded from this start-dir injection. agent-busctl
     // resolves its workspace root, binary location, and enrolled credential
     // store relative to the process it was launched from (default
@@ -1951,13 +1940,28 @@ async function dispatchToolCall(output, configData, goalKey) {
     // injected start-directory switch from altering agent-bus behavior.
     const isAgentBusTool = output.name === "AgentBus";
     const configuredStartDir = !isAgentBusTool && toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
+    return { output, toolArguments, toolResponse: null, errorMessage: null, execution: { tool, configuredStartDir } };
+}
+
+/**
+ * Execute a prepared tool call's exec_handler under the tool timer with the
+ * start-directory cwd already resolved. This is the only phase that runs
+ * concurrently (bounded by maxToolCallParallelism). The function never throws:
+ * cwd-switch and tool failures are returned as error results, matching the
+ * historical dispatch contract where an individual tool error is a result the
+ * model can see rather than a fatal abort.
+ */
+async function executePreparedToolCall(prepared) {
+    if (prepared.execution === null) {
+        return { toolResponse: prepared.toolResponse, errorMessage: prepared.errorMessage };
+    }
+    const { tool, configuredStartDir } = prepared.execution;
     let toolCwdSwitch: ReturnType<typeof switchToStartDir>;
     try {
         toolCwdSwitch = switchToStartDir(configuredStartDir);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        renderToolCallFailed(output, { error: message });
-        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message };
+        return { toolResponse: { error: message }, errorMessage: message };
     }
 
     // The in-place tool timer line is non-essential tool detail; when output is
@@ -1971,9 +1975,37 @@ async function dispatchToolCall(output, configData, goalKey) {
     });
     timer.start();
     try {
-        const toolResponse = await tool.exec_handler(toolArguments);
+        const toolResponse = await tool.exec_handler(prepared.toolArguments);
         timer.stop();
-        renderToolCallSucceeded(output, toolResponse);
+        return { toolResponse, errorMessage: null };
+    } catch (error) {
+        timer.stop();
+        const message = error instanceof Error ? error.message : String(error);
+        return { toolResponse: { error: message }, errorMessage: message };
+    } finally {
+        restoreStartDir(toolCwdSwitch);
+    }
+}
+
+/**
+ * Serial result phase of the dependency-aware scheduler
+ * (TOOL_CALL_SCHEDULING.md section 7.1): render success/failure, update the
+ * denial tracker, and build the dispatched result. Preparation failures were
+ * already rendered and recorded during prepare, so this phase only emits
+ * output for calls that actually executed.
+ */
+function finalizePreparedToolCall(prepared, execResult, configData, goalKey) {
+    if (prepared.execution === null) {
+        return {
+            output: prepared.output,
+            toolArguments: prepared.toolArguments,
+            toolResponse: prepared.toolResponse,
+            errorMessage: prepared.errorMessage,
+        };
+    }
+    const { toolResponse, errorMessage } = execResult;
+    if (errorMessage === null) {
+        renderToolCallSucceeded(prepared.output, toolResponse);
         // Progress: a cleared call counts as forward motion, so reset the
         // current goal's denial counter so the next denial starts afresh.
         if (configData) {
@@ -1981,16 +2013,67 @@ async function dispatchToolCall(output, configData, goalKey) {
             tracker.recordSuccess(goalKey ?? "(default-goal)");
             persistDenialTracker(configData, tracker);
         }
-        return { output, toolArguments, toolResponse, errorMessage: null };
-    } catch (error) {
-        timer.stop();
-        const message = error instanceof Error ? error.message : String(error);
-        const toolResponse = { error: message };
-        renderToolCallFailed(output, toolResponse);
-        return { output, toolArguments, toolResponse, errorMessage: message };
-    } finally {
-        restoreStartDir(toolCwdSwitch);
+    } else {
+        renderToolCallFailed(prepared.output, toolResponse);
     }
+    return { output: prepared.output, toolArguments: prepared.toolArguments, toolResponse, errorMessage };
+}
+
+/**
+ * Shared sequential tool-call dispatch used when max parallelism is 1 or
+ * --start-dir is configured. It is implemented on the same
+ * prepare/execute/finalize split as the concurrent path so n == 1 reproduces
+ * today's exact sequential order and semantics.
+ */
+async function dispatchToolCall(output, configData, goalKey) {
+    const prepared = await prepareToolCall(output, configData, goalKey);
+    if (prepared.execution === null) {
+        return finalizePreparedToolCall(prepared, null, configData, goalKey);
+    }
+    const execResult = await executePreparedToolCall(prepared);
+    return finalizePreparedToolCall(prepared, execResult, configData, goalKey);
+}
+
+/**
+ * Dispatch every function_call in one model response with the
+ * dependency-aware scheduler (TOOL_CALL_SCHEDULING.md). Preparation and
+ * finalization run serially in original order; only exec_handlers run
+ * concurrently, bounded by runtimeConfig.maxToolCallParallelism.
+ *
+ * When --start-dir is configured, the process-wide cwd switch cannot be made
+ * safe across concurrent executors, so the scheduler falls back to sequential
+ * execution exactly as today (TOOL_CALL_SCHEDULING.md section 7.3 option b).
+ */
+async function dispatchToolCallsBatch(functionCalls, configData, goalKey): Promise<any[]> {
+    if (functionCalls.length === 0) return [];
+    const configuredMax = Math.max(1, Math.floor(runtimeConfig.maxToolCallParallelism));
+    const effectiveMax = toolSafetyConfig.startDirConfigured ? 1 : configuredMax;
+    if (effectiveMax === 1) {
+        const dispatched: any[] = [];
+        for (const output of functionCalls) {
+            dispatched.push(await dispatchToolCall(output, configData, goalKey));
+        }
+        return dispatched;
+    }
+
+    const prepared: any[] = [];
+    for (const output of functionCalls) {
+        prepared.push(await prepareToolCall(output, configData, goalKey));
+    }
+    const dag = buildToolCallDag(
+        prepared.map((entry) => ({ toolName: entry.output.name, arguments: entry.toolArguments })),
+    );
+    const execResults = await runScheduledToolCalls(
+        prepared,
+        dag,
+        effectiveMax,
+        (entry) => executePreparedToolCall(entry),
+    );
+    const dispatched: any[] = [];
+    for (let i = 0; i < prepared.length; i++) {
+        dispatched.push(finalizePreparedToolCall(prepared[i], execResults[i], configData, goalKey));
+    }
+    return dispatched;
 }
 
 /**
@@ -2148,9 +2231,9 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         throwIfProviderCancelled(response, "execution", index + 1);
         previousResponseId = response.id;
         toolOutputs = [];
-        for (const output of response.output ?? []) {
-            if (output.type !== "function_call") continue;
-            const dispatched = await dispatchToolCall(output, configData, `plan-${index + 1}`);
+        const functionCalls = (response.output ?? []).filter((output) => output.type === "function_call");
+        const dispatchedCalls = await dispatchToolCallsBatch(functionCalls, configData, `plan-${index + 1}`);
+        for (const dispatched of dispatchedCalls) {
             toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
             appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
         }
@@ -2464,9 +2547,9 @@ async function runSingleStep(
             throwIfProviderCancelled(response, "execution");
             previousResponseId = response.id;
             toolOutputs = [];
-            for (const output of response.output ?? []) {
-                if (output.type !== "function_call") continue;
-                const dispatched = await dispatchToolCall(output, configData, "direct-step");
+            const functionCalls = (response.output ?? []).filter((output) => output.type === "function_call");
+            const dispatchedCalls = await dispatchToolCallsBatch(functionCalls, configData, "direct-step");
+            for (const dispatched of dispatchedCalls) {
                 toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
                 appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
             }
