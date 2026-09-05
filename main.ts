@@ -1,6 +1,12 @@
+import { shellModeFromEnvironment } from "./tools/shell-policy.js";
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { resolveHighestModelConfiguration } from "./llm/model-defaults.js";
-import { resolvePlannerModelOverride, selectCliProvider } from "./llm/cli-provider-selection.js";
+import {
+    resolvePlannerModelOverride,
+    resolvePlannerModelProvider,
+    selectCliProvider,
+    type PlannerModelProviderSelection,
+} from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { resolveMaxToolCallParallelism } from "./tool-call-parallelism.js";
 import { buildToolCallDag, runScheduledToolCalls } from "./tool-call-scheduler.js";
@@ -137,7 +143,7 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
-import { classifyToolCall, createToolSafetyLogger, resolveClassifierModel, toolRiskLevel } from "./tool-safety-classifier.js";
+import { enforceExecutionPolicy, classifyToolCall, createToolSafetyLogger, resolveClassifierModel, toolRiskLevel } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
 import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
@@ -156,7 +162,7 @@ program
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--planner-model <model-id>", "Optional planner model override; when omitted, uses the selected provider's default planner model")
     .option("--review", "Run the review stage after execution (default: false)", false)
-    .option("--disable-classifier", "Bypass the tool safety classifier", false)
+    .option("--disable-classifier", "Disable LLM classification only; deterministic safety checks remain enforced", false)
     .option("--classifier-model <model>", "Model for tool-safety LLM classification (default: deepseek-v4-flash; overrides the classifier default only, not the main LLM model)")
     .option("--agent-source-dir <dir>", "Agent source directory whose files may be edited (default: resolved agent source directory)")
     .option("--start-dir <dir>", "Starting directory whose files may be edited (default: runtime working directory)")
@@ -230,8 +236,9 @@ const {
 let classifierModel = resolveClassifierModel(options.classifierModel);
 // Optional --planner-model override is resolved at startup so a blank value
 // fails with a clear CLI error before any runtime work starts. The resolved
-// override is wired into planner model/provider selection in a later step;
-// when omitted, the selected provider's default planner model is used.
+// override is wired into planner model/provider selection below via
+// resolvePlannerModelProvider; when omitted, the selected provider's default
+// planner model is used.
 let plannerModel: string | undefined;
 try {
     plannerModel = resolvePlannerModelOverride(options.plannerModel);
@@ -297,6 +304,28 @@ const commitInstruction = options.review ? "do not commit" : "commit all of your
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
+// Wire an explicit --planner-model override to the provider whose catalog
+// advertises it (the selected provider first, then every built-in provider in
+// a stable sorted order). The resolved provider/model pair is handed to the
+// planner runtime in main(); when no override was supplied, the selected
+// provider's default planner model and adapter are used unchanged.
+let plannerModelSelection: PlannerModelProviderSelection | undefined;
+try {
+    const selectedProvider = providerSelection.configuration.provider;
+    if (selectedProvider === undefined) {
+        throw new Error("LLM planner model selection error: a provider must be selected before resolving --planner-model.");
+    }
+    plannerModelSelection = resolvePlannerModelProvider(plannerModel, selectedProvider);
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
+const plannerProviderConfiguration = plannerModelSelection
+    ? Object.freeze({ provider: plannerModelSelection.provider })
+    : providerSelection.configuration;
+const plannerRuntimeModel = plannerModelSelection
+    ? plannerModelSelection.model
+    : modelConfiguration.model;
 const abortController = new AbortController();
 // SIGINT/SIGTERM are user-triggered aborts. The handlers only abort the
 // controller; the single top-level abort handler prints the [ABORT] block and
@@ -995,7 +1024,7 @@ const tools = [
         type: "function", name: "Http",
         usage_prompt: "tools/http-usage.md",
         parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
-        exec_handler: ({ url }) => Http({ url }),
+        exec_handler: ({ url }) => Http({ url }, { signal: abortController.signal }),
     },
     {
         type: "function", name: "HttpRequest",
@@ -1008,7 +1037,7 @@ const tools = [
                 headers: { type: "object", additionalProperties: { type: "string" } }, body: { type: "string" },
             }, required: ["url"],
         },
-        exec_handler: (options) => HttpRequest(options),
+        exec_handler: (options) => HttpRequest(options, { signal: abortController.signal }),
     },
     {
         type: "function", name: "ListDirectory",
@@ -1076,7 +1105,14 @@ const tools = [
             properties: { command: { type: "string" }, parameters: { type: "array", items: { type: "string" } } },
             required: ["command"],
         },
-        exec_handler: ({ command, parameters }) => ExecuteCommand(command, parameters, toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined),
+        exec_handler: ({ command, parameters }) => ExecuteCommand(command, parameters, toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined, {
+            signal: abortController.signal,
+            policy: {
+                mode: shellModeFromEnvironment(),
+                writableRoots: [...(toolSafetyConfig.startDirConfigured || toolSafetyConfig.allowAgentSourceModifications ? [toolSafetyConfig.startDir] : []), ...(toolSafetyConfig.safeDirs ?? [])],
+                readableRoots: [process.cwd(), ...(toolSafetyConfig.allowAgentSourceModifications ? [] : [toolSafetyConfig.agentSourceDir])],
+            },
+        }),
     },
     {
         type: "function", name: "Git",
@@ -1894,9 +1930,7 @@ async function prepareToolCall(output, configData, goalKey) {
         ...(toolSafetyConfig.safeDirs ?? []),
     ]));
 
-    let classification;
-    try {
-        classification = await classifyToolCall(output.name, toolArguments, {
+    const safetyOptions = {
             runtime: client,
             // Classifier model resolved once at startup from --classifier-model
             // (or the classifier's dedicated deepseek-v4-flash default). The
@@ -1921,18 +1955,17 @@ async function prepareToolCall(output, configData, goalKey) {
             isDocker: runtimeConfig.isDocker,
             promptDirectory: mainCwd,
             logger: createToolSafetyLogger(toolChildIndent),
-        });
+        };
+    let classification;
+    try {
+        classification = await classifyToolCall(output.name, toolArguments, safetyOptions);
     } catch (error) {
         throwIfAborted(abortController.signal, "execution");
         if (error instanceof RunAbortError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
-        const risk = toolRiskLevel(output.name);
-        if (risk !== "readonly") {
-            const message = `Safety classifier failed for ${output.name} (${risk} tool); refusing to execute: ${reason}`;
-            renderToolCallFailed(output, { error: message });
-            return { output, toolArguments, toolResponse: { error: message }, errorMessage: message, execution: null };
-        }
-        status.warning(`Safety classifier failed for read-only tool ${output.name}; proceeding with an explicit warning: ${reason}`, toolChildIndent);
+        const message = `Safety classifier failed for ${output.name}; refusing to execute: ${reason}`;
+        renderToolCallFailed(output, { error: message });
+        return { output, toolArguments, toolResponse: { error: message }, errorMessage: message, execution: null };
     }
 
     if (classification && !classification.safe) {
@@ -1965,7 +1998,7 @@ async function prepareToolCall(output, configData, goalKey) {
     // injected start-directory switch from altering agent-bus behavior.
     const isAgentBusTool = output.name === "AgentBus";
     const configuredStartDir = !isAgentBusTool && toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined;
-    return { output, toolArguments, toolResponse: null, errorMessage: null, execution: { tool, configuredStartDir } };
+    return { output, toolArguments, toolResponse: null, errorMessage: null, execution: { tool, configuredStartDir, safetyOptions } };
 }
 
 /**
@@ -2000,7 +2033,9 @@ async function executePreparedToolCall(prepared) {
     });
     timer.start();
     try {
-        const toolResponse = await tool.exec_handler(prepared.toolArguments);
+        throwIfAborted(abortController.signal, "execution");
+        const checkedArguments = enforceExecutionPolicy(prepared.output.name, prepared.toolArguments, prepared.execution.safetyOptions);
+        const toolResponse = await tool.exec_handler(checkedArguments);
         timer.stop();
         return { toolResponse, errorMessage: null };
     } catch (error) {
@@ -2248,7 +2283,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             request.previous_response_id = previousResponseId;
             request.input = toolOutputs;
         } else {
-            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable }) + startDirWarning;
+            request.input = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, stepNumber: index + 1, stepCount: steps.length, step, executionFeedbackFormat, executionContext, toolsAvailable }) + startDirWarning;
         }
         const response = await client.create(request);
         new CompatibleResponseWrapper(response).print(toolChildIndent);
@@ -2269,7 +2304,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
             reportExecutionFeedback(feedbackEntry, status, hierarchyIndent);
             saveData(configData);
             if (!feedbackEntry.valid) {
-                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, index, steps, step, executionFeedbackFormat, executionContext, toolsAvailable }) + startDirWarning;
+                const stepPrompt = renderPrompt(stepExecutionPromptTemplate, { claudeInstructions, commitInstruction, plan, stepNumber: index + 1, stepCount: steps.length, step, executionFeedbackFormat, executionContext, toolsAvailable }) + startDirWarning;
                 configData.retryPrompt =
                     `${stepPrompt}\n\nThe previous response was not valid JSON. Here's the error: ` +
                     `${feedbackEntry.validationError}. Please return valid JSON following this exact structure.`;
@@ -2640,8 +2675,8 @@ async function main(options: { review?: boolean; loop?: boolean; logPrompts?: bo
     // authoritative value (the CLI also validated it once at startup).
     runtimeConfig.maxToolCallParallelism = resolveMaxToolCallParallelism(options.maxToolCallParallelism);
     client = new MultiTurnLlmRuntime(
-        await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
-        modelConfiguration.model,
+        await createRuntimeLlmAdapter({ configuration: plannerProviderConfiguration }),
+        plannerRuntimeModel,
         abortController.signal,
         { memory: agentMemory ?? undefined, sessionId: agentSessionId, logPrompts: options.logPrompts === true },
     );
