@@ -18,14 +18,48 @@ export interface RuntimeLlmOptions {
 }
 
 /**
+ * Error raised when the optional runtime environment file exists but cannot be
+ * loaded: either the Node.js runtime lacks `process.loadEnvFile`, or the file's
+ * dotenv syntax is malformed/unreadable. Both fail closed so a broken or
+ * half-read environment cannot silently produce a differently-configured run.
+ */
+export class RuntimeEnvironmentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeEnvironmentError";
+  }
+}
+
+/**
  * Load an optional local runtime environment file without replacing values
  * already supplied by the process environment or deployment secret manager.
  * Node's loader parses standard dotenv syntax and does not expose values here.
+ *
+ * Behavior is deliberate:
+ * - `envFile === false` skips file loading entirely (caller-supplied environment).
+ * - A missing file is treated as absent: only `process.env` is used.
+ * - A present file on an unsupported runtime, or a malformed/unreadable file,
+ *   throws `RuntimeEnvironmentError` with an actionable diagnostic.
  */
 export function loadRuntimeEnvironment(envFile: string | false = ".env"): AdapterEnvironment {
   if (envFile !== false) {
     const filename = resolve(envFile);
-    if (existsSync(filename)) process.loadEnvFile(filename);
+    if (existsSync(filename)) {
+      if (typeof process.loadEnvFile !== "function") {
+        throw new RuntimeEnvironmentError(
+          `Cannot load environment file "${filename}": process.loadEnvFile is unavailable on Node.js ${process.version}. ` +
+            'This project requires Node.js >= 22.9.0 (see README.md "Requirements").',
+        );
+      }
+      try {
+        process.loadEnvFile(filename);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new RuntimeEnvironmentError(
+          `Failed to parse environment file "${filename}": ${detail}. Fix or remove the file; a missing environment file is treated as absent and only the process environment is used.`,
+        );
+      }
+    }
   }
   return Object.freeze({ ...process.env });
 }

@@ -4,6 +4,25 @@ For repository-wide improvements, see the [self-repair backlog](docs/SELF_REPAIR
 
 For tool permission changes, HTTP destination configuration, and shell sandbox setup, see [security boundaries and migration](docs/SECURITY_BOUNDARIES.md).
 
+## Requirements
+
+- **Node.js >= 22.9.0** (declared in `package.json` under `engines.node`).
+  The runtime uses `node --env-file-if-exists` and `process.loadEnvFile`, both
+  of which require Node 22.9.0+.
+- Install dependencies reproducibly with `npm ci`; the lockfile
+  (`package-lock.json`) is tracked.
+- `npm start` and a direct `node dist/main.js` invocation both run an early
+  version check and exit with an actionable message before any LLM provider is
+  initialized when the runtime is unsupported. A `.nvmrc` pins the tested Node
+  line: with nvm run `nvm install && nvm use`.
+
+### Environment file behavior
+
+A local `.env` file is optional. When it is absent, only the process
+environment is used. When it exists but is malformed or unreadable, the runtime
+fails closed with an actionable diagnostic rather than starting with a
+partially loaded configuration.
+
 This document describes the **memory module** introduced into the elastic-agent
 runtime: its transport-agnostic interface, the default persistent (disk-backed)
 implementation, the in-memory and graph backends, concatenation mode, how

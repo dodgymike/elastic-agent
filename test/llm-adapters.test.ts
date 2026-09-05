@@ -81,6 +81,36 @@ async function testRuntimeComposition(): Promise<void> {
   }
 }
 
+async function testRuntimeEnvironmentBehavior(): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "elastic-agent-env-behavior-"));
+  const filename = join(directory, ".env");
+  const originalLoadEnvFile = process.loadEnvFile;
+  try {
+    // Missing file: deliberate no-op returning only the process environment.
+    const missing = loadRuntimeEnvironment(join(directory, "missing.env"));
+    assert.equal(missing.ELASTIC_AGENT_ENV_BEHAVIOR_PROBE, undefined);
+
+    // File content is irrelevant for the stubbed paths below; the loader itself
+    // is stubbed so these assertions exercise the wrapper's fail-closed branches
+    // deterministically on every supported runtime.
+    writeFileSync(filename, "placeholder\n", { mode: 0o600 });
+
+    // Unsupported runtime (no process.loadEnvFile): actionable error, fail closed.
+    (process as { loadEnvFile?: unknown }).loadEnvFile = undefined;
+    assert.throws(() => loadRuntimeEnvironment(filename), /process\.loadEnvFile is unavailable/);
+
+    // Malformed file (loader throws): wrapped, actionable error, fail closed.
+    (process as { loadEnvFile?: unknown }).loadEnvFile = () => {
+      throw new SyntaxError("unterminated quote");
+    };
+    assert.throws(() => loadRuntimeEnvironment(filename), /Failed to parse environment file/);
+  } finally {
+    if (originalLoadEnvFile === undefined) delete (process as { loadEnvFile?: unknown }).loadEnvFile;
+    else process.loadEnvFile = originalLoadEnvFile;
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 async function testOpenAi(): Promise<void> {
   let payload: Record<string, unknown> | undefined;
   let signal: AbortSignal | undefined;
@@ -390,6 +420,7 @@ async function testDeepSeekJsonRepair(): Promise<void> {
 (async () => {
   await testRegistry();
   await testRuntimeComposition();
+  await testRuntimeEnvironmentBehavior();
   await testOpenAi();
   await testBedrock();
   await testDeepSeek();

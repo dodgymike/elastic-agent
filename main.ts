@@ -149,6 +149,17 @@ import { enforceExecutionPolicy, classifyToolCall, createToolSafetyLogger, resol
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
 import { DenialTracker, DENIAL_REPLAN_THRESHOLD } from "./denial-tracker.js";
+import { assertSupportedNodeVersion } from "./node-version-check.js";
+
+// Fail fast on an unsupported Node.js runtime before any CLI parsing, model
+// resolution, or provider initialization (see BUILD-01). The minimum is read
+// from package.json "engines.node", the single source of truth.
+try {
+    assertSupportedNodeVersion();
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
 
 const terminalColor = terminalColorEnabled(process.stdout);
 if (!terminalColor) chalk.level = 0;
