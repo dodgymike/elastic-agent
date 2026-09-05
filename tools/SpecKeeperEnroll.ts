@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   canonicalizeSpecKeeperStartDirectory,
   ensureSpecKeeperWorkspaceDir,
@@ -13,8 +13,11 @@ import {
  * Redeem a one-time Spec Keeper agent-enrollment token and persist the
  * returned credential recipe in the new workspace credential layout:
  *
- *   .spec-keeper/<project-slug>.json   (owner-only; never committed)
- *   .spec-keeper/config                (non-secret workspace mapping)
+ *   .spec-keeper/<project-slug>.json   (owner-only; never committed; written
+ *                                       under the workspace start directory)
+ *   .spec-keeper/config                (non-secret shared workspace mapping;
+ *                                       written under the main.ts directory
+ *                                       unless configDirectory is supplied)
  *
  * The credential file holds the endpoint details and the one-time credential
  * set returned by the enrollment endpoint. The single-use enrollment token is
@@ -34,6 +37,14 @@ export interface SpecKeeperEnrollOptions {
    * directory.
    */
   startDirectory?: string;
+  /**
+   * Explicit base directory for the shared `.spec-keeper/config` registry.
+   * Defaults to the directory containing the agent's `main.ts` (see
+   * `specKeeperMainDirectory()`), so the registry is updated in the same
+   * location the SpecKeeper lookup reads from, independent of the workspace
+   * start directory or process working directory.
+   */
+  configDirectory?: string;
 }
 
 export interface SpecKeeperEnrollment {
@@ -230,6 +241,12 @@ export default async function specKeeperEnroll(
   ) {
     throw new TypeError("startDirectory must be a string path.");
   }
+  if (
+    options.configDirectory !== undefined &&
+    typeof options.configDirectory !== "string"
+  ) {
+    throw new TypeError("configDirectory must be a string path.");
+  }
   if (options.projectSlug !== undefined && /[\r\n\0]/.test(options.projectSlug)) {
     throw new TypeError("projectSlug must not contain control characters.");
   }
@@ -238,6 +255,12 @@ export default async function specKeeperEnroll(
     /[\r\n\0]/.test(options.startDirectory)
   ) {
     throw new TypeError("startDirectory must not contain control characters.");
+  }
+  if (
+    options.configDirectory !== undefined &&
+    /[\r\n\0]/.test(options.configDirectory)
+  ) {
+    throw new TypeError("configDirectory must not contain control characters.");
   }
 
   const response = await fetch(REDEEM_ENDPOINT, {
@@ -271,7 +294,13 @@ export default async function specKeeperEnroll(
     buildCredentialRecord(enrollment, apiBase, projectSlug),
   );
 
-  const configPath = specKeeperWorkspaceConfigPath(canonicalStart);
+  // The `.spec-keeper/config` registry is shared and lives under the main.ts
+  // directory by default (or an explicit configDirectory override), so the
+  // workspace mapping is updated in the same file the SpecKeeper lookup reads.
+  const configDirectory = options.configDirectory?.trim()
+    ? resolve(options.configDirectory.trim())
+    : undefined;
+  const configPath = specKeeperWorkspaceConfigPath(configDirectory);
   const entry: SpecKeeperWorkspaceConfig = {
     projectSlug,
     credentialFile: credentialFileRelative,

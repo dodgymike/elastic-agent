@@ -342,6 +342,13 @@ in the subsequent steps).
   file itself must carry owner-only permissions and is never parsed here.
 - `apiBase` (optional): API origin override for the workspace.
 
+Write paths match this lookup: `SpecKeeperEnroll` and
+`migrateSpecKeeperWorkspace` write the credential file under the workspace
+start directory and upsert `.spec-keeper/config` under the main.ts directory
+by default (or an explicit `configDirectory`), keyed by the canonical start
+directory. A failed migration removes the half-written registry entry before
+restoring the legacy config.
+
 Accepted field aliases: `projectSlug`/`project_slug`/`project`/`Project`;
 `credentialFile`/`credential_file`/`credentialStore`/`credential_store`/
 `credential store`; `apiBase`/`api_base`/`API base`/`API Base`.

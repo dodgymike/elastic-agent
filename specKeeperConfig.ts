@@ -899,14 +899,20 @@ export function writeSpecKeeperCredentialFile(
 
 /**
  * Upsert one workspace entry into `.spec-keeper/config`. Existing entries are
- * preserved; a missing file is created, while a malformed or non-object file
- * is refused rather than overwritten.
+ * preserved; a missing file (or its parent `.spec-keeper` directory) is
+ * created, while a malformed or non-object file is refused rather than
+ * overwritten.
  */
 export function upsertSpecKeeperWorkspaceConfig(
   configPath: string,
   canonicalStart: string,
   entry: SpecKeeperWorkspaceConfig,
 ): void {
+  // The shared registry may live under the main.ts directory (or an explicit
+  // configDirectory override) whose `.spec-keeper` directory does not exist
+  // yet; create it (owner-only) before reading or writing the config file.
+  ensureSpecKeeperWorkspaceDir(dirname(configPath));
+
   let registry: SpecKeeperWorkspaceRegistry = {};
   let existing = "";
   try {
@@ -935,6 +941,48 @@ export function upsertSpecKeeperWorkspaceConfig(
   }
 
   registry[canonicalStart] = entry;
+  writeFileSync(configPath, `${JSON.stringify(registry, null, 2)}\n`, {
+    mode: SPEC_KEEPER_WORKSPACE_CONFIG_MODE,
+  });
+}
+
+/**
+ * Remove one workspace entry from `.spec-keeper/config`. A missing file or an
+ * already-absent entry is a no-op, while a malformed or non-object file is
+ * refused rather than modified. This is used by migration rollback so a failed
+ * migration never leaves a half-written registry entry behind.
+ */
+export function removeSpecKeeperWorkspaceConfigEntry(
+  configPath: string,
+  canonicalStart: string,
+): void {
+  let existing = "";
+  try {
+    existing = readFileSync(configPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(`Spec Keeper could not read '${configPath}'.`, { cause: error });
+  }
+
+  if (!existing.trim()) return;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(existing);
+  } catch {
+    throw new Error(
+      `Spec Keeper refuses to modify malformed '${configPath}'. Fix or remove it before continuing.`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `Spec Keeper refuses to modify invalid '${configPath}'; the top-level value must be a JSON object.`,
+    );
+  }
+
+  const registry = parsed as SpecKeeperWorkspaceRegistry;
+  if (!(canonicalStart in registry)) return;
+  delete registry[canonicalStart];
   writeFileSync(configPath, `${JSON.stringify(registry, null, 2)}\n`, {
     mode: SPEC_KEEPER_WORKSPACE_CONFIG_MODE,
   });

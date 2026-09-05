@@ -13,6 +13,7 @@ import {
   canonicalizeSpecKeeperStartDirectory,
   loadSpecKeeperDefaultsFile,
   redactUrlCredentialsForLogging,
+  removeSpecKeeperWorkspaceConfigEntry,
   specKeeperWorkspaceConfigPath,
   SPEC_KEEPER_WORKSPACE_DIR,
   upsertSpecKeeperWorkspaceConfig,
@@ -24,10 +25,14 @@ import {
  * Migrate the legacy single-file Spec Keeper layout into the workspace layout:
  *
  *   legacy `.spec-keeper` (file)      -> `.spec-keeper/config` (non-secret
- *                                        workspace mapping) and, when a legacy
- *                                        credential store exists, a new
+ *                                        shared workspace mapping, written
+ *                                        under the main.ts directory unless a
+ *                                        configDirectory override is supplied)
+ *                                        and, when a legacy credential store
+ *                                        exists, a new
  *                                        `.spec-keeper/<project-slug>.json`
- *                                        credential file with owner-only mode.
+ *                                        credential file under the workspace
+ *                                        start directory with owner-only mode.
  *   legacy `.spec.local.json` (etc.)  -> copied to
  *                                        `.spec-keeper/<project-slug>.json`
  *                                        with mode `0600`; the legacy store is
@@ -36,8 +41,9 @@ import {
  *
  * The legacy `.spec-keeper` file is renamed aside while the new directory is
  * written and is restored if any write fails, so a failed migration never
- * deletes the legacy config. The migration reads only the metadata it needs
- * and never prints credential values.
+ * deletes the legacy config. A half-written shared registry entry is removed
+ * on rollback. The migration reads only the metadata it needs and never prints
+ * credential values.
  */
 
 const LEGACY_CONFIG_FILE = ".spec-keeper";
@@ -135,10 +141,23 @@ export function describeSpecKeeperMigrationReport(
  */
 export function migrateSpecKeeperWorkspace(
   startDirectory?: string,
+  options?: { configDirectory?: string },
 ): SpecKeeperMigrationReport {
   const canonicalStart = canonicalizeSpecKeeperStartDirectory(
     startDirectory ?? process.cwd(),
   );
+  if (
+    options?.configDirectory !== undefined &&
+    typeof options.configDirectory !== "string"
+  ) {
+    throw new TypeError("configDirectory must be a string path.");
+  }
+  // The `.spec-keeper/config` registry is shared and lives under the main.ts
+  // directory by default (or an explicit configDirectory override), while the
+  // migrated credential file stays under the workspace start directory.
+  const configDirectory = options?.configDirectory?.trim()
+    ? resolve(options.configDirectory.trim())
+    : undefined;
   const legacyConfigPath = join(canonicalStart, LEGACY_CONFIG_FILE);
   const warnings: string[] = [];
 
@@ -285,7 +304,8 @@ export function migrateSpecKeeperWorkspace(
 
   const credentialFileRelative = join(SPEC_KEEPER_WORKSPACE_DIR, `${projectSlug}.json`);
   const credentialFile = join(canonicalStart, credentialFileRelative);
-  const configPath = specKeeperWorkspaceConfigPath(canonicalStart);
+  const configPath = specKeeperWorkspaceConfigPath(configDirectory);
+  let configUpserted = false;
   try {
     mkdirSync(specDir, { recursive: true, mode: 0o700 });
 
@@ -301,6 +321,7 @@ export function migrateSpecKeeperWorkspace(
     if (config.defaultEpic) entry.defaultEpic = config.defaultEpic;
     if (config.defaultTask) entry.defaultTask = config.defaultTask;
     upsertSpecKeeperWorkspaceConfig(configPath, canonicalStart, entry);
+    configUpserted = true;
 
     let legacyCredentialModeAfter = legacyCredentialModeBefore;
     if (legacyCredentialExists && process.platform !== "win32") {
@@ -324,7 +345,16 @@ export function migrateSpecKeeperWorkspace(
       warnings,
     };
   } catch (error) {
-    // Restore the legacy config so a failed migration never deletes it.
+    // Roll back the shared registry entry and the workspace credential
+    // directory, then restore the legacy config so a failed migration never
+    // deletes the legacy config or leaves a half-written mapping behind.
+    if (configUpserted) {
+      try {
+        removeSpecKeeperWorkspaceConfigEntry(configPath, canonicalStart);
+      } catch {
+        // Preserve the original migration error.
+      }
+    }
     try {
       rmSync(specDir, { recursive: true, force: true });
     } catch {

@@ -6,9 +6,12 @@ Redeem a one-time Spec Keeper agent-enrollment token and persist the returned
 credential recipe into the workspace credential layout:
 
 - `.spec-keeper/<project-slug>.json` — the credential file (owner-only, mode
-  `0600`; never committed).
+  `0600`; never committed), written under the workspace start directory.
 - `.spec-keeper/config` — the non-secret workspace mapping keyed by the
-  canonical start directory.
+  canonical start directory. This registry is shared and lives under the
+  directory containing the agent's `main.ts` (or an explicit
+  `configDirectory`), so the SpecKeeper lookup reads the same file this
+  enrolment writes.
 
 The single-use enrollment token is consumed by the redeem call and is never
 written to disk or logged.
@@ -54,11 +57,13 @@ The enrollment recipe plus the persisted workspace metadata:
 2. The canonical start directory is derived from `startDirectory` (or
    `process.cwd()`) with absolute-path resolution plus symlink resolution.
 3. The endpoint details and credential set are written to
-   `.spec-keeper/<project-slug>.json` with owner-only permissions where
-   supported.
-4. `.spec-keeper/config` is created or updated with an entry keyed by the
-   canonical start directory: `{ projectSlug, credentialFile, apiBase? }`.
-   Existing entries are preserved.
+   `.spec-keeper/<project-slug>.json` under the workspace start directory with
+   owner-only permissions where supported.
+4. The shared `.spec-keeper/config` registry (under the main.ts directory by
+   default, or an explicit `configDirectory`) is created or updated with an
+   entry keyed by the canonical start directory:
+   `{ projectSlug, credentialFile, apiBase? }`. Existing entries are
+   preserved.
 
 The credential file contains only the returned recipe (for example `username`,
 `password`, `api_base`, `project_slug`, `region`, `client_id`, and the full
@@ -148,6 +153,7 @@ never be written to the repository, notes, or handoffs.
 
    ```js
    const result = await SpecKeeperEnroll({ token: "<enrollment token>" });
-   // Writes .spec-keeper/<project_slug>.json under process.cwd() and upserts
-   // .spec-keeper/config with the canonical process.cwd() key.
+   // Writes .spec-keeper/<project_slug>.json under the process working
+   // directory and upserts the shared .spec-keeper/config registry (under the
+   // main.ts directory) with the canonical process.cwd() key.
    ```

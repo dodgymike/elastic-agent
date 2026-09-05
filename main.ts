@@ -1140,11 +1140,11 @@ const tools = [
             properties: {
                 token: { type: "string", description: "Token from the #token= fragment of a Spec Keeper enrollment URL." },
                 projectSlug: { type: "string", description: "Project slug for the .spec-keeper/config entry and credential filename; defaults to the enrollment recipe's project_slug." },
-                startDirectory: { type: "string", description: "Workspace start directory to key and write under; defaults to the process working directory." },
+                startDirectory: { type: "string", description: "Workspace start directory used as the .spec-keeper/config lookup key and the owner of the written credential file; defaults to --start-dir when configured, otherwise the process working directory." },
             },
             required: ["token"],
         },
-        exec_handler: (options) => SpecKeeperEnroll(options),
+        exec_handler: (options) => SpecKeeperEnroll({ ...options, startDirectory: options.startDirectory ?? (toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined) }),
     },
 ];
 
