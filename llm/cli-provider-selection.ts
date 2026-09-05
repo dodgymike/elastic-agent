@@ -1,8 +1,14 @@
+import type { ProviderId } from "./adapter-contract.js";
 import {
   normalizeProviderId,
   type AdapterConfigurationInput,
   type AdapterEnvironment,
 } from "./adapter-registry.js";
+import {
+  providerSupportsModel,
+  supportedModelsForProvider,
+  supportedProviders,
+} from "./model-defaults.js";
 
 /**
  * Provider selection resolved at the CLI boundary before application composition.
@@ -97,4 +103,62 @@ export function resolvePlannerModelOverride(explicitModel?: string): string | un
     throw plannerModelError("--planner-model requires a non-empty model ID.");
   }
   return trimmed;
+}
+
+/** The provider/model pair selected for the planner runtime. */
+export interface PlannerModelProviderSelection {
+  readonly provider: ProviderId;
+  readonly model: string;
+}
+
+/**
+ * Resolve which provider should serve an explicit `--planner-model` value.
+ *
+ * The currently selected (default) provider wins when its catalog includes the
+ * requested model ID. Otherwise every built-in provider is searched in a
+ * stable, sorted order and the first provider whose catalog includes the model
+ * is selected, so duplicate model IDs resolve deterministically. When no
+ * provider supports the model, the returned error lists every supported
+ * planner model instead of silently falling back to the default model.
+ *
+ * Returns `undefined` when no explicit planner model was supplied so callers
+ * can preserve the selected provider's default planner behavior.
+ */
+export function resolvePlannerModelProvider(
+  plannerModel: string | undefined,
+  defaultProvider: ProviderId,
+): PlannerModelProviderSelection | undefined {
+  if (plannerModel === undefined) return undefined;
+
+  const requestedModel = plannerModel.trim();
+  if (requestedModel === "") {
+    throw plannerModelError("--planner-model requires a non-empty model ID.");
+  }
+
+  const currentProvider = normalizeProviderId(defaultProvider);
+  const providers = supportedProviders();
+
+  // Prefer the currently selected provider so an override that is already in
+  // the default provider's catalog never changes providers unnecessarily.
+  if (providers.includes(currentProvider) && providerSupportsModel(currentProvider, requestedModel)) {
+    return Object.freeze({ provider: currentProvider, model: requestedModel });
+  }
+
+  // Deterministic fallback: the sorted provider order guarantees the same
+  // provider wins every time when several providers advertise one model ID.
+  for (const provider of providers) {
+    if (providerSupportsModel(provider, requestedModel)) {
+      return Object.freeze({ provider, model: requestedModel });
+    }
+  }
+
+  throw plannerModelError(
+    `No provider supports planner model '${requestedModel}'. Supported planner models: ${supportedPlannerModelsSummary()}.`,
+  );
+}
+
+function supportedPlannerModelsSummary(): string {
+  return supportedProviders()
+    .map((provider) => `${provider}: ${supportedModelsForProvider(provider).join(", ")}`)
+    .join("; ");
 }
