@@ -1,6 +1,6 @@
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { resolveHighestModelConfiguration } from "./llm/model-defaults.js";
-import { selectCliProvider } from "./llm/cli-provider-selection.js";
+import { resolvePlannerModelOverride, selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
 import { resolveMaxToolCallParallelism } from "./tool-call-parallelism.js";
 import { buildToolCallDag, runScheduledToolCalls } from "./tool-call-scheduler.js";
@@ -154,6 +154,7 @@ program
     .option("--loop", "keep running in loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
     .option("--respond-all", "loop-mode no-filter: treat every Agent Bus message as relevant so the agent responds to all of them instead of filtering irrelevant ones; only meaningful together with --loop", false)
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
+    .option("--planner-model <model-id>", "Optional planner model override; when omitted, uses the selected provider's default planner model")
     .option("--review", "Run the review stage after execution (default: false)", false)
     .option("--disable-classifier", "Bypass the tool safety classifier", false)
     .option("--classifier-model <model>", "Model for tool-safety LLM classification (default: deepseek-v4-flash; overrides the classifier default only, not the main LLM model)")
@@ -189,6 +190,8 @@ Output verbosity:
 Provider selection:
   --provider <provider-id> takes precedence over LLM_PROVIDER.
   Set one of them to openai, bedrock-claude, or deepseek-v4.
+  --planner-model <model-id> optionally overrides the planner model; when
+                   omitted the selected provider's default planner model is used.
 
 Selected-provider configuration:
   openai          OPENAI_API_KEY [OPENAI_MODEL]
@@ -225,6 +228,17 @@ const {
 // main runtime model via resolveRuntimeLlmModel below) is never read here, so
 // it cannot leak into classifier model selection.
 let classifierModel = resolveClassifierModel(options.classifierModel);
+// Optional --planner-model override is resolved at startup so a blank value
+// fails with a clear CLI error before any runtime work starts. The resolved
+// override is wired into planner model/provider selection in a later step;
+// when omitted, the selected provider's default planner model is used.
+let plannerModel: string | undefined;
+try {
+    plannerModel = resolvePlannerModelOverride(options.plannerModel);
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
 // Tool-call parallelism is resolved and validated before any runtime work
 // starts so an invalid --max-tool-call-parallelism produces a clear CLI error
 // instead of a mid-run failure. The resolved value is carried on runtimeConfig

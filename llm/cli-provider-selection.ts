@@ -77,3 +77,24 @@ export function selectCliProvider(
     remainingArgs: explicit.remainingArgs,
   });
 }
+
+function plannerModelError(message: string): Error {
+  return new Error(`LLM planner model selection error: ${message}`);
+}
+
+/**
+ * Resolve the optional `--planner-model` override at the CLI boundary. When
+ * the flag is omitted the selected provider's default planner model is used
+ * (undefined is returned); when supplied the value is trimmed and must be
+ * non-empty. Commander parses both `--planner-model <model-id>` and
+ * `--planner-model=<model-id>` before this runs, so this resolver only
+ * validates the captured value and never re-reads process.argv.
+ */
+export function resolvePlannerModelOverride(explicitModel?: string): string | undefined {
+  if (explicitModel === undefined) return undefined;
+  const trimmed = explicitModel.trim();
+  if (trimmed === "") {
+    throw plannerModelError("--planner-model requires a non-empty model ID.");
+  }
+  return trimmed;
+}
