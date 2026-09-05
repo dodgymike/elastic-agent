@@ -1,5 +1,7 @@
 ${claudeInstructions}
 
+${executionFeedbackFormat}
+
 ${toolsAvailable}
 
 Commit instruction for this step: ${commitInstruction}
@@ -9,7 +11,6 @@ ${plan}
 
 You are executing step ${index + 1} of ${steps.length}: ${step}
 Carry out only this step. Use tools when needed, report the result, and do not begin another plan step.
-${executionFeedbackFormat}
 
 Execution context (review feedback and learnings from earlier attempts; "(none)" when this is the first execution):
 ${executionContext}

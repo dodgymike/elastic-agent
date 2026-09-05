@@ -2730,7 +2730,7 @@ async function main(options: { review?: boolean; loop?: boolean; logPrompts?: bo
 
     appendHistory(configData.commandLinePrompts, originalPrompt);
     const prompt = isTaskMode && taskWorkOrder
-        ? buildTaskWorkOrderPrompt(taskWorkOrder)
+        ? buildTaskWorkOrderPrompt(taskWorkOrder, { claudeInstructions })
         : buildPrompt({
             commandPrompts: configData.commandLinePrompts,
             toolCallTldrs: configData.toolCallTldrs,
@@ -2758,7 +2758,9 @@ async function main(options: { review?: boolean; loop?: boolean; logPrompts?: bo
         // lifecycle. The existing --review flag still controls commit behavior
         // via commitInstruction and the Git commit guard handled by
         // runSingleStep.
-        const directPrompt = `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}${startDirPathWarning(toolSafetyConfig, runtimeConfig.isDocker)}`;
+        const directPrompt = isTaskMode
+            ? `${prompt}\n\nCommit instruction for this step: ${commitInstruction}\n\n${toolsAvailable}${startDirPathWarning(toolSafetyConfig, runtimeConfig.isDocker)}`
+            : `${prompt}\n\n${toolsAvailable}\n\nCommit instruction for this step: ${commitInstruction}${startDirPathWarning(toolSafetyConfig, runtimeConfig.isDocker)}`;
         if (taskLifecycle) {
             await specKeeperTaskNote(taskLifecycle, "note (execution started)", "Task-mode direct execution started.");
         }

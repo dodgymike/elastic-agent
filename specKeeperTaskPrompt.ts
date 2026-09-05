@@ -11,6 +11,8 @@ import type { TaskWorkOrder } from "./specKeeperTaskFetch.js";
  */
 
 export interface TaskWorkOrderPromptOptions {
+  /** Optional stable system instructions emitted before the work order. */
+  claudeInstructions?: string;
   /** Optional commit instruction appended to the work order. */
   commitInstruction?: string;
   /** Optional tools-available block appended to the work order. */
@@ -61,7 +63,11 @@ export function buildTaskWorkOrderPrompt(
 ): string {
   const taskId = workOrder.id || "(unknown task id)";
   const encodedTaskId = encodeURIComponent(taskId);
-  const sections = [
+  const sections: string[] = [];
+  if (options.claudeInstructions?.trim()) {
+    sections.push(options.claudeInstructions.trim(), "");
+  }
+  sections.push(
     "SPEC KEEPER TASK MODE — WORK ORDER",
     "",
     `Task ID: ${taskId}`,
@@ -83,7 +89,7 @@ export function buildTaskWorkOrderPrompt(
     `Use the exact task ID ${taskId} in every SpecKeeper update. Keep updates frequent enough to preserve a durable handoff, and never write SpecKeeper credentials, enrollment recipes, or secret-store content to the repository, docs, or handoffs.`,
     "",
     "Plan when the work is complex, then execute the plan. For simple, unambiguous work, execute directly. Verify your work before reporting completion.",
-  ];
+  );
 
   if (options.commitInstruction?.trim()) {
     sections.push("", `Commit instruction for this step: ${options.commitInstruction.trim()}`);

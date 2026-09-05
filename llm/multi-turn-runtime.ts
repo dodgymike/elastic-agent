@@ -113,9 +113,9 @@ function outputOf(message: AssistantMessage): readonly CompatibleOutput[] {
  * Memory integration: the runtime accepts an optional {@link MemoryModule}
  * (plus a session id to scope context requests). Before generating an initial
  * (non-continuation) completion it calls `memory.getContext({ session_id })`
- * and, when the store returns summarized context, prepends a labeled block to
- * the user input so previously remembered work re-enters the prompt instead of
- * being rediscovered. The integration is fail-safe and fully optional: when no
+ * and, when the store returns summarized context, appends a labeled block as a
+ * trailing section after the user input so previously remembered work re-enters
+ * the prompt instead of being rediscovered. The integration is fail-safe and fully optional: when no
  * memory is injected, when no session id is available, or when getContext
  * rejects, the request proceeds unchanged and the failure is surfaced as a
  * non-fatal message rather than aborting the plan loop. Tool continuations keep
@@ -168,8 +168,9 @@ export class MultiTurnLlmRuntime {
       return { role: "tool", toolCallId: result.call_id, content, isError: Boolean(content && typeof content === "object" && !Array.isArray(content) && "error" in content) };
     }) : [];
     // On an initial (non-continuation) request, inject summarized memory context
-    // ahead of the user input when a MemoryModule is attached and a session id
-    // is available. Tool continuations reuse the stored messages unchanged.
+    // as a trailing section after the user input when a MemoryModule is attached
+    // and a session id is available. Tool continuations reuse the stored
+    // messages unchanged.
     let initialInput: string | undefined;
     if (prior) {
       initialInput = undefined;
@@ -178,7 +179,7 @@ export class MultiTurnLlmRuntime {
       if (this.memory) {
         const sessionId = request.session_id ?? this.sessionId;
         if (sessionId) {
-          initialInput = await this.prependMemoryContext(initialInput, sessionId);
+          initialInput = await this.appendMemoryContext(initialInput, sessionId);
         }
       }
     }
@@ -227,11 +228,12 @@ export class MultiTurnLlmRuntime {
   }
 
   /**
-   * Fetch summarized context for a session and prepend it to an initial prompt.
-   * Fail-safe: a rejected getContext leaves the prompt unchanged and reports
-   * the failure as a non-fatal diagnostic so the agent loop can continue.
+   * Fetch summarized context for a session and append it as a trailing section
+   * to an initial prompt. Fail-safe: a rejected getContext leaves the prompt
+   * unchanged and reports the failure as a non-fatal diagnostic so the agent
+   * loop can continue.
    */
-  private async prependMemoryContext(input: string, sessionId: string): Promise<string> {
+  private async appendMemoryContext(input: string, sessionId: string): Promise<string> {
     if (!this.memory) return input;
     let result: MemoryContextResult;
     try {
@@ -240,17 +242,21 @@ export class MultiTurnLlmRuntime {
       console.error(`[MEMORY] getContext failed (non-fatal): ${describeError(error)}`);
       return input;
     }
-    const prefix = memoryContextPrefix(result);
-    return prefix.length > 0 ? `${prefix}${input}` : input;
+    const suffix = memoryContextSuffix(result);
+    return suffix.length > 0 ? `${input}${suffix}` : input;
   }
 }
 
-/** Render a memory-context result into a labeled, prompt-ready prefix. */
-export function memoryContextPrefix(result: MemoryContextResult): string {
+/**
+ * Render a memory-context result into a labeled, prompt-ready trailing section.
+ * The leading blank line separates it from the user input it is appended to, so
+ * it can never shift the stable prefix of an initial request.
+ */
+export function memoryContextSuffix(result: MemoryContextResult): string {
   if (!result.hasMemory || !result.text) return "";
   const text = result.text.trim();
   if (text.length === 0) return "";
-  return `[SESSION MEMORY — additional context remembered from earlier in this session]\n${text}\n\n`;
+  return `\n\n[SESSION MEMORY — additional context remembered from earlier in this session]\n${text}`;
 }
 
 function describeError(error: unknown): string {
