@@ -71,6 +71,13 @@ Mode rules (see `cli-task-mode.ts`):
   run-mode object as `respondAll` and threaded into the classification context
   (`context.respondAll`).
 
+### Related: repeating prompt loop (`--loop`)
+
+`--loop` is a separate flag from `--agent-bus-loop`. It repeats the single
+prompt execution pass (`runPromptOnce`) indefinitely — run, await completion,
+pause for 60 seconds, then run again — and stops only when interrupted
+(Ctrl-C/SIGTERM). It does **not** watch the Agent Bus and does not enable the
+Agent Bus loop mode; see the CLI help and `loop-repeat.ts`.
 
 ---
 

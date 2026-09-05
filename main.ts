@@ -144,6 +144,7 @@ import { buildTaskWorkOrderPrompt, buildTaskWorkOrderBrief } from "./specKeeperT
 import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTaskProof } from "./specKeeperTaskLifecycle.ts";
 import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
+import { addLoopOptions } from "./cli-loop-options.js";
 import { enforceExecutionPolicy, classifyToolCall, createToolSafetyLogger, resolveClassifierModel, toolRiskLevel } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
@@ -157,10 +158,9 @@ program
     .name("elastic-agent")
     .description("Plan and execute a prompt with the selected LLM provider.")
     .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
-    .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
-    .option("--agent-bus-loop", "keep running in Agent Bus loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
-    .option("--respond-all", "loop-mode no-filter: treat every Agent Bus message as relevant so the agent responds to all of them instead of filtering irrelevant ones; only meaningful together with --agent-bus-loop", false)
-    .option("--loop", "repeat indefinitely: run the prompt, wait 60 seconds, then run it again until interrupted (Ctrl-C interrupts both the active run and the wait)", false)
+    .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>");
+addLoopOptions(program);
+program
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--planner-model <model-id>", "Optional planner model override; when omitted, uses the selected provider's default planner model")
     .option("--review", "Run the review stage after execution (default: false)", false)
