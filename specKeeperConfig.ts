@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 /**
@@ -430,5 +430,266 @@ export function describeSpecKeeperDefaults(
     `projectSlug=${defaults.projectSlug ?? "(none)"} (source: ${defaults.sources.projectSlug}), ` +
     `apiBase=${redactUrlCredentialsForLogging(defaults.apiBase)} (source: ${defaults.sources.apiBase}), ` +
     `credentialStore=${defaults.credentialStore} (source: ${defaults.sources.credentialStore})`
+  );
+}
+
+/**
+ * New workspace registry layout (`.spec-keeper/config`).
+ *
+ * The `.spec-keeper/config` file is a JSON object keyed by canonical absolute
+ * start directory. Each value carries only non-secret routing metadata for
+ * that workspace:
+ *
+ * - `projectSlug`: URL-safe project slug for project-scoped routes.
+ * - `credentialFile`: path to the workspace's credential file (owner-only
+ *   permissions), resolved relative to the workspace start directory when
+ *   loaded.
+ * - `apiBase` (optional): API origin override for this workspace.
+ *
+ * Lookup is fail-closed and keyed by the canonical start directory: the caller
+ * canonicalizes its start directory with
+ * {@link canonicalizeSpecKeeperStartDirectory}, then looks it up in the
+ * registry. When no mapping exists, the lookup throws an actionable error that
+ * lists the configured workspaces instead of searching for credential files
+ * implicitly.
+ */
+
+export const SPEC_KEEPER_WORKSPACE_DIR = ".spec-keeper";
+export const SPEC_KEEPER_WORKSPACE_CONFIG_FILE = "config";
+
+/** Non-secret routing metadata for one configured workspace. */
+export interface SpecKeeperWorkspaceConfig {
+  /** URL-safe project slug for project-scoped Spec Keeper routes. */
+  projectSlug: string;
+  /** Path to the workspace credential file, relative to the start directory unless absolute. */
+  credentialFile: string;
+  /** Optional API origin override for this workspace. */
+  apiBase?: string;
+}
+
+/** `.spec-keeper/config` keyed by canonical absolute start directory. */
+export type SpecKeeperWorkspaceRegistry = Record<string, SpecKeeperWorkspaceConfig>;
+
+export interface LoadedSpecKeeperWorkspaceRegistry {
+  registry: SpecKeeperWorkspaceRegistry;
+  source: "file" | "missing";
+  /** Absolute path of the `.spec-keeper/config` file that was read (or would be read). */
+  path: string;
+  warnings: string[];
+}
+
+export interface ResolvedSpecKeeperWorkspace {
+  /** Canonical absolute start-directory key that matched the registry. */
+  startDirectory: string;
+  config: SpecKeeperWorkspaceConfig;
+  /** Absolute path of the `.spec-keeper/config` file that supplied the mapping. */
+  configPath: string;
+  warnings: string[];
+}
+
+/** Absolute path of the `.spec-keeper/config` registry for a start directory. */
+export function specKeeperWorkspaceConfigPath(startDirectory: string): string {
+  return join(startDirectory, SPEC_KEEPER_WORKSPACE_DIR, SPEC_KEEPER_WORKSPACE_CONFIG_FILE);
+}
+
+/**
+ * Canonicalize a workspace start directory for registry lookups. The path is
+ * first resolved to an absolute path, then symlink-resolved with
+ * `fs.realpathSync` (matching the runtime's own canonicalization) so aliases
+ * such as `/home` -> `/mnt/sdb4` compare equal. When realpath cannot resolve
+ * the path (it does not exist yet), the resolved absolute path is returned so
+ * lookups stay deterministic.
+ */
+export function canonicalizeSpecKeeperStartDirectory(startDirectory: string): string {
+  const trimmed = (startDirectory ?? "").trim();
+  if (!trimmed) {
+    throw new Error("Spec Keeper requires a non-empty workspace start directory.");
+  }
+  const absolute = resolve(trimmed);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+/** Read one non-empty string field from a workspace entry with registry-specific warnings. */
+function readWorkspaceField(
+  record: Record<string, unknown>,
+  keys: string[],
+  fieldLabel: string,
+  workspaceKey: string,
+  warnings: string[],
+): string | undefined {
+  for (const key of keys) {
+    if (!(key in record)) continue;
+    const value = record[key];
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+      continue;
+    }
+    if (value !== undefined && value !== null) {
+      warnings.push(
+        `Spec Keeper .spec-keeper/config entry for '${workspaceKey}' has an invalid '${fieldLabel}' value; ignoring it.`,
+      );
+    }
+  }
+  return undefined;
+}
+
+interface NormalizedSpecKeeperWorkspaceEntry {
+  key: string;
+  config: SpecKeeperWorkspaceConfig;
+}
+
+/**
+ * Normalize one `.spec-keeper/config` entry. Invalid entries (non-absolute
+ * keys, non-object values, or missing required projectSlug/credentialFile) are
+ * skipped with a warning so a single malformed entry never breaks the whole
+ * registry.
+ */
+function normalizeSpecKeeperWorkspaceEntry(
+  key: string,
+  raw: unknown,
+  warnings: string[],
+): NormalizedSpecKeeperWorkspaceEntry | undefined {
+  if (!isAbsolute(key)) {
+    warnings.push(
+      `Spec Keeper .spec-keeper/config has an invalid workspace key '${key}'; keys must be absolute start-directory paths. Ignoring it.`,
+    );
+    return undefined;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    warnings.push(
+      `Spec Keeper .spec-keeper/config entry for '${key}' is invalid; expected a JSON object. Ignoring it.`,
+    );
+    return undefined;
+  }
+
+  const record = raw as Record<string, unknown>;
+  const projectSlug = readWorkspaceField(
+    record,
+    ["projectSlug", "project_slug", "project", "Project"],
+    "projectSlug",
+    key,
+    warnings,
+  );
+  const credentialFile = readWorkspaceField(
+    record,
+    ["credentialFile", "credential_file", "credentialStore", "credential_store", "credential store"],
+    "credentialFile",
+    key,
+    warnings,
+  );
+  if (!projectSlug || !credentialFile) {
+    warnings.push(
+      `Spec Keeper .spec-keeper/config entry for '${key}' is missing projectSlug or credentialFile; ignoring it.`,
+    );
+    return undefined;
+  }
+
+  const config: SpecKeeperWorkspaceConfig = { projectSlug, credentialFile };
+  const apiBase = readWorkspaceField(
+    record,
+    ["apiBase", "api_base", "API base", "API Base"],
+    "apiBase",
+    key,
+    warnings,
+  );
+  if (apiBase) config.apiBase = apiBase;
+
+  return { key: canonicalizeSpecKeeperStartDirectory(key), config };
+}
+
+/** Parse and normalize the `.spec-keeper/config` workspace registry. */
+export function loadSpecKeeperWorkspaceRegistry(options?: {
+  startDirectory?: string;
+}): LoadedSpecKeeperWorkspaceRegistry {
+  const startDirectory = canonicalizeSpecKeeperStartDirectory(
+    options?.startDirectory ?? process.cwd(),
+  );
+  const filename = specKeeperWorkspaceConfigPath(startDirectory);
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(filename, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { registry: {}, source: "missing", path: filename, warnings: [] };
+    }
+    const reason =
+      error instanceof SyntaxError ? "it is not valid JSON" : "it could not be read";
+    return {
+      registry: {},
+      source: "file",
+      path: filename,
+      warnings: [
+        `Spec Keeper .spec-keeper/config is invalid: ${reason}. No workspace mappings were loaded.`,
+      ],
+    };
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      registry: {},
+      source: "file",
+      path: filename,
+      warnings: [
+        "Spec Keeper .spec-keeper/config is invalid: the top-level value must be a JSON object. No workspace mappings were loaded.",
+      ],
+    };
+  }
+
+  const warnings: string[] = [];
+  const registry: SpecKeeperWorkspaceRegistry = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const entry = normalizeSpecKeeperWorkspaceEntry(key, value, warnings);
+    if (entry) registry[entry.key] = entry.config;
+  }
+  return { registry, source: "file", path: filename, warnings };
+}
+
+/**
+ * Resolve the Spec Keeper workspace mapping for a start directory.
+ *
+ * The start directory is canonicalized (absolute-path resolution plus
+ * symlink-resolution) before lookup into `.spec-keeper/config`. When the
+ * canonical start directory has no mapping, this throws an actionable error
+ * listing the configured workspaces. It never searches for credential files
+ * implicitly: callers must resolve a workspace mapping before loading any
+ * credential file.
+ */
+export function resolveSpecKeeperWorkspace(
+  startDirectory?: string,
+): ResolvedSpecKeeperWorkspace {
+  const canonicalStart = canonicalizeSpecKeeperStartDirectory(
+    startDirectory ?? process.cwd(),
+  );
+  const loaded = loadSpecKeeperWorkspaceRegistry({ startDirectory: canonicalStart });
+  const config = loaded.registry[canonicalStart];
+  if (config) {
+    return {
+      startDirectory: canonicalStart,
+      config,
+      configPath: loaded.path,
+      warnings: loaded.warnings,
+    };
+  }
+
+  const configured = Object.keys(loaded.registry).sort();
+  const details = [...loaded.warnings];
+  if (configured.length) {
+    details.push(
+      `Configured workspaces:\n${configured.map((workspace) => `  - ${workspace}`).join("\n")}`,
+    );
+  } else if (loaded.source === "missing") {
+    details.push(`No .spec-keeper/config was found at ${loaded.path}.`);
+  }
+
+  throw new Error(
+    `Spec Keeper has no workspace mapping for start directory '${canonicalStart}'.` +
+      (details.length ? `\n${details.join("\n")}` : "") +
+      `\nCreate or update ${loaded.path} with an entry keyed by this start directory (projectSlug and credentialFile), or run SpecKeeperEnroll/migration to create the mapping.`,
   );
 }

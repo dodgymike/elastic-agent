@@ -304,3 +304,66 @@ Add `test/spec-keeper-config.test.ts` and an npm script
   store; for `.spec-keeper` malformed errors, report only a type/shape reason,
   not raw values.
 - The design keeps `.spec.local.json` gitignored and adds no new secret paths.
+
+## 12. Workspace registry layout (`.spec-keeper/config`) — new plan step 2
+
+Later plan steps replace the single-file `.spec-keeper` layout above with a
+workspace-keyed registry. This section defines the new layout and lookup rules
+implemented in `specKeeperConfig.ts` (functions are already exported and tested
+by `npm run test:spec-keeper-workspace`; the loader is rewired to consume them
+in the subsequent steps).
+
+### File layout
+
+- `specKeeperWorkspaceConfigPath(startDirectory)` returns
+  `<startDirectory>/.spec-keeper/config`.
+- `.spec-keeper/config` is a JSON object keyed by **canonical absolute start
+  directory**. Each value is non-secret routing metadata:
+
+  ```json
+  {
+    "/mnt/sdb4/mike/mike/source/elastic-agent": {
+      "projectSlug": "elastic-agent",
+      "credentialFile": ".spec-keeper/elastic-agent.json",
+      "apiBase": "https://api.spec.elasticninja.com"
+    }
+  }
+  ```
+
+- `projectSlug` (required): URL-safe slug for project-scoped routes.
+- `credentialFile` (required): path to the workspace credential file. Relative
+  values are resolved against the workspace start directory when loaded; the
+  file itself must carry owner-only permissions and is never parsed here.
+- `apiBase` (optional): API origin override for the workspace.
+
+Accepted field aliases: `projectSlug`/`project_slug`/`project`/`Project`;
+`credentialFile`/`credential_file`/`credentialStore`/`credential_store`/
+`credential store`; `apiBase`/`api_base`/`API base`/`API Base`.
+
+### Canonicalization
+
+`canonicalizeSpecKeeperStartDirectory(startDirectory)` resolves the input to an
+absolute path, then symlink-resolves it with `fs.realpathSync` (the same
+realpath-style resolution the runtime uses for its start directory), falling
+back to the resolved absolute path when realpath cannot resolve it. This makes
+aliases such as `/home/mike/source/elastic-agent` and
+`/mnt/sdb4/mike/mike/source/elastic-agent` compare equal.
+
+### Lookup rules
+
+`loadSpecKeeperWorkspaceRegistry({ startDirectory })` parses and normalizes the
+registry. Invalid entries (non-absolute keys, non-object values, or missing
+`projectSlug`/`credentialFile`) are skipped with warnings; malformed JSON or a
+non-object root yields an empty registry plus a warning.
+
+`resolveSpecKeeperWorkspace(startDirectory)` canonicalizes the start directory,
+looks it up in the registry, and returns the matching mapping. If no mapping
+exists it **throws** an actionable error that:
+
+- names the canonical start directory,
+- lists the configured workspaces when any are present,
+- points at the `.spec-keeper/config` path to update, and
+- does **not** search for credential files implicitly.
+
+This fail-closed behavior is the contract later steps build on: callers must
+resolve a workspace mapping before loading any credential file.
