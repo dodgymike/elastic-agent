@@ -21,6 +21,11 @@ interface ProviderModelDefault {
   readonly model: string;
   readonly highestModel: string;
   readonly environmentVariable: string;
+  /**
+   * Ordered catalog of model IDs accepted for planner auto-selection. The
+   * provider default is listed first so deterministic lookups prefer it.
+   */
+  readonly supportedModels: readonly string[];
 }
 
 /**
@@ -34,16 +39,25 @@ const PROVIDER_MODEL_DEFAULTS: Readonly<Record<string, ProviderModelDefault>> = 
     model: "gpt-4.1-mini",
     highestModel: "gpt-4.1",
     environmentVariable: "OPENAI_MODEL",
+    supportedModels: Object.freeze(["gpt-4.1-mini", "gpt-4.1"]),
   }),
   "bedrock-claude": Object.freeze({
     model: "anthropic.claude-sonnet-4-20250514-v1:0",
     highestModel: "anthropic.claude-opus-4-20250514-v1:0",
     environmentVariable: "BEDROCK_CLAUDE_MODEL",
+    supportedModels: Object.freeze([
+      "anthropic.claude-sonnet-4-20250514-v1:0",
+      "anthropic.claude-opus-4-20250514-v1:0",
+      // Short Claude 5 IDs accepted by --planner-model auto-selection.
+      "claude-sonnet-5",
+      "claude-opus-5",
+    ]),
   }),
   "deepseek-v4": Object.freeze({
     model: "deepseek-v4-pro",
     highestModel: "deepseek-v4-pro",
     environmentVariable: "DEEPSEEK_MODEL",
+    supportedModels: Object.freeze(["deepseek-v4-pro", "deepseek-v4-flash"]),
   }),
 });
 
@@ -52,6 +66,35 @@ export const HIGHEST_MODEL_ENV_SUFFIX = "MODEL_HIGHEST";
 
 function configurationError(message: string): LlmAdapterError {
   return new LlmAdapterError("model-defaults", "configuration", message);
+}
+
+/**
+ * Deterministic provider order used when a caller must search all providers
+ * for a requested model. Providers are sorted by ID, so the order is stable
+ * regardless of adapter registration order.
+ */
+export function supportedProviders(): readonly ProviderId[] {
+  return Object.freeze(Object.keys(PROVIDER_MODEL_DEFAULTS).sort());
+}
+
+/**
+ * Return the ordered catalog of model IDs a built-in provider accepts for
+ * planner auto-selection. Unknown providers fail with the same actionable
+ * error as the other model-defaults resolvers.
+ */
+export function supportedModelsForProvider(provider: ProviderId): readonly string[] {
+  const normalizedProvider = normalizeProviderId(provider);
+  const definition = PROVIDER_MODEL_DEFAULTS[normalizedProvider];
+  if (!definition) {
+    throw configurationError(`No default model is configured for LLM provider '${normalizedProvider}'.`);
+  }
+  return definition.supportedModels;
+}
+
+/** True when `provider` exposes `model` in its supported-model catalog. */
+export function providerSupportsModel(provider: ProviderId, model: string): boolean {
+  const requestedModel = model.trim();
+  return supportedModelsForProvider(provider).includes(requestedModel);
 }
 
 /**
