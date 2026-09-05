@@ -6,13 +6,13 @@ Completed work:
 ${completedWork}
 
 Current step feedback:
-${JSON.stringify(feedback)}
+${feedbackJson}
 
 Recent tool-result summaries:
 ${toolFindings}
 
 Existing remaining steps:
-${formatPlan(remainingSteps)}
+${remainingPlan}
 
 RESPOND IN JSON FORMAT ONLY. Return one of the two shapes below.
 

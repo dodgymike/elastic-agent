@@ -1,5 +1,9 @@
 # elastic-agent — Memory Module
 
+For repository-wide improvements, see the [self-repair backlog](docs/SELF_REPAIR_BACKLOG.md): prioritized epics and tasks with code evidence, acceptance criteria, and validation steps.
+
+For tool permission changes, HTTP destination configuration, and shell sandbox setup, see [security boundaries and migration](docs/SECURITY_BOUNDARIES.md).
+
 This document describes the **memory module** introduced into the elastic-agent
 runtime: its transport-agnostic interface, the default persistent (disk-backed)
 implementation, the in-memory and graph backends, concatenation mode, how

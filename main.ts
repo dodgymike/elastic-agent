@@ -538,12 +538,8 @@ const agentSourceRoot = findAgentSourceRoot(
     mainCwd,
 );
 
-// Docker/container detection: resolve once at startup so the tool-safety
-// classifier and prompt-building code can choose the right filesystem policy
-// (strict outside the start/working directory on non-Docker hosts, relaxed
-// inside a throwaway container while data.json, credentials, and secrets stay
-// protected). The result is exposed as runtimeConfig.isDocker for the steps
-// that follow, and the evidence that produced it is logged immediately.
+// Detection selects diagnostic/prompt wording only. Filesystem permissions
+// always come from explicit configured roots, including in containers.
 const dockerDetection = detectDocker();
 const runtimeConfig = { isDocker: dockerDetection.isDocker, maxToolCallParallelism };
 // Startup diagnostic (its evidence feeds the classifier later); it is
@@ -1094,7 +1090,7 @@ const tools = [
         usage_prompt: "tools/grep-usage.md",
         description: "Search a single file or a directory for contents matching a literal text or regular expression, returning path:line:text matches and the set of matching files. Directory searches descend recursively when recursive:true. Read-only; refuses to inspect files larger than 500k and never searches data.json.",
         parameters: GrepParameters,
-        exec_handler: ({ pattern, path, name, recursive, literal, maxdepth, ignoreCase, maxFileSize, limit }) => Grep({ pattern, path, name, recursive, literal, maxdepth, ignoreCase, maxFileSize, limit }),
+        exec_handler: ({ pattern, path, name, recursive, literal, maxdepth, ignoreCase, maxFileSize, limit }, context?) => Grep({ pattern, path, name, recursive, literal, maxdepth, ignoreCase, maxFileSize, limit }, context?.validateReadPath),
     },
     {
         type: "function", name: "ExecuteCommand",
@@ -1947,10 +1943,10 @@ async function prepareToolCall(output, configData, goalKey) {
             // Tool-safety CLI flags resolved once at startup (enabled,
             // agentSourceDir, startDir, allowAgentSourceModifications) are
             // threaded into the classifier so its edit/write policy and
-            // bypass behavior follow the user's configuration.
+            // LLM-classification settings follow the user's configuration.
             toolSafetyConfig,
             // Docker/container detection selects the classifier prompt
-            // variant: Docker uses the relaxed filesystem-policy addendum,
+            // variant: Docker uses the strict filesystem-policy addendum,
             // non-Docker keeps the strict start/working-directory boundary.
             isDocker: runtimeConfig.isDocker,
             promptDirectory: mainCwd,
@@ -2035,7 +2031,9 @@ async function executePreparedToolCall(prepared) {
     try {
         throwIfAborted(abortController.signal, "execution");
         const checkedArguments = enforceExecutionPolicy(prepared.output.name, prepared.toolArguments, prepared.execution.safetyOptions);
-        const toolResponse = await tool.exec_handler(checkedArguments);
+        const toolResponse = await tool.exec_handler(checkedArguments, {
+            validateReadPath: (path: string) => enforceExecutionPolicy("Read", { path }, prepared.execution.safetyOptions),
+        });
         timer.stop();
         return { toolResponse, errorMessage: null };
     } catch (error) {

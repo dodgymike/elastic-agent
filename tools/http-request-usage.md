@@ -110,3 +110,16 @@ text prefix is ever emitted for a tool call.
      headers: { Authorization: `Bearer ${token}` },
    });
    ```
+
+## Enforced transport policy
+
+The operator must configure exact origins in `AGENT_HTTP_ALLOWED_ORIGINS`
+(comma-separated, including scheme and port). The default permits no origins.
+Non-public addresses additionally require that origin in
+`AGENT_HTTP_PRIVATE_ORIGINS`; a model's explanation does not grant access.
+DNS answers are checked and pinned to the socket. Every redirect is checked;
+redirects with custom headers or bodies cannot cross origins. Routing headers
+such as `Host`, `Connection`, and `Content-Length` cannot be overridden.
+Requests have a 30-second deadline, a total 1 MiB response limit across redirects,
+and a five-redirect limit. Abort stops an active request. See
+[security configuration](../docs/SECURITY_BOUNDARIES.md).

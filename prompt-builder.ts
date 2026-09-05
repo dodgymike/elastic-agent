@@ -2,7 +2,7 @@
  * Prompt building and template rendering.
  *
  * This module contains the pure prompt-construction helpers used by the CLI:
- * `renderPrompt` evaluates a `${...}` interpolation template against a variable
+ * `renderPrompt` substitutes a `${...}` interpolation template against a variable
  * map, and `buildPrompt` assembles the main agentic prompt from command-line
  * history, tool-call TLDRs, and the build-prompt skeleton. The helpers perform
  * no I/O and have no side effects so they can be unit tested without booting
@@ -37,18 +37,22 @@ export interface BuildPromptOptions {
   readonly allowAgentSourceModifications: boolean;
 }
 
-/**
- * Render a prompt template by evaluating its `${...}` interpolation expressions
- * against the supplied variable map. The template text comes from the external
- * prompt files under /elastic-agent/prompts/; all `${...}` occurrences are
- * interpolation points resolved at call time. Backticks in the template are
- * escaped so JSON fence markers in prompt text cannot break the evaluation.
+/** Render own, scalar named placeholders without evaluating template code.
+ * Substituted values are literal text and are never scanned a second time.
  */
 export function renderPrompt(template: string, variables: Record<string, unknown>): string {
-    const names = Object.keys(variables);
-    const values = names.map((name) => variables[name]);
-    const evaluator = new Function(...names, `return \`${template.replace(/`/g, "\\`")}\`;`);
-    return evaluator(...values);
+    return template.replace(/\$\{([^}]*)\}|\$\{/g, (placeholder, name: string | undefined) => {
+        if (name === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+            throw new Error("Invalid prompt placeholder: only named values are supported.");
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(variables, name);
+        if (!descriptor || !("value" in descriptor)) throw new Error(`Unknown prompt placeholder: ${name}`);
+        const value = descriptor.value;
+        if (!["string", "number", "boolean"].includes(typeof value)) {
+            throw new Error(`Prompt placeholder ${name} must be a scalar value.`);
+        }
+        return String(value);
+    });
 }
 
 /**

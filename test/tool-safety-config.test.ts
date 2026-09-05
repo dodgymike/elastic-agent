@@ -126,14 +126,10 @@ try {
     `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${resolve(sandbox, "child")}.`,
   );
 
-  // Docker mode keeps the required path line and appends a short Docker-only
-  // note stating that outside-directory filesystem access is permitted for the
-  // running container session.
-  const dockerNote =
-    "\nDocker/container detected: filesystem access outside this directory is permitted for this running container session.";
+  // Container detection must not widen configured filesystem permissions.
   assert.equal(
     startDirPathWarning({ startDir: "/abs/start-dir", startDirConfigured: true }, true),
-    `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO /abs/start-dir.${dockerNote}`,
+    `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO /abs/start-dir.`,
   );
 
   // The Docker note is omitted in non-Docker mode and when --start-dir is
@@ -251,7 +247,7 @@ try {
   // A missing --safe-dir entry fails with a clear usage error naming the flag.
   assert.throws(
     () => resolveToolSafetyConfig({ safeDirs: `safe-a,missing-one` }, sandbox),
-    /--safe-dir 'missing-one' does not exist/,
+    /--safe-dirs 'missing-one' does not exist/,
   );
 
   // safeDirs stays an empty array when the flag is absent.

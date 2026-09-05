@@ -71,7 +71,7 @@ plain text; the exit code and streams are still shown. No `[SUCCESS]` or
 - Empty command or NUL in command/parameters: `TypeError`.
 - Process spawn error: the promise rejects with the spawn error.
 - Termination by signal: rejects with
-  `Bash was terminated by signal <signal>`.
+  `Shell was terminated by signal <signal>`.
 - Agent-bus command refusal: the promise rejects with an
   `AgentBusCommandRefused` error (message: `Refused: agent-bus actions are
   handled by the AgentBus tool ...`) and the shell command is never run.
@@ -154,3 +154,19 @@ plain text; the exit code and streams are still shown. No `[SUCCESS]` or
      console.error(r.stderr);
    }
    ```
+
+## Enforced process policy
+
+`AGENT_SHELL_MODE=sandbox` is the default and requires Linux `/usr/bin/bwrap`
+with working namespaces. Shell processes receive configured filesystem mounts,
+no host network, a private temporary directory, and a selected environment
+without inherited provider credentials or shell startup configuration.
+Known credential/state paths are masked. Failed sandbox setup never retries
+on the host. `AGENT_SHELL_MODE=trusted-host` is an explicit operator opt-in to
+host filesystem/network access; it is not sandboxed. Model tool arguments
+cannot select this mode.
+
+Both modes have a 120-second deadline and combined stdout/stderr limit of
+1 MiB. Abort or exceeding a limit terminates the process group; background
+processes are not supported. See [security boundaries](../docs/SECURITY_BOUNDARIES.md)
+for mount behavior and limitations.

@@ -30,7 +30,7 @@ import {
  * absolute. The classifier is enabled unless `--disable-classifier` was set.
  */
 export interface ToolSafetyConfig {
-  /** True when the safety classifier should run; false bypasses classification. */
+  /** True when the safety classifier should run; false disables only LLM classification. */
   readonly enabled: boolean;
   /** Absolute path of the agent source directory (the code the agent may edit). */
   readonly agentSourceDir: string;
@@ -88,18 +88,13 @@ function resolveDirectoryOption(value: string | undefined, flagName: string, fal
   if (!stats.isDirectory()) {
     throw new Error(`Usage: ${flagName} '${candidate.trim()}' is not a directory (resolved to '${absolute}').`);
   }
-  // Canonicalize (symlink-resolve) the directory so the classifier and tool
-  // working-directory logic always compare against the real location rather
-  // than a lexical spelling that may alias it (for example /home -> /mnt).
-  // When realpath fails (a virtual/overlay mount or a removed directory) we
-  // degrade to the validated absolute path so startup still proceeds.
-  let canonical = absolute;
+  // Permission roots must resolve successfully; a lexical fallback could
+  // grant a different location after a link or filesystem error.
   try {
-    canonical = realpathSync(absolute);
-  } catch {
-    canonical = absolute;
+    return realpathSync(absolute);
+  } catch (error) {
+    throw new Error(`Usage: ${flagName} cannot be canonicalized: ${error instanceof Error ? error.message : String(error)}.`);
   }
-  return canonical;
 }
 
 /**
@@ -119,14 +114,11 @@ function resolveSafeDirList(value: string | undefined, flagName: string, baseCwd
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
 
-  // Each entry contributes both its canonical resolved path (which is what the
-  // classifier matches against) and the raw trimmed form (in case a read tool
-  // is presented the path exactly as the user typed it). Deduping keeps the
-  // resulting allow-list compact and free of duplicates.
+  // Store only canonical absolute roots; raw relative aliases change meaning
+  // when the runtime switches cwd and must never grant extra permissions.
   const dirs: string[] = [];
   for (const entry of entries) {
     dirs.push(resolveDirectoryOption(entry, flagName, baseCwd));
-    dirs.push(entry);
   }
 
   return Array.from(new Set(dirs));
@@ -215,10 +207,7 @@ export function resolveToolSafetyConfig(
  * (the runtime-cwd default), an empty string is returned so the prompt stays
  * unchanged.
  *
- * When `isDocker` is true, a short Docker-only note is appended after the path
- * line stating that filesystem access outside the start directory is permitted
- * for the running container session. Protected files and secrets remain
- * forbidden and are governed by the classifier's filesystem policy.
+ * Container detection never widens the configured filesystem boundary.
  */
 export function startDirPathWarning(
   config: Pick<ToolSafetyConfig, "startDir" | "startDirConfigured">,
@@ -228,7 +217,5 @@ export function startDirPathWarning(
     return "";
   }
   const baseLine = `\n\nALL PATHS MUST BE ABSOLUTE OR RELATIVE TO ${config.startDir}.`;
-  return isDocker
-    ? `${baseLine}\nDocker/container detected: filesystem access outside this directory is permitted for this running container session.`
-    : baseLine;
+  return baseLine;
 }

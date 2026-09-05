@@ -118,7 +118,7 @@ async function main(): Promise<void> {
     }
 
     // A benign command does run through executeCommand and is NOT refused.
-    const peace = await executeCommand(`printf ok > "${join(tmpDir, "benign.txt")}"`);
+    const peace = await executeCommand(`printf ok > "${join(tmpDir, "benign.txt")}"`, [], tmpDir, { policy: { mode: "trusted-host", writableRoots: [tmpDir], readableRoots: [] } });
     check(
       "benign command is not refused by the agent-bus guard",
       peace.exitCode === 0 && (!peace.stderr || peace.stderr === ""),

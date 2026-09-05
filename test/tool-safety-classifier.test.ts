@@ -721,8 +721,8 @@ async function main(): Promise<void> {
     );
 
     check(
-      "--disable-classifier bypasses static classification",
-      staticVerdictWithConfig("Write", { path: "/etc/agent-notes.md", content: privateKeyBlock }, disabledConfig).decision === "safe",
+      "--disable-classifier preserves static denials",
+      staticVerdictWithConfig("Write", { path: "/etc/agent-notes.md", content: privateKeyBlock }, disabledConfig).decision === "unsafe",
     );
 
     const bypassCapture = capturingLogger();
@@ -732,8 +732,8 @@ async function main(): Promise<void> {
       logger: bypassCapture.logger,
     });
     check(
-      "--disable-classifier returns allowed without rendering a safety response",
-      bypassResult.safe === true && bypassResult.source === "static" && bypassCapture.lines.length === 0,
+      "--disable-classifier still reports denied calls",
+      bypassResult.safe === false && bypassResult.source === "static" && bypassCapture.lines.length === 1,
     );
 
     // The denial-render path is driven by the flag-based gate, which only fires
@@ -1316,17 +1316,11 @@ async function main(): Promise<void> {
       "edit boundary: cwd-relative Write resolving inside the editable root is allowed",
       classifyToolCallStatically("Write", { path: "notes.md", content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
     );
-    // A Write that would create a brand-new file through a symlink alias is
-    // conservatively refused (fail-closed) because fs.realpathSync cannot
-    // resolve a non-existent leaf through the alias — the classifier cannot
-    // verify it lands inside the editable root, so it does not approve it.
-    // This mirrors the read-containment behavior for non-existent symlinked
-    // targets and keeps the fail-closed posture even when the effective cwd
-    // is a symlinked alias of the start dir.
+    // Resolve an existing parent to permit a safe new leaf through an alias.
     check(
-      "edit boundary: Write creating a new file through a symlink alias is conservatively refused",
+      "edit boundary: safe new file through a symlink alias is resolved via its parent",
       !editSymlinkResolves
-        || classifyToolCallStatically("Write", { path: join(editAliasRoot, "brand-new.md"), content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision !== "safe",
+        || classifyToolCallStatically("Write", { path: join(editAliasRoot, "brand-new.md"), content: "x" }, { ...editPathOptions, toolSafetyConfig: editConfig }).decision === "safe",
     );
     // (d) A path outside every editable root stays refused, and the symlinked
     //     alias cannot smuggle a real target outside the root into the set.
@@ -1536,9 +1530,9 @@ async function main(): Promise<void> {
     const dockerAddendumText = dockerAddendumPath ? readFileSync(dockerAddendumPath, "utf8") : "";
     const nonDockerAddendumText = nonDockerAddendumPath ? readFileSync(nonDockerAddendumPath, "utf8") : "";
     check(
-      "docker addendum contains the relaxed filesystem-policy wording",
-      dockerAddendumText.includes("Filesystem policy: Docker (relaxed)")
-        && /filesystem reads and writes outside the working\/startup\s+directory are permitted/.test(dockerAddendumText),
+      "docker addendum contains the strict filesystem-policy wording",
+      dockerAddendumText.includes("Filesystem policy: Docker (strict)")
+        && /Container detection does not grant filesystem permissions/.test(dockerAddendumText),
     );
     check(
       "non-docker addendum contains the strict filesystem-policy wording",
@@ -1568,12 +1562,12 @@ async function main(): Promise<void> {
       logger: silentLogger,
     });
     check(
-      "Docker classifier call composes the Docker (relaxed) filesystem addendum",
+      "Docker classifier call composes the Docker (strict) filesystem addendum",
       dockerPromptResult.safe === true
         && dockerPromptResult.source === "llm"
         && dockerPromptCapture.length === 1
-        && /Filesystem policy: Docker \(relaxed\)/.test(dockerPromptCapture[0])
-        && /filesystem reads and writes outside the working\/startup\s+directory are permitted/.test(dockerPromptCapture[0])
+        && /Filesystem policy: Docker \(strict\)/.test(dockerPromptCapture[0])
+        && /Container detection does not grant filesystem permissions/.test(dockerPromptCapture[0])
         && !/Filesystem policy: non-Docker \(strict\)/.test(dockerPromptCapture[0]),
     );
 
@@ -1596,7 +1590,7 @@ async function main(): Promise<void> {
         && nonDockerPromptCapture.length === 1
         && /Filesystem policy: non-Docker \(strict\)/.test(nonDockerPromptCapture[0])
         && /Reading or writing files outside those directories is a permission violation/.test(nonDockerPromptCapture[0])
-        && !/Filesystem policy: Docker \(relaxed\)/.test(nonDockerPromptCapture[0]),
+        && !/Filesystem policy: Docker \(strict\)/.test(nonDockerPromptCapture[0]),
     );
 
     // ------------------------------------------------------------------
@@ -1612,24 +1606,24 @@ async function main(): Promise<void> {
     );
     const dockerReadOutside = staticVerdictWithDocker("Read", { path: "/etc/hosts" }, true);
     check(
-      "Docker Read outside the workspace is permitted for the container session",
-      dockerReadOutside.decision === "safe" && /container session/.test(dockerReadOutside.reason),
+      "Docker Read outside the workspace is denied",
+      dockerReadOutside.decision === "unsafe",
     );
     check(
       "non-Docker FileSize outside the workspace is denied",
       staticVerdictWithDocker("FileSize", { path: "/etc/hosts" }, false).decision === "unsafe",
     );
     check(
-      "Docker FileSize outside the workspace is permitted",
-      staticVerdictWithDocker("FileSize", { path: "/etc/hosts" }, true).decision === "safe",
+      "Docker FileSize outside the workspace is denied",
+      staticVerdictWithDocker("FileSize", { path: "/etc/hosts" }, true).decision === "unsafe",
     );
     check(
       "non-Docker ListDirectory outside the workspace is denied",
       staticVerdictWithDocker("ListDirectory", { directory: "/etc" }, false).decision === "unsafe",
     );
     check(
-      "Docker ListDirectory outside the workspace is permitted",
-      staticVerdictWithDocker("ListDirectory", { directory: "/etc" }, true).decision === "safe",
+      "Docker ListDirectory outside the workspace is denied",
+      staticVerdictWithDocker("ListDirectory", { directory: "/etc" }, true).decision === "unsafe",
     );
 
     check(
@@ -1643,8 +1637,8 @@ async function main(): Promise<void> {
       true,
     );
     check(
-      "Docker Write outside the configured directories is permitted for the container session",
-      dockerWriteOutside.decision === "safe" && /container session/.test(dockerWriteOutside.reason),
+      "Docker Write outside the configured directories is denied",
+      dockerWriteOutside.decision === "unsafe",
     );
     check(
       "non-Docker Delete outside the configured directories is denied",
@@ -1656,13 +1650,13 @@ async function main(): Promise<void> {
       ).decision === "unsafe",
     );
     check(
-      "Docker Delete outside the configured directories is permitted",
+      "Docker Delete outside the configured directories is denied",
       staticVerdictWithConfigAndDocker(
         "Delete",
         { path: "/etc/agent-notes.md", file_hash: "0".repeat(64), file_size: 5 },
         allowEditsConfig,
         true,
-      ).decision === "safe",
+      ).decision === "unsafe",
     );
 
     check(
@@ -1670,8 +1664,8 @@ async function main(): Promise<void> {
       staticVerdictWithDocker("ExecuteCommand", { command: "cat /etc/hosts" }, false).decision === "unsafe",
     );
     check(
-      "Docker ExecuteCommand reading a container-local path is permitted",
-      staticVerdictWithDocker("ExecuteCommand", { command: "cat /etc/hosts" }, true).decision === "safe",
+      "Docker ExecuteCommand reading a container-local path is denied",
+      staticVerdictWithDocker("ExecuteCommand", { command: "cat /etc/hosts" }, true).decision === "unsafe",
     );
     check(
       "non-Docker file-modifying ExecuteCommand outside the configured directories is denied",
@@ -1683,13 +1677,13 @@ async function main(): Promise<void> {
       ).decision === "unsafe",
     );
     check(
-      "Docker file-modifying ExecuteCommand outside the configured directories is not statically denied",
+      "Docker file-modifying ExecuteCommand outside the configured directories is statically denied",
       staticVerdictWithConfigAndDocker(
         "ExecuteCommand",
         { command: "touch /etc/agent-notes.md" },
         allowEditsConfig,
         true,
-      ).decision !== "unsafe",
+      ).decision === "unsafe",
     );
 
     // Docker mode relaxes only the workspace boundary; the remaining
@@ -1720,8 +1714,8 @@ async function main(): Promise<void> {
       staticVerdictWithDocker("ExecuteCommand", { command: "rm -rf /" }, true).decision === "unsafe",
     );
     check(
-      "Docker path traversal outside the workspace is permitted for the container session",
-      staticVerdictWithDocker("Read", { path: "../outside.txt" }, true).decision === "safe",
+      "Docker path traversal outside the workspace is denied",
+      staticVerdictWithDocker("Read", { path: "../outside.txt" }, true).decision === "unsafe",
     );
 
     // ------------------------------------------------------------------

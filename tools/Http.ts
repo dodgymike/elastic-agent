@@ -1,19 +1,16 @@
-export interface HttpResult {
-  response: Response;
-  body: string;
-}
+import { requestHttp, type HttpTransportOptions, type HttpTransportResult } from "./http-transport.js";
+
+export type HttpResult = HttpTransportResult;
 
 export interface HttpOption {
   url: string;
 }
 
 /** Calls an HTTP(S) URL and returns both the response and its text body. */
-export default async function http(options: HttpOption): Promise<HttpResult> {
+export default async function http(options: HttpOption, transport: HttpTransportOptions = {}): Promise<HttpResult> {
   if (!options || typeof options !== "object") throw new TypeError("Http options must be an object.");
   const url = validateHttpUrl(options.url, "url");
-  const response = await fetch(url);
-  const body = await response.text();
-  return { response, body };
+  return requestHttp(url, {}, transport);
 }
 
 export function validateHttpUrl(value: unknown, field = "url"): string {

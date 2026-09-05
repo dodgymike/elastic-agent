@@ -2,8 +2,7 @@
 
 ## Purpose
 
-Perform a simple HTTP(S) `GET` fetch and return both the raw `Response` object
-and its text body.
+Perform a simple HTTP(S) `GET` fetch and return serializable status, headers, and body fields.
 
 ## When to use
 
@@ -16,7 +15,9 @@ any other method, custom headers, or a request body, use `HttpRequest`.
 
 ## Result
 
-- `response` (Response): the raw fetch response.
+- `status` (number): HTTP status.
+- `statusText` (string): HTTP status text.
+- `headers` (object): response headers.
 - `body` (string): the response text body.
 
 ## Formatted terminal output
@@ -39,7 +40,7 @@ prefix is ever emitted for a tool call.
   credentials: `TypeError`.
 - Network/fetch failures propagate; inspect the error and retry as appropriate.
 - HTTP error statuses are not thrown; the caller is expected to inspect
-  `response.status`.
+  `status`.
 
 ## Critical operating constraints
 
@@ -81,7 +82,20 @@ prefix is ever emitted for a tool call.
 
    ```js
    const r = await Http({ url: "https://example.com/api/status" });
-   if (r.response.status !== 200) {
+   if (r.status !== 200) {
      // handle non-OK
    }
    ```
+
+## Enforced transport policy
+
+The operator must configure exact origins in `AGENT_HTTP_ALLOWED_ORIGINS`
+(comma-separated, including scheme and port). The default permits no origins.
+Non-public addresses additionally require that origin in
+`AGENT_HTTP_PRIVATE_ORIGINS`; a model's explanation does not grant access.
+DNS answers are checked and pinned to the socket. Every redirect is checked;
+redirects with custom headers or bodies cannot cross origins. Routing headers
+such as `Host`, `Connection`, and `Content-Length` cannot be overridden.
+Requests have a 30-second deadline, a total 1 MiB response limit across redirects,
+and a five-redirect limit. Abort stops an active request. See
+[security configuration](../docs/SECURITY_BOUNDARIES.md).

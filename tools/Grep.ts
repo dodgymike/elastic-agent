@@ -1,4 +1,6 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { isPrivatePath } from "./path-privacy.js";
 
 export interface GrepOptions {
   /**
@@ -153,6 +155,7 @@ function isRegularFile(entry: { isFile(): boolean; isDirectory(): boolean }): bo
 }
 
 interface WalkContext {
+  validateReadPath?: (path: string) => void;
   pattern: RegExp;
   nameFilter?: RegExp;
   maxdepth?: number;
@@ -168,25 +171,21 @@ interface WalkContext {
 
 async function inspectFile(filePath: string, ctx: WalkContext): Promise<void> {
   if (ctx.truncated) return;
-  let stats;
-  try {
-    stats = await stat(filePath);
-  } catch {
-    return; // unreadable/vanished file: skip silently during a content search
-  }
-  if (!stats.isFile() || stats.size > ctx.maxFileSize) return;
-
+  if (isPrivatePath(filePath)) return;
   let content: string;
+  let file: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    content = await readFile(filePath, "utf8");
+    ctx.validateReadPath?.(filePath);
+    file = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stats = await file.stat();
+    if (!stats.isFile() || stats.nlink > 1 || stats.size > ctx.maxFileSize) return;
+    ctx.validateReadPath?.(filePath);
+    content = await file.readFile("utf8");
   } catch {
-    return; // binary or unreadable: skip
+    return; // Skip denied, linked, unreadable, or vanished search entries.
+  } finally {
+    await file?.close();
   }
-
-  // Guard against a data.json file that somehow exists under the search path:
-  // its contents are never a valid searchable target.
-  const basename = filePath.split("/").pop() ?? "";
-  if (basename === "data.json") return;
 
   const lines = content.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
@@ -205,7 +204,8 @@ async function inspectFile(filePath: string, ctx: WalkContext): Promise<void> {
 }
 
 async function walk(directory: string, depth: number, ctx: WalkContext): Promise<void> {
-  if (ctx.truncated) return;
+  if (ctx.truncated || isPrivatePath(directory)) return;
+  try { ctx.validateReadPath?.(directory); } catch { return; }
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -261,7 +261,7 @@ export default async function Grep({
   ignoreCase,
   maxFileSize,
   limit,
-}: GrepOptions): Promise<GrepResult> {
+}: GrepOptions, validateReadPath?: (path: string) => void): Promise<GrepResult> {
   const basePath = validatePath(path, "path");
   const patternValue = validatePath(pattern, "pattern");
   if (name !== undefined && name.trim() === "") {
@@ -292,6 +292,7 @@ export default async function Grep({
   }
 
   const ctx: WalkContext = {
+    validateReadPath,
     pattern: regex,
     nameFilter: name !== undefined ? globToRegExp(name) : undefined,
     maxdepth,

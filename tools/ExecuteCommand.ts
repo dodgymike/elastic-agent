@@ -1,5 +1,13 @@
+import { shellEnvironment, shellModeFromEnvironment, sandboxArguments, type ShellPolicy } from "./shell-policy.js";
 import { spawn } from "node:child_process";
 import { detectAgentBusCommand } from "./agent-bus-detect.js";
+
+export interface ExecuteCommandOptions {
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly maxOutputBytes?: number;
+  readonly policy?: ShellPolicy;
+}
 
 export interface ExecuteCommandResult { exitCode: number; stdout: string; stderr: string; }
 
@@ -12,6 +20,7 @@ export function executeCommand(
   command: string,
   parameters: readonly string[] = [],
   cwd?: string,
+  options: ExecuteCommandOptions = {},
 ): Promise<ExecuteCommandResult> {
   // Agent-bus guard (defense in depth): refuse any command that executes an
   // agent-bus binary (`agent-busctl`/`agentbus`/`agent-bus`) BEFORE we spawn a
@@ -36,17 +45,54 @@ export function executeCommand(
   if (cwd !== undefined && (typeof cwd !== "string" || cwd.length === 0)) {
     throw new TypeError("cwd must be a non-empty string when provided.");
   }
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  const maxBytes = options.maxOutputBytes ?? 1_048_576;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("Shell timeout and output limit must be positive integers.");
+  }
+  if (options.signal?.aborted) throw new Error("Shell execution aborted.");
+  const workdir = cwd ?? process.cwd();
+  const policy = options.policy ?? { mode: shellModeFromEnvironment(), writableRoots: [workdir], readableRoots: [] };
+  if (policy.mode !== "sandbox" && policy.mode !== "trusted-host") throw new Error("Invalid shell policy mode.");
+  const executable = policy.mode === "sandbox" ? "/usr/bin/bwrap" : "/bin/bash";
+  const args = policy.mode === "sandbox" ? sandboxArguments(policy, workdir, command, parameters)
+    : ["--noprofile", "--norc", "-c", command, "--", ...parameters];
   return new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-c", command, "--", ...parameters], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = ""; let stderr = ""; let spawnError: Error | undefined;
-    child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-    child.once("error", (error) => { spawnError = error; });
+    const child = spawn(executable, args, { cwd: workdir, env: shellEnvironment(), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = []; const stderr: Buffer[] = [];
+    let bytes = 0; let failure: Error | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const killGroup = (signal: NodeJS.Signals) => {
+      if (child.pid) try { process.kill(-child.pid, signal); } catch { /* already exited */ }
+    };
+    const stop = (error: Error) => {
+      if (failure) return;
+      failure = error;
+      killGroup("SIGTERM");
+      killTimer = setTimeout(() => killGroup("SIGKILL"), 250);
+    };
+    const abort = () => stop(new Error("Shell execution aborted."));
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    const timer = setTimeout(() => stop(new Error("Shell execution deadline exceeded.")), timeoutMs);
+    const collect = (target: Buffer[], chunk: Buffer) => {
+      const remaining = Math.max(0, maxBytes - bytes);
+      bytes += chunk.length;
+      if (remaining) target.push(chunk.subarray(0, remaining));
+      if (bytes > maxBytes) stop(new Error("Shell output exceeds byte limit."));
+    };
+    child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
+    child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
+    child.once("error", (error) => { failure = error; });
     child.once("close", (exitCode, signal) => {
-      if (spawnError) reject(spawnError);
-      else if (exitCode === null) reject(new Error(`Bash was terminated by signal ${signal ?? "unknown"}`));
-      else resolve({ exitCode, stdout, stderr });
+      clearTimeout(timer); if (killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener("abort", abort);
+      killGroup("SIGKILL"); // Do not leave background descendants behind.
+      if (failure) reject(failure);
+      else if (exitCode === null) reject(new Error(`Shell was terminated by signal ${signal ?? "unknown"}`));
+      else if (policy.mode === "sandbox" && exitCode !== 0 && Buffer.concat(stderr).toString().includes("bwrap:")) {
+        reject(new Error("Shell sandbox failed; host fallback is disabled. Check Linux bubblewrap/user-namespace support."));
+      } else resolve({ exitCode, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
     });
   });
 }

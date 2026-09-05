@@ -9,7 +9,7 @@ Commit instruction for this step: ${commitInstruction}
 Execution plan:
 ${plan}
 
-You are executing step ${index + 1} of ${steps.length}: ${step}
+You are executing step ${stepNumber} of ${stepCount}: ${step}
 Carry out only this step. Use tools when needed, report the result, and do not begin another plan step.
 
 Execution context (review feedback and learnings from earlier attempts; "(none)" when this is the first execution):

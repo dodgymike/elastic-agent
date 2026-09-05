@@ -74,10 +74,9 @@ export function buildReplanPrompt(
     return renderPrompt(replanPromptTemplate, {
         claudeInstructions: inputs.claudeInstructions,
         completedWork: inputs.completedWork,
-        feedback: inputs.feedback,
+        feedbackJson: JSON.stringify(inputs.feedback),
         toolFindings: inputs.toolFindings,
-        formatPlan: inputs.formatPlan,
-        remainingSteps: inputs.remainingSteps,
+        remainingPlan: inputs.formatPlan(inputs.remainingSteps),
         currentPhase: inputs.currentPhase,
     });
 }

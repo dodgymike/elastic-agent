@@ -46,8 +46,8 @@ agent-facing operating instructions are not part of this extraction.
 The tool-safety classifier (`tool-safety-classifier.ts`) loads its LLM prompt
 through `TOOL_SAFETY_PROMPT_PATH`, which defaults to
 `prompts/tool-safety-classifier.md`. The prompt has been split into a shared
-base and two filesystem-policy addenda so the runtime can select a strict
-(non-Docker) or relaxed (Docker) policy from startup detection:
+base and two strict filesystem-policy addenda. Startup container detection
+selects wording but never grants additional filesystem permissions:
 
 | File                                      | Purpose                                                                 |
 |-------------------------------------------|-------------------------------------------------------------------------|
@@ -86,26 +86,16 @@ const JSON_RETRY_HINT = readFileSync("prompts/json-retry-hint.txt", "utf-8");
 
 ### Template interpolation
 
-`build-prompt-skeleton.txt`, `step-execution-prompt.txt`,
-`replan-prompt.txt`, and `review-prompt.txt` are templates containing `${...}`
-interpolation expressions. They are rendered at call time by the
-`renderPrompt(template, variables)` helper in `main.ts`:
+`build-prompt-skeleton.txt`, `step-execution-prompt.txt`, `replan-prompt.txt`,
+and `review-prompt.txt` use named `${placeholder}` values. The renderer in
+`prompt-builder.ts` only substitutes own scalar values (string, number, boolean).
+It rejects expressions, unknown names, getters, and malformed placeholders.
+Backticks and backslashes stay literal. Substituted text is never evaluated or
+rescanned for placeholders.
 
-```ts
-function renderPrompt(template, variables) {
-    const names = Object.keys(variables);
-    const values = names.map((name) => variables[name]);
-    const evaluator = new Function(...names, `return \`${template.replace(/`/g, "\\`")}\`;`);
-    return evaluator(...values);
-}
-```
-
-`renderPrompt` evaluates each `${...}` expression inside the template against
-the supplied variable map, so the template files remain authoritative while the
-actual values (e.g. `claudeInstructions`, `plan`, `feedback`) are supplied by
-the runtime at call time. Any backticks in prompt text (such as the JSON fence
-markers in `execution-feedback-format.txt`) are escaped so they cannot break the
-template evaluation.
+Callers compute `feedbackJson`, `remainingPlan`, `stepNumber`, and `stepCount`
+before rendering. Custom templates using JavaScript expressions must migrate
+to those named placeholders. No template can execute JavaScript.
 
 The remaining files (`planning-suffix.txt`, `execution-feedback-format.txt`,
 `json-retry-hint.txt`) are plain text with no interpolation; they are used
@@ -212,8 +202,8 @@ Interpolation points:
 |------------|----------|
 | `${claudeInstructions}` | contents of `CLAUDE.md` |
 | `${plan}` | the full formatted plan |
-| `${index + 1}` | one-based step index |
-| `${steps.length}` | total number of plan steps |
+| `${stepNumber}` | one-based step index |
+| `${stepCount}` | total number of plan steps |
 | `${step}` | the current step's text |
 | `${executionFeedbackFormat}` | the contents of `execution-feedback-format.txt` |
 | `${executionContext}` | review feedback/learnings from earlier attempts, or `(none)` on the first execution |
@@ -243,9 +233,9 @@ Interpolation points:
 |------------|----------|
 | `${claudeInstructions}` | contents of `CLAUDE.md` |
 | `${completedWork}` | completed step list |
-| `${JSON.stringify(feedback)}` | the validated feedback object |
+| `${feedbackJson}` | the validated feedback object |
 | `${toolFindings}` | recent tool-result TLDRs |
-| `${formatPlan(remainingSteps)}` | formatted remaining steps |
+| `${remainingPlan}` | formatted remaining steps |
 | `${currentPhase}` | the phase the plan is currently in, or `(none)` |
 | `${...}` (as needed) | remaining interpolation via `renderPrompt` |
 

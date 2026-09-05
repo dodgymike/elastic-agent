@@ -1,5 +1,6 @@
-import { readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isPrivatePath } from "./tools/path-privacy.js";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { CompatibleResponse, MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { RunAbortError } from "./llm/run-abort.js";
 import type { ToolSafetyConfig } from "./tool-safety-config.js";
@@ -17,8 +18,7 @@ import { WORKTREES_DIR } from "./worktree.js";
  *      never a legitimate tool target);
  *    - protected files (.env, SSH keys, credential/token stores);
  *    - path traversal and absolute paths that escape the workspace (the
- *      workspace boundary is relaxed in Docker mode, where container-local
- *      filesystem access outside the startup directory is permitted);
+ *      workspace boundary is enforced in Docker and host modes);
  *    - destructive filesystem/database/host commands;
  *    - file/secret exfiltration commands;
  *    - command-injection shells;
@@ -47,7 +47,7 @@ export const TOOL_SAFETY_PROMPT_PATH = process.env.TOOL_SAFETY_PROMPT_PATH ?? "p
 /** Default shared classifier-policy body (no filesystem-policy addendum). */
 export const TOOL_SAFETY_PROMPT_BASE_DEFAULT_PATH = "prompts/tool-safety-classifier.base.md";
 
-/** Default Docker (relaxed) filesystem-policy addendum. */
+/** Default Docker (strict) filesystem-policy addendum. */
 export const TOOL_SAFETY_PROMPT_DOCKER_DEFAULT_PATH = "prompts/tool-safety-classifier.docker.md";
 
 /** Default non-Docker (strict) filesystem-policy addendum. */
@@ -218,7 +218,7 @@ export interface ToolSafetyClassifierOptions {
   readonly promptPath?: string;
   /**
    * Docker/container detection result. When true (and no promptPath is
-   * supplied), the classifier composes the Docker (relaxed) filesystem-policy
+   * supplied), the classifier composes the Docker (strict) filesystem-policy
    * addendum with the shared base prompt; when false it uses the strict
    * non-Docker addendum. Defaults to AGENT_IN_DOCKER=1/true.
    */
@@ -342,25 +342,30 @@ function resolvesOutsideSingleRoot(absolute: string, root: string): boolean {
   return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
 
-/**
- * Resolve `target` to its canonical absolute form. Relative targets are
- * joined against `cwd` (defaulting to the process working directory) first,
- * then normalized with `resolve`. The resulting absolute path is then
- * symlink-resolved with `fs.realpathSync` so a path that is reachable through
- * a symlink alias (for example `/home` -> `/mnt/sdb4`) is compared by its real
- * location rather than its lexical spelling. When realpath fails (a missing
- * file, a virtual/overlay mount, or a path not yet created) we fall back to
- * the normalized resolved path so the boundary check still runs in a
- * fail-closed manner — a fallback path can only ever be *more* restrictive,
- * never less, because without a realpath the file cannot be resolved to a
- * different root and the normalized form stays lexically within its root.
+/** Resolve existing targets or their nearest existing parent. Errors other than
+ * an absent leaf fail closed; dangling links never grant creation permissions.
  */
-function canonicalAbsolutePath(target: string, cwd = process.cwd()): string {
+export function canonicalAbsolutePath(target: string, cwd = process.cwd()): string {
   const absolute = isAbsolute(target) ? resolve(target) : resolve(cwd, target);
-  try {
-    return realpathSync(absolute);
-  } catch {
-    return absolute;
+  let ancestor = absolute;
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync(ancestor), ...missing.reverse());
+    } catch (error) {
+      // Only an absent leaf permits walking upward. Permission errors and
+      // symlink loops are policy failures, never lexical permission grants.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        if (lstatSync(ancestor).isSymbolicLink()) throw new Error("Dangling symlink is not a permitted tool target.");
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+      }
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      missing.push(basename(ancestor));
+      ancestor = parent;
+    }
   }
 }
 
@@ -660,8 +665,11 @@ function classifyFileTool(
     }
   }
 
-  const protectedReason = protectedPathReason(target);
+  const canonicalTarget = canonicalAbsolutePath(target);
+  const protectedReason = protectedPathReason(target) ?? protectedPathReason(canonicalTarget)
+    ?? dataJsonTargetReason(canonicalTarget);
   if (protectedReason) return unsafe(protectedReason);
+  if (isPrivatePath(target) || isPrivatePath(canonicalTarget)) return unsafe("Tool target is a protected credential, configuration, or runtime-state path.");
 
   // Docker mode relaxes the workspace boundary and traversal to the container
   // boundary: container-local reads/writes outside the startup directory are
@@ -1662,13 +1670,7 @@ export function classifyToolCallStatically(
     readonly workspaceRoot?: string;
     readonly allowedDirectories?: readonly string[];
     readonly toolSafetyConfig?: ToolSafetyConfig;
-    /**
-     * Docker/container detection result. When true, filesystem reads and
-     * writes outside the workspace/startup directory are permitted for the
-     * running container session, while data.json, credential/secret files, and
-     * unsafe commands remain protected. Defaults to false (strict boundary)
-     * so callers opt in with the same flag that selects the Docker prompt.
-     */
+    /** Container detection selects prompt wording, never permissions. */
     readonly isDocker?: boolean;
   } = {},
 ): StaticToolSafetyVerdict {
@@ -1680,13 +1682,7 @@ export function classifyToolCallStatically(
     : {};
   const roots = trustedRoots(options.workspaceRoot ?? process.cwd(), options.allowedDirectories);
   const config = options.toolSafetyConfig;
-  const allowOutsideWorkspace = options.isDocker === true;
-
-  // --disable-classifier bypasses all safety classification. The returned
-  // safe verdict is silent by contract, so no safety response is rendered.
-  if (config && !config.enabled) {
-    return safe("Tool safety classifier is disabled by --disable-classifier; call allowed without a safety review.");
-  }
+  const allowOutsideWorkspace = false; // Container detection never grants filesystem access.
 
   const policyRoots = config ? editableRoots(config) : roots;
   const combinedRoots = config ? Array.from(new Set([...roots, ...policyRoots])) : roots;
@@ -1886,6 +1882,10 @@ export async function classifyToolCall(
     return classification;
   }
 
+  if (options.toolSafetyConfig?.enabled === false) {
+    return fallbackClassification(`LLM classification is disabled and ${toolName} is ambiguous; refusing to execute.`);
+  }
+
   logger("info", `[TOOL SAFETY] ${toolName}: ambiguous static verdict (${staticVerdict.reason}); asking LLM classifier.`);
   if (!options.runtime) {
     const classification = fallbackClassification(`Safety classifier LLM is unavailable and ${toolName} call is ambiguous (${staticVerdict.reason}); refusing to execute.`);
@@ -1898,4 +1898,39 @@ export async function classifyToolCall(
   const classification = await llmClassification(toolName, normalizedParameters, options.runtime, resolvedPrompt, logger, classifierModel);
   logDecision(toolName, classification, logger);
   return classification;
+}
+
+/** Recheck mandatory policy immediately before dispatch; never consult the model.
+ * Pin filesystem paths to their resolved spelling so an alias changed since
+ * preparation cannot redirect a handler. Host-side path races remain possible;
+ * this is defense in depth, not an OS filesystem sandbox.
+ */
+export function enforceExecutionPolicy(
+  toolName: string,
+  parameters: unknown,
+  options: ToolSafetyClassifierOptions,
+): Record<string, unknown> {
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
+    throw new Error("Tool arguments must be an object.");
+  }
+  const args: Record<string, unknown> = { ...parameters };
+  const assertAllowed = (value: unknown) => {
+    const verdict = classifyToolCallStatically(toolName, value, options);
+    if (verdict.decision === "unsafe") throw new Error(`Execution policy denied ${toolName}: ${verdict.reason}`);
+  };
+  assertAllowed(args);
+  const key = toolName === "ListDirectory" ? "directory"
+    : ["Read", "Write", "Edit", "Delete", "FileSize", "Find", "Grep", "Mkdir", "Rmdir"].includes(toolName) ? "path" : undefined;
+  if (key) {
+    if (typeof args[key] !== "string" || !args[key].trim()) throw new Error(`Invalid filesystem ${key}.`);
+    args[key] = canonicalAbsolutePath(args[key]);
+    assertAllowed(args);
+    try {
+      const stat = lstatSync(args[key] as string);
+      if (stat.isFile() && stat.nlink > 1) throw new Error("Hardlinked file targets require an unlinked workspace copy.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return args;
 }

@@ -20,16 +20,18 @@ assert.ok(source.includes("function renderToolCallFailed(toolCall, error)"), "ma
 
 // The central dispatcher owns pending rendering before parsing/execution, then
 // routes success and failure output through the wrappers.
-const dispatchStart = source.indexOf("async function dispatchToolCall(");
+const dispatchStart = source.indexOf("async function prepareToolCall(");
 const dispatchEnd = source.indexOf("\nasync function executePlanStep(", dispatchStart);
 assert.notEqual(dispatchStart, -1, "main.ts must define dispatchToolCall");
 assert.notEqual(dispatchEnd, -1, "main.ts must retain a boundary after dispatchToolCall");
 const dispatch = source.slice(dispatchStart, dispatchEnd);
 const pendingAt = dispatch.indexOf("renderToolCallPending(output);");
 const parseAt = dispatch.indexOf("toolArguments = JSON.parse(output.arguments);");
-const executeAt = dispatch.indexOf("await tool.exec_handler(toolArguments);");
-const successAt = dispatch.indexOf("renderToolCallSucceeded(output, toolResponse);");
-const failureAt = dispatch.indexOf("renderToolCallFailed(output, toolResponse);");
+const executeAt = dispatch.indexOf("await tool.exec_handler(checkedArguments,");
+const successAt = dispatch.indexOf("renderToolCallSucceeded(prepared.output, toolResponse);");
+const failureAt = dispatch.indexOf("renderToolCallFailed(prepared.output, toolResponse);");
+const policyAt = dispatch.indexOf("enforceExecutionPolicy(prepared.output.name");
+assert.ok(policyAt > parseAt && policyAt < executeAt, "execution must use arguments rechecked by policy");
 assert.ok(pendingAt >= 0 && pendingAt < parseAt && parseAt < executeAt, "pending rendering must precede parsing and execution");
 assert.equal(
   (dispatch.match(/renderToolCallPending\(output\);/g) ?? []).length,
@@ -91,8 +93,8 @@ assert.notEqual(executionStart, -1, "main.ts must define executePlanStep");
 assert.notEqual(executionEnd, -1, "main.ts must retain a boundary after executePlanStep");
 const execution = source.slice(executionStart, executionEnd);
 assert.ok(
-  /const dispatched = await dispatchToolCall\(output, configData, `plan-\$\{index \+ 1\}`\);/u.test(execution),
-  "executePlanStep must delegate to dispatchToolCall with the plan-step goal key",
+  /const dispatchedCalls = await dispatchToolCallsBatch\(functionCalls, configData, `plan-\$\{index \+ 1\}`\);/u.test(execution),
+  "executePlanStep must delegate to dispatchToolCallsBatch with the plan-step goal key",
 );
 assert.ok(!execution.includes("renderToolCallSucceeded(dispatched.output"), "executePlanStep must not render success directly");
 assert.ok(!execution.includes("renderToolCallFailed(dispatched.output"), "executePlanStep must not render failure directly");

@@ -65,8 +65,8 @@ Deny the call (safe: false) when any of the following apply:
    files) are denied unless `--allow-agent-source-modifications` is set, OR the
    target resolves inside a user-declared `--safe-dir` directory (which grants
    authorized, scoped edit access without enabling blanket agent-source edits).
-   `--disable-classifier` bypasses this policy entirely: the call is allowed
-   without a safety review and no safety response is rendered.
+   `--disable-classifier` disables only LLM classification. Deterministic
+   denials still apply, and ambiguous calls are denied when no LLM review runs.
 
 Allow the call (safe: true) when it uses a tool for its intended purpose, is
 read-only or a normal authorized edit permitted by the edit/write gate above,

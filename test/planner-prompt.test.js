@@ -31,9 +31,9 @@ const PLANNING_SUFFIX = "Return a JSON plan object. For very-high-complexity wor
 const REPLAN_TEMPLATE = [
     "${claudeInstructions}",
     "Completed work:\n${completedWork}",
-    "Current-step feedback:\n${JSON.stringify(feedback)}",
+    "Current-step feedback:\n${feedbackJson}",
     "Recent tool findings:\n${toolFindings}",
-    "Remaining steps:\n${formatPlan(remainingSteps)}",
+    "Remaining steps:\n${remainingPlan}",
     "Current phase: ${currentPhase}",
 ].join("\n");
 
