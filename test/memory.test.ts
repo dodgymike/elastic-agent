@@ -292,11 +292,12 @@ async function main(): Promise<void> {
 
     assert.equal(requests.length, 1);
     const promptText = initialText(requests[0]);
-    assert.ok(promptText.startsWith("[SESSION MEMORY — additional context remembered from earlier in this session]"),
-      "LLM prompt should be prefixed with the memory-context block");
+    assert.ok(promptText.startsWith("continue the work"),
+      "LLM prompt should keep the original request as the leading stable prefix");
     assert.ok(promptText.includes("remembered: plan-step-1"),
       "LLM prompt should contain the summarizer's in-memory-derived summary");
-    assert.ok(promptText.endsWith("continue the work"), "the original prompt must follow the memory block");
+    assert.ok(promptText.endsWith("remembered: plan-step-1"),
+      "memory-context block should trail the original prompt");
   }
 
   /* ------------------------------------------------------------------ *

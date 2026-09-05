@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { MultiTurnLlmRuntime, memoryContextPrefix } from "../llm/multi-turn-runtime.js";
+import { MultiTurnLlmRuntime, memoryContextSuffix } from "../llm/multi-turn-runtime.js";
 import type { GenerateRequest, LlmAdapter } from "../llm/adapter-contract.js";
 import type { ContextRequest, MemoryContextResult, MemoryModule } from "../memory/types.js";
 
@@ -35,12 +35,12 @@ function initialText(request: GenerateRequest): string {
 }
 
 async function main(): Promise<void> {
-  // --- memoryContextPrefix pure helper ---
-  assert.equal(memoryContextPrefix({ text: "remembered: read CLAUDE.md", matchedContexts: [], hasMemory: true }),
-    "[SESSION MEMORY — additional context remembered from earlier in this session]\nremembered: read CLAUDE.md\n\n");
-  assert.equal(memoryContextPrefix({ text: "", matchedContexts: [], hasMemory: true }), "");
-  assert.equal(memoryContextPrefix({ text: "nope", matchedContexts: [], hasMemory: false }), "");
-  assert.equal(memoryContextPrefix({ text: "   ", matchedContexts: [], hasMemory: true }), "");
+  // --- memoryContextSuffix pure helper ---
+  assert.equal(memoryContextSuffix({ text: "remembered: read CLAUDE.md", matchedContexts: [], hasMemory: true }),
+    "\n\n[SESSION MEMORY — additional context remembered from earlier in this session]\nremembered: read CLAUDE.md");
+  assert.equal(memoryContextSuffix({ text: "", matchedContexts: [], hasMemory: true }), "");
+  assert.equal(memoryContextSuffix({ text: "nope", matchedContexts: [], hasMemory: false }), "");
+  assert.equal(memoryContextSuffix({ text: "   ", matchedContexts: [], hasMemory: true }), "");
 
   // --- a runtime with an attached MemoryModule injects context into the initial prompt ---
   const requests: GenerateRequest[] = [];
@@ -62,10 +62,25 @@ async function main(): Promise<void> {
   await runtime.create({ input: "perform work" });
   assert.equal(requests.length, 1);
   const first = initialText(requests[0]);
-  assert.ok(first.startsWith("[SESSION MEMORY — additional context remembered from earlier in this session]"), "memory context should be prepended");
+  assert.ok(first.startsWith("perform work"), "the original prompt must lead the request so the stable prefix is preserved");
+  assert.ok(first.includes("[SESSION MEMORY — additional context remembered from earlier in this session]"), "memory context should be appended");
   assert.ok(first.includes("remembered: inspected repo layout"));
-  assert.ok(first.endsWith("perform work"), "the original prompt must follow the memory context");
+  assert.ok(first.endsWith("remembered: inspected repo layout"), "memory context should trail the original prompt");
   assert.deepEqual(memory.calls[0], { sessionId: "sess-1" });
+
+  // --- changing the remembered text affects only the trailing memory suffix ---
+  requests.length = 0;
+  const changedMemory = new StubMemory({ text: "different remembered content", matchedContexts: [], hasMemory: true });
+  const changedRuntime = new MultiTurnLlmRuntime(adapter, "fixture-model", undefined, {
+    memory: changedMemory,
+    sessionId: "sess-changed",
+  });
+  await changedRuntime.create({ input: "perform work" });
+  const changed = initialText(requests[0]);
+  assert.ok(changed.startsWith("perform work"), "changing memory must not shift the leading user input");
+  assert.ok(changed.includes("[SESSION MEMORY"), "the memory suffix should still be appended");
+  assert.ok(changed.endsWith("different remembered content"), "the trailing suffix should reflect the new memory text");
+  assert.ok(!changed.endsWith("remembered: inspected repo layout"), "the old memory text must not leak into the suffix");
 
   // --- a session_id on the request overrides the runtime-level session id ---
   requests.length = 0;
@@ -88,7 +103,8 @@ async function main(): Promise<void> {
   attachRuntime.attachMemory(memory, "sess-4");
   assert.equal(attachRuntime.hasMemory(), true);
   await attachRuntime.create({ input: "after attach" });
-  assert.ok(initialText(requests[1]).startsWith("[SESSION MEMORY"));
+  assert.ok(initialText(requests[1]).startsWith("after attach"), "the original prompt must stay first");
+  assert.ok(initialText(requests[1]).endsWith("remembered: inspected repo layout"), "memory context should be appended after the prompt");
 
   // --- without a session id the runtime does not consult memory ---
   requests.length = 0;
