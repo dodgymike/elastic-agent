@@ -59,6 +59,13 @@ export interface CompatibleCreateRequest {
   readonly input: string | readonly CompatibleToolResult[];
   readonly tools?: readonly ToolDefinition[];
   readonly previous_response_id?: string;
+  /**
+   * Per-request model override. When omitted or blank, the runtime's
+   * constructed model is used. This lets specialized paths (for example the
+   * tool-safety classifier) select a different default model without
+   * constructing a second runtime or adapter.
+   */
+  readonly model?: string;
   /** Overrides the runtime-level session id used to scope memory context. */
   readonly session_id?: string;
   /** Abort signal for this generation; falls back to the runtime-level signal. */
@@ -185,20 +192,21 @@ export class MultiTurnLlmRuntime {
     }
     const messages = prior ? [...prior.messages, ...continuation] : [textMessage("user", initialInput as string)];
     const requestType = prior ? REQUEST_TYPE_TOOL_CONTINUATION : REQUEST_TYPE_INITIAL;
+    const model = request.model?.trim() || this.model;
     // When --log-prompts is enabled, record the finalized prompt (including any
     // memory-injected context) immediately before it is sent to the model.
     if (this.logPrompts) {
       const promptRecord: PromptLogRecord = {
         timestamp: nowIso(),
         requestType: prior ? PROMPT_REQUEST_TYPE_TOOL_CONTINUATION : PROMPT_REQUEST_TYPE_INITIAL,
-        model: this.model,
+        model,
         prompt: formatPromptForLog(messages),
       };
       appendPromptLog(promptRecord);
     }
     let generated: GenerateResponse;
     try {
-      generated = await this.adapter.generate({ model: this.model, messages, tools: request.tools, signal });
+      generated = await this.adapter.generate({ model, messages, tools: request.tools, signal });
     } catch (error) {
       // A user abort takes precedence over any provider error produced by an
       // in-flight request cancellation, so the top-level handler can report the
@@ -217,7 +225,7 @@ export class MultiTurnLlmRuntime {
     const record: LlmLogRecord = {
       timestamp: nowIso(),
       requestType,
-      model: this.model,
+      model,
       prompt: formatPrompt(messages),
       response: formatResponse(generated.message),
       usage: generated.usage,

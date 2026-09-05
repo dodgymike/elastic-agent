@@ -115,6 +115,24 @@ export function resolveToolSafetyPrompt(
 /** Mirrors the existing review retry limit (one initial request plus two retries). */
 const MAX_TOOL_SAFETY_ATTEMPTS = 3;
 
+/**
+ * Classifier-specific default model. Ambiguous tool calls are frequent and
+ * latency-sensitive, so the tool-safety classifier defaults to the
+ * lower-latency deepseek-v4-flash model instead of inheriting the main
+ * runtime's higher-capability default.
+ */
+export const DEFAULT_CLASSIFIER_MODEL = "deepseek-v4-flash";
+
+/**
+ * Resolve the model used for tool-safety LLM classification. A non-blank
+ * explicit override (for example a CLI flag) wins; otherwise the classifier
+ * uses its dedicated deepseek-v4-flash default.
+ */
+export function resolveClassifierModel(explicitModel?: string): string {
+  const trimmed = explicitModel?.trim();
+  return trimmed ? trimmed : DEFAULT_CLASSIFIER_MODEL;
+}
+
 /** Maximum number of characters kept from any single string in the LLM prompt. */
 const MAX_PROMPT_STRING_LENGTH = 400;
 
@@ -172,6 +190,12 @@ export interface StaticToolSafetyVerdict {
 export interface ToolSafetyClassifierOptions {
   /** LLM runtime used for ambiguous calls. When omitted, ambiguous calls fail closed. */
   readonly runtime?: MultiTurnLlmRuntime;
+  /**
+   * Classifier-specific model override. When omitted or blank, the classifier
+   * uses {@link DEFAULT_CLASSIFIER_MODEL} (deepseek-v4-flash) rather than the
+   * runtime's constructed model.
+   */
+  readonly model?: string;
   /** Repository/workspace root used for path checks. Defaults to process.cwd(). */
   readonly workspaceRoot?: string;
   /**
@@ -1794,6 +1818,7 @@ async function llmClassification(
   runtime: MultiTurnLlmRuntime,
   prompt: ResolvedToolSafetyPrompt,
   logger: NonNullable<ToolSafetyClassifierOptions["logger"]>,
+  model: string,
 ): Promise<ToolSafetyClassification> {
   const template = readClassifierPromptTemplate(prompt, logger);
   if (template === null) {
@@ -1809,7 +1834,7 @@ async function llmClassification(
 
     let response: CompatibleResponse;
     try {
-      response = await runtime.create({ input: prompt });
+      response = await runtime.create({ input: prompt, model });
     } catch (error) {
       if (error instanceof RunAbortError) throw error;
       lastFailure = error instanceof Error ? error.message : String(error);
@@ -1869,7 +1894,8 @@ export async function classifyToolCall(
   }
 
   const normalizedParameters = normalizeToolParameters(parameters);
-  const classification = await llmClassification(toolName, normalizedParameters, options.runtime, resolvedPrompt, logger);
+  const classifierModel = resolveClassifierModel(options.model);
+  const classification = await llmClassification(toolName, normalizedParameters, options.runtime, resolvedPrompt, logger, classifierModel);
   logDecision(toolName, classification, logger);
   return classification;
 }
