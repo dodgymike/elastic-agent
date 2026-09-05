@@ -297,7 +297,7 @@ try {
 if (toolSafetyConfig.allowAgentSourceModifications) {
     process.chdir(toolSafetyConfig.agentSourceDir);
 }
-// Task mode is handled inside main() after Spec Keeper defaults are resolved.
+// Task mode is handled inside runPromptOnce() after Spec Keeper defaults are resolved.
 // The run mode is resolved above so prompt-mode-only argument rules are
 // enforced before any runtime work starts.
 const commitInstruction = options.review ? "do not commit" : "commit all of your work";
@@ -307,7 +307,7 @@ const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelec
 // Wire an explicit --planner-model override to the provider whose catalog
 // advertises it (the selected provider first, then every built-in provider in
 // a stable sorted order). The resolved provider/model pair is handed to the
-// planner runtime in main(); when no override was supplied, the selected
+// planner runtime in runPromptOnce(); when no override was supplied, the selected
 // provider's default planner model and adapter are used unchanged.
 let plannerModelSelection: PlannerModelProviderSelection | undefined;
 try {
@@ -2667,7 +2667,12 @@ async function runSingleStep(
     }
 }
 
-async function main(options: { review?: boolean; agentBusLoop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
+/**
+ * Run a single prompt execution pass (plan, then execute) with the supplied
+ * parsed options. This reusable single-run unit is shared by the normal
+ * non-loop entrypoint and the repeating --loop entrypoint.
+ */
+async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
     // Re-resolve the concurrency bound from the options actually passed into
     // this run so programmatic callers and loop-mode re-entries share one
     // authoritative value (the CLI also validated it once at startup).
@@ -3188,7 +3193,7 @@ function cleanupExecutionWorktree(reportAbort = false) {
 // ---------------------------------------------------------------------------
 // Loop-mode replanning (step 5 of the loop-mode plan).
 //
-// When a relevant Agent Bus message interrupts execution, main() returns with
+// When a relevant Agent Bus message interrupts execution, runPromptOnce() returns with
 // `loopReplanPending: true` and the execution worktree intentionally preserved
 // (uncommitted). `gitStatusPorcelain(cwd)` and the safety predicates below let
 // the replan loop decide whether re-entering planning is safe, and
@@ -3196,7 +3201,7 @@ function cleanupExecutionWorktree(reportAbort = false) {
 // message as the new prompt, up to a bounded replan budget.
 //
 // The worktree lifecycle is coordinated safely across replans: the preserved
-// worktree is NOT cleaned up between replan iterations (main() returns with it
+// worktree is NOT cleaned up between replan iterations (runPromptOnce() returns with it
 // intact, and `ensureWorktree` reuses the same worktree for the new execution),
 // and cleanup runs only once the whole replan loop finishes (or aborts).
 // ---------------------------------------------------------------------------
@@ -3238,10 +3243,10 @@ function loopReplanSafetyChecks(): {
 }
 
 /**
- * Loop-mode replan controller. Runs main() once or more:
+ * Loop-mode replan controller. Runs runPromptOnce() once or more:
  *   - On the first iteration the CLI prompt is used.
  *   - If a run returns with `loopReplanPending: true`, the pending relevant bus
- *     message becomes the next work order and main() is re-entered (planning
+ *     message becomes the next work order and runPromptOnce() is re-entered (planning
  *     runs again with that message as the new prompt) — but only if the replan
  *     budget remains AND the repository is in a safe state to carry the new
  *     plan (the safety guard blocks replanning over dirty main-checkout work).
@@ -3253,7 +3258,7 @@ function loopReplanSafetyChecks(): {
 async function runAgentReplanLoop(options: { review?: boolean; agentBusLoop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean }> {
     // Only loop mode ever interrupts for a replan; without --agent-bus-loop we run once.
     if (!options.agentBusLoop) {
-        return main(options);
+        return runPromptOnce(options);
     }
 
     // Loop mode restart: read the durable Agent Bus queue persisted by a prior
@@ -3270,7 +3275,7 @@ async function runAgentReplanLoop(options: { review?: boolean; agentBusLoop?: bo
         // under the cleanup phase so a SIGINT mid-replan is handled as a
         // deliberate abort like any other cleanup-time interrupt.
         throwIfAborted(abortController.signal, "cleanup");
-        const outcome = await main(options);
+        const outcome = await runPromptOnce(options);
         const hasPending = outcome.loopReplanPending === true && pendingLoopReplanMessages.length > 0;
 
         if (!hasPending) {
