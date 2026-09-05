@@ -349,26 +349,29 @@ hint (a trailing system message).
 
 Per-prompt target order:
 
-| Prompt | Current (violations in **bold**) | Target |
+| Prompt | Current | Target |
 |---|---|---|
-| Planning-necessity | **memory prefix** → `planning-necessity.prompt` → user request | `planning-necessity.prompt` → user request → memory |
-| Opening planning | `CLAUDE.md` → history → current prompt → `planning-suffix.txt` | unchanged (memory moves from prefix to trailing via runtime) |
-| Review-plan | **memory prefix** → `reviewPlanGoal` → `planning-suffix.txt` | `reviewPlanGoal` → `planning-suffix.txt` → memory |
-| Step execution | `CLAUDE.md` → **`toolsAvailable`** → commit → plan → step → `execution-feedback-format.txt` → execution context | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context |
+| Planning-necessity | `planning-necessity.prompt` → user request → memory | `planning-necessity.prompt` → user request → memory |
+| Opening planning | `CLAUDE.md` → history → current prompt → `planning-suffix.txt` → memory | `CLAUDE.md` → history → current prompt → `planning-suffix.txt` → memory |
+| Review-plan | `reviewPlanGoal` → `planning-suffix.txt` → memory | `reviewPlanGoal` → `planning-suffix.txt` → memory |
+| Step execution | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context |
 | Replan | `CLAUDE.md` → completed work/feedback/findings/remaining steps | unchanged (already stable-first) |
 | Review | `CLAUDE.md` → original prompt/plan/executed steps/changes/learnings | unchanged (already stable-first) |
 | Direct (prompt mode) | `buildPrompt` (stable-first) → `toolsAvailable` → commit → start-dir warning | unchanged |
-| Direct (task mode) | **`SPEC KEEPER TASK MODE — WORK ORDER` + dynamic task id/title/status/epic first**; no `CLAUDE.md`; `toolsAvailable` not passed | `CLAUDE.md` → work-order sections → commit instruction → `toolsAvailable` |
+| Direct (task mode) | `CLAUDE.md` → work-order sections → commit instruction → `toolsAvailable` | `CLAUDE.md` → work-order sections → commit instruction → `toolsAvailable` |
 | Tool-use continuations | initial user message untouched; tool-result messages appended | unchanged |
 | DeepSeek JSON retry | trailing system message | unchanged |
 
-`buildTaskWorkOrderPrompt` must gain a leading stable section (the task-mode
-caller passes `claudeInstructions`) and keep the dynamic work-order header,
-commit instruction, and `toolsAvailable` after it. The multi-turn runtime's
-memory injection must be refactored from prepend to append: the
-`[SESSION MEMORY …]` block is emitted as a trailing section so it can never
-shift the stable prefix. With that change, changing memory, the tool list, or a
-tool-use response never alters the leading bytes of an initial request.
+No violations remain: every initial prompt is stable-first and the memory
+context is emitted as a trailing section.
+
+`buildTaskWorkOrderPrompt` now emits a leading stable section (the task-mode
+caller passes `claudeInstructions`) followed by the dynamic work-order header,
+commit instruction, and `toolsAvailable`. The multi-turn runtime's memory
+injection is a trailing append: the `[SESSION MEMORY …]` block is emitted as a
+trailing section so it can never shift the stable prefix. Changing memory, the
+tool list, or a tool-use response therefore never alters the leading bytes of
+an initial request.
 
 ## Editing prompts
 
