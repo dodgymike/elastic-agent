@@ -1,18 +1,7 @@
 {
   "/mnt/sdb4/mike/mike/source/elastic-agent": {
-    "projectSlug": "elastic-agent",
-    "credentialFile": ".spec-keeper/elastic-agent.json",
-    "apiBase": "https://api.spec.elasticninja.com",
-    "defaultEpic": {
-      "key": "elastic-agent-bootstrap",
-      "title": "Elastic Agent bootstrap",
-      "description": "Bootstrap work for the elastic-agent.",
-      "status": "in_progress"
-    },
-    "defaultTask": {
-      "epicKey": "elastic-agent-bootstrap",
-      "keyPrefix": "EA-",
-      "status": "in_progress"
-    }
+    "projectSlug": "agent-bus",
+    "credentialFile": ".spec-keeper/agent-bus.json",
+    "apiBase": "https://api.spec.elasticninja.com"
   }
 }
