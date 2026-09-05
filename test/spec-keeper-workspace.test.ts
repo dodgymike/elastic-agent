@@ -147,6 +147,30 @@ try {
     mixed.warnings.some((warning) => warning.includes("missing projectSlug or credentialFile")),
   );
 
+  // Two keys that canonicalize to the same start directory collapse to a
+  // single deterministic mapping (the later entry wins) rather than leaving an
+  // ambiguous duplicate in the registry.
+  writeConfig(
+    JSON.stringify({
+      [canonicalWorkspace]: {
+        projectSlug: "first",
+        credentialFile: ".spec-keeper/first.json",
+      },
+      [join(workspace, "child", "..")]: {
+        projectSlug: "second",
+        credentialFile: ".spec-keeper/second.json",
+      },
+    }),
+  );
+  const collapsed = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
+  assert.deepEqual(Object.keys(collapsed.registry), [canonicalWorkspace]);
+  assert.equal(collapsed.registry[canonicalWorkspace].projectSlug, "second");
+  assert.equal(
+    collapsed.registry[canonicalWorkspace].credentialFile,
+    ".spec-keeper/second.json",
+  );
+  assert.equal(resolveSpecKeeperWorkspace(workspace).config.projectSlug, "second");
+
   // Malformed JSON and non-object roots fail closed with a clear warning.
   writeConfig("{ not valid json");
   const malformed = loadSpecKeeperWorkspaceRegistry({ startDirectory: workspace });
