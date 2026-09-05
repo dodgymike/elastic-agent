@@ -13,6 +13,7 @@ import { buildToolCallDag, runScheduledToolCalls } from "./tool-call-scheduler.j
 import { translateCliArgs, resolveOutputGates } from "./output-verbosity.ts";
 import { defaultBusQueueFilePath, drainBusQueue } from "./loop-queue.js";
 import { classifyAgentBusMessage, messageToSearchableText } from "./loop-mode.js";
+import { runRepeatLoop } from "./loop-repeat.js";
 import {
     pollLoopBusOnce,
     pollLoopBusUntilMessage,
@@ -159,6 +160,7 @@ program
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
     .option("--agent-bus-loop", "keep running in Agent Bus loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
     .option("--respond-all", "loop-mode no-filter: treat every Agent Bus message as relevant so the agent responds to all of them instead of filtering irrelevant ones; only meaningful together with --agent-bus-loop", false)
+    .option("--loop", "repeat indefinitely: run the prompt, wait 60 seconds, then run it again until interrupted (Ctrl-C interrupts both the active run and the wait)", false)
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--planner-model <model-id>", "Optional planner model override; when omitted, uses the selected provider's default planner model")
     .option("--review", "Run the review stage after execution (default: false)", false)
@@ -3379,7 +3381,19 @@ async function runAgentReplanLoop(options: { review?: boolean; agentBusLoop?: bo
     }
 }
 
-runAgentReplanLoop(options)
+const entrypointOutcome = options.loop === true
+    ? runRepeatLoop({
+        signal: abortController.signal,
+        runOnce: () => runPromptOnce(options),
+        log: (level, message) => {
+            if (level === "error") status.error(message, hierarchyIndent("plan"));
+            else if (level === "warning") status.warning(message, hierarchyIndent("plan"));
+            else status.success(message, hierarchyIndent("plan"));
+        },
+    })
+    : runAgentReplanLoop(options);
+
+entrypointOutcome
     .then((outcome) => {
         cleanupExecutionWorktree();
         if (outcome && outcome.success === false) {
