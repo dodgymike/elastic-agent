@@ -1,7 +1,7 @@
 /**
  * Loop-mode classification rules.
  *
- * Loop mode (`--loop`) lets the runtime keep running while an Agent Bus feed is
+ * Loop mode (`--agent-bus-loop`) lets the runtime keep running while an Agent Bus feed is
  * watched between execution steps. Every bus message received at a step
  * boundary must be classified before the next step starts:
  *

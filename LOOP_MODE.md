@@ -1,4 +1,4 @@
-# Loop mode (`--loop`)
+# Loop mode (`--agent-bus-loop`)
 
 Loop mode lets the runtime keep running after it starts a plan and watch the
 Agent Bus between execution steps **and while idle between plans**. Incoming
@@ -23,7 +23,7 @@ connection to the bus. The only non-poll retrieval is the durable-queue drain
 on restart (below), which re-reads messages a *previous* run polled and
 persisted to `bus-queue.json` — it is not a live transport. Keeping delivery
 poll-only means each idle loop makes no outbound connection until the configured
-poll interval elapses, so an agent running `--loop` costs nothing between polls
+poll interval elapses, so an agent running `--agent-bus-loop` costs nothing between polls
 and always fails open when the bus is unreachable.
 
 This document describes the CLI surface, the classification rule, the durable
@@ -48,25 +48,25 @@ and may be combined with either base mode:
 
 ```sh
 # Prompt mode + loop
-elastic-agent --loop "implement the payment retry"
+elastic-agent --agent-bus-loop "implement the payment retry"
 
 # Task mode + loop
-elastic-agent --loop --task-id TASK-42
+elastic-agent --agent-bus-loop --task-id TASK-42
 
 # Loop mode with no-filter (respond to every bus message)
-elastic-agent --loop --respond-all "implement the payment retry"
+elastic-agent --agent-bus-loop --respond-all "implement the payment retry"
 ```
 
 Mode rules (see `cli-task-mode.ts`):
 
 - Prompt mode (positional `<prompt>`) and task mode (`--task-id <id>`) are
   mutually exclusive; at least one is required.
-- `--loop` never selects a mode by itself and may be combined with either one.
-- `--loop` is passed through to `resolveCliRunMode` and stored on the resolved
+- `--agent-bus-loop` never selects a mode by itself and may be combined with either one.
+- `--agent-bus-loop` is passed through to `resolveCliRunMode` and stored on the resolved
   run-mode object as `loop`.
 - `--respond-all` (loop-mode no-filter) makes every Agent Bus message RELEVANT
   so the agent responds to all of them instead of filtering irrelevant ones.
-  It is only meaningful together with `--loop`; it defaults to `false`
+  It is only meaningful together with `--agent-bus-loop`; it defaults to `false`
   (normal filtering behavior) when absent, and is carried on the resolved
   run-mode object as `respondAll` and threaded into the classification context
   (`context.respondAll`).
@@ -249,7 +249,7 @@ the Agent Bus via `pollLoopBusUntilMessage`:
   is exhausted (when set to a positive value), or the run is interrupted
   (Ctrl-C / SIGTERM routes through the normal abort handler).
 
-This is what makes `--loop` a true long-lived listener: it keeps watching the
+This is what makes `--agent-bus-loop` a true long-lived listener: it keeps watching the
 bus for new work after finishing a plan instead of stopping.
 
 ---

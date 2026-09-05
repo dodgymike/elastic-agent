@@ -1,7 +1,7 @@
 /**
  * loop-replan.ts — re-planning orchestration for loop-mode relevant messages.
  *
- * Loop mode (`--loop`, see cli-task-mode.ts and loop-mode.ts) watches the Agent
+ * Loop mode (`--agent-bus-loop`, see cli-task-mode.ts and loop-mode.ts) watches the Agent
  * Bus at execution-step boundaries. A *relevant* message (one that references
  * the current plan/task ID or carries a plan-change directive) must abort the
  * plan in flight and re-enter the planning phase with that message as the new

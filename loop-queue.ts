@@ -1,7 +1,7 @@
 /**
  * loop-queue.ts — Agent Bus queue persistence and restart draining.
  *
- * Loop mode (`--loop`) classifies every bus message received at a step
+ * Loop mode (`--agent-bus-loop`) classifies every bus message received at a step
  * boundary (see loop-mode.ts): a *relevant* message interrupts execution and
  * triggers a re-plan, while any other message is *queued* so it does not
  * disturb the plan in flight. This module owns the durable side of that queue:

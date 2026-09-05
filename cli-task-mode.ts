@@ -7,8 +7,8 @@
  *   2. task mode: `elastic-agent --task-id <task-id>` (claim and execute an
  *      existing Spec Keeper task).
  *
- * Loop mode (`--loop`) is a mode *modifier*, not a third exclusive mode: it
- * may be combined with either prompt mode or task mode. When `--loop` is set,
+ * Loop mode (`--agent-bus-loop`) is a mode *modifier*, not a third exclusive mode: it
+ * may be combined with either prompt mode or task mode. When `--agent-bus-loop` is set,
  * the runtime keeps running and watches the Agent Bus between execution steps
  * so incoming coordination messages can be classified and either handled
  * (relevant messages trigger a re-plan) or queued for later. See loop-mode.ts
@@ -16,7 +16,7 @@
  *
  * Mode rules:
  *   - prompt mode and task mode are mutually exclusive (at least one required).
- *   - --loop is additive: it may be combined with either mode and never selects
+ *   - --agent-bus-loop is additive: it may be combined with either mode and never selects
  *     a mode by itself.
  *
  * This module owns the argument classification, the task-ID well-formedness
@@ -32,11 +32,11 @@ export interface ResolvedCliRunMode {
   readonly taskId?: string;
   /** Original prompt text when mode is "prompt". */
   readonly prompt?: string;
-  /** Whether loop mode is enabled (--loop). Additive to either base mode. */
+  /** Whether loop mode is enabled (--agent-bus-loop). Additive to either base mode. */
   readonly loop: boolean;
   /**
    * Whether no-filter / respond-to-everything mode is enabled (--respond-all).
-   * Only meaningful together with --loop: every loop-mode bus message is then
+   * Only meaningful together with --agent-bus-loop: every loop-mode bus message is then
    * treated as RELEVANT so the agent responds to all of them instead of
    * filtering. Defaults to false (normal filtering behavior).
    */

@@ -1,4 +1,4 @@
-// Integration tests for loop mode (`--loop`): the end-to-end behavior that
+// Integration tests for loop mode (`--agent-bus-loop`): the end-to-end behavior that
 // combines the loop-mode classification rule (loop-mode.ts), the durable bus
 // queue (loop-queue.ts), and the re-planning decision (loop-replan.ts).
 //

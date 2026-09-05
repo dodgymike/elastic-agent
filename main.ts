@@ -157,8 +157,8 @@ program
     .description("Plan and execute a prompt with the selected LLM provider.")
     .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>")
-    .option("--loop", "keep running in loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
-    .option("--respond-all", "loop-mode no-filter: treat every Agent Bus message as relevant so the agent responds to all of them instead of filtering irrelevant ones; only meaningful together with --loop", false)
+    .option("--agent-bus-loop", "keep running in Agent Bus loop mode: watch the Agent Bus between execution steps and classify incoming messages (relevant messages trigger a re-plan; others are queued)", false)
+    .option("--respond-all", "loop-mode no-filter: treat every Agent Bus message as relevant so the agent responds to all of them instead of filtering irrelevant ones; only meaningful together with --agent-bus-loop", false)
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--planner-model <model-id>", "Optional planner model override; when omitted, uses the selected provider's default planner model")
     .option("--review", "Run the review stage after execution (default: false)", false)
@@ -263,7 +263,7 @@ try {
 let commandLinePrompt = program.args[0];
 let runMode: ReturnType<typeof resolveCliRunMode>;
 try {
-    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.loop === true, options.respondAll === true);
+    runMode = resolveCliRunMode(options.taskId, commandLinePrompt, options.agentBusLoop === true, options.respondAll === true);
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -565,7 +565,7 @@ const replanPromptTemplate = readFileSync("prompts/replan-prompt.txt", "utf-8");
 const reviewPromptTemplate = readFileSync("prompts/review-prompt.txt", "utf-8");
 
 // ---------------------------------------------------------------------------
-// Loop mode (`--loop`) between-step Agent Bus polling.
+// Loop mode (`--agent-bus-loop`) between-step Agent Bus polling.
 //
 // When loop mode is enabled the runtime keeps running and, at each execution
 // step boundary, polls the Agent Bus feed for new coordination messages. Every
@@ -673,7 +673,7 @@ function pendingLoopReplanText(): string {
  * return false so the step loop continues normally.
  */
 async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): Promise<boolean> {
-    if (!options.loop) return false;
+    if (!options.agentBusLoop) return false;
     const planId = runMode.mode === "task" ? runMode.taskId : undefined;
     const result = await pollLoopBusOnce({
         read: loopBusRead,
@@ -738,7 +738,7 @@ async function pollLoopBusBetweenSteps(reportPrefix = hierarchyIndent("plan")): 
  * `undefined`) exactly like an idle or unreachable bus.
  */
 async function pollAgentBus(): Promise<{ text?: string }[] | undefined> {
-    if (!options.loop) return undefined;
+    if (!options.agentBusLoop) return undefined;
 
     const planId = runMode.mode === "task" ? runMode.taskId : undefined;
     const result = await pollLoopBusOnce({
@@ -2667,7 +2667,7 @@ async function runSingleStep(
     }
 }
 
-async function main(options: { review?: boolean; loop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
+async function main(options: { review?: boolean; agentBusLoop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
     // Re-resolve the concurrency bound from the options actually passed into
     // this run so programmatic callers and loop-mode re-entries share one
     // authoritative value (the CLI also validated it once at startup).
@@ -3250,9 +3250,9 @@ function loopReplanSafetyChecks(): {
  * staged work is carried forward rather than lost; it is cleaned up only after
  * the loop finishes or when an abort/failure handler runs.
  */
-async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean }> {
-    // Only loop mode ever interrupts for a replan; without --loop we run once.
-    if (!options.loop) {
+async function runAgentReplanLoop(options: { review?: boolean; agentBusLoop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean }> {
+    // Only loop mode ever interrupts for a replan; without --agent-bus-loop we run once.
+    if (!options.agentBusLoop) {
         return main(options);
     }
 

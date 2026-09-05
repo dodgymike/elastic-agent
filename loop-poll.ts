@@ -1,7 +1,7 @@
 /**
  * loop-poll.ts — loop-mode Agent Bus polling between execution steps.
  *
- * Loop mode (`--loop`, see cli-task-mode.ts) keeps the runtime alive while an
+ * Loop mode (`--agent-bus-loop`, see cli-task-mode.ts) keeps the runtime alive while an
  * Agent Bus feed is watched at step boundaries. This module owns the *poll*
  * half of that supervision loop:
  *
