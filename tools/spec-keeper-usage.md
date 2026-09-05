@@ -5,8 +5,8 @@
 Query and update Spec Keeper goals, epics, tasks, decisions, plans, procedures,
 and task state. Use this tool for ALL planning and execution tasks; never for
 answering simple questions. The client authenticates with Cognito (username and
-password from the approved credential store) and mints short-lived access
-tokens.
+password from the workspace credential file or environment) and mints
+short-lived access tokens.
 
 ## When to use
 
@@ -25,13 +25,14 @@ procedures.
 - `method` (string): `GET` | `POST` | `PUT` | `PATCH` | `DELETE` (default `GET`).
 - `body` (any): JSON payload for `POST`, `PUT`, and `PATCH`.
 - `projectSlug` (string): project slug for resource routes. When omitted, it
-  resolves from `.spec-keeper`, `SPEC_KEEPER_PROJECT_SLUG`, the local
-  credential store, and the built-in fallback (see Configuration).
+  resolves from the `.spec-keeper/config` workspace mapping (see
+  Configuration).
 - `accessToken` / `refreshToken` / `username` / `password` / `clientId` /
   `region` / `apiBase` / `userAgent`: explicit overrides. When omitted,
-  values resolve per field from `.spec-keeper`, the matching
-  `SPEC_KEEPER_*` environment variables, the local credential store, and the
-  built-in fallbacks (see Configuration).
+  `apiBase` resolves from the `.spec-keeper/config` workspace mapping or the
+  built-in fallback, and credentials resolve from the matching
+  `SPEC_KEEPER_*` environment variables or the workspace credential file (see
+  Configuration).
 
 ## Result
 
@@ -42,63 +43,46 @@ procedures.
 
 ## Configuration
 
-Non-secret operational defaults load from the repository-local `.spec-keeper`
-file (strict JSON, safe to commit). Credentials are NEVER loaded from
-`.spec-keeper`; they come only from explicit arguments, `SPEC_KEEPER_*`
-environment variables, or the approved secret store.
+Non-secret routing metadata loads from `.spec-keeper/config`, a JSON object
+keyed by canonical absolute start directory. Each value carries the workspace
+`projectSlug`, `credentialFile` path, and optional `apiBase`. Credentials are
+NEVER loaded from `.spec-keeper/config`; they come only from explicit
+arguments, `SPEC_KEEPER_*` environment variables, or the referenced
+credential file (which must be owner-only, for example mode `0600`).
 
-Supported `.spec-keeper` fields:
-
-- `projectSlug` — project slug for resource routes (default `elastic-agent`).
-- `apiBase` — API origin (default `https://api.spec.elasticninja.com`).
-- `credentialStore` — path to the approved secret store (default
-  `.spec.local.json`).
-- `defaultEpic` — `{ key, title, description, status }` used by the epic-first
-  sync flow when it creates or matches an epic.
-- `defaultTask` — `{ key, epicKey, keyPrefix, title, description, status }`
-  used when the task flow creates or matches tasks.
-
-Example:
+Example `.spec-keeper/config`:
 
 ```json
 {
-  "projectSlug": "elastic-agent",
-  "apiBase": "https://api.spec.elasticninja.com",
-  "credentialStore": ".spec.local.json",
-  "defaultEpic": {
-    "key": "elastic-agent-bootstrap",
-    "title": "Elastic Agent bootstrap",
-    "status": "in_progress"
-  },
-  "defaultTask": {
-    "epicKey": "elastic-agent-bootstrap",
-    "keyPrefix": "EA-",
-    "status": "in_progress"
+  "/mnt/sdb4/mike/mike/source/elastic-agent": {
+    "projectSlug": "elastic-agent",
+    "credentialFile": ".spec-keeper/elastic-agent.json",
+    "apiBase": "https://api.spec.elasticninja.com"
   }
 }
 ```
 
-Set `SPEC_KEEPER_DEFAULTS_PATH` to read `.spec-keeper` from a different
-location (tooling/tests only). A missing `.spec-keeper` is fine: the loader
-falls back to lower layers and logs the config source.
+Lookup canonicalizes the process start directory (absolute-path resolution
+plus symlink resolution) before reading `.spec-keeper/config`. When no mapping
+exists for that directory, the tool fails closed with an actionable error
+that lists the configured workspaces. The referenced `credentialFile` is
+resolved relative to the canonical start directory and loaded only after the
+workspace mapping resolves; a missing, malformed, or group/world-readable
+credential file also fails closed.
 
 ### Precedence (resolved per field, highest first)
 
-Operational settings (`projectSlug`, `apiBase`, `userAgent`):
+Operational settings (`projectSlug`, `apiBase`):
 
 1. Explicit per-call arguments.
-2. `.spec-keeper` file.
-3. Environment (`SPEC_KEEPER_PROJECT_SLUG`, `SPEC_KEEPER_API_BASE`,
-   `SPEC_KEEPER_USER_AGENT`).
-4. Deprecated secret-store operational fallback (`Project`, `API base`).
-5. Built-in prompt fallback (`elastic-agent`,
-   `https://api.spec.elasticninja.com`, `elastic-agent-spec-keeper/1.1`).
+2. `.spec-keeper/config` workspace entry.
+3. Built-in fallback (`https://api.spec.elasticninja.com` for `apiBase`;
+   `projectSlug` is required in the workspace entry).
 
-Credential-store path (`credentialStore`):
+Credential-file path (`credentialFile`):
 
-1. `.spec-keeper` `credentialStore`.
-2. `SPEC_KEEPER_CONFIG_PATH`.
-3. Built-in `.spec.local.json`.
+1. `.spec-keeper/config` `credentialFile`, resolved relative to the canonical
+   workspace start directory.
 
 Credentials (`accessToken`, `refreshToken`, `username`, `password`,
 `clientId`, `region`):
@@ -107,7 +91,7 @@ Credentials (`accessToken`, `refreshToken`, `username`, `password`,
 2. `SPEC_KEEPER_ACCESS_TOKEN`, `SPEC_KEEPER_REFRESH_TOKEN`,
    `SPEC_KEEPER_USERNAME`, `SPEC_KEEPER_PASSWORD`, `SPEC_KEEPER_CLIENT_ID`,
    `SPEC_KEEPER_REGION`.
-3. The resolved secret store.
+3. The referenced workspace credential file.
 
 Credentials are NEVER stored in the repository. Do not copy credentials into
 CLAUDE.md, SPEC_KEEPER.md, `.spec-keeper`, task notes, or handoffs.
@@ -145,7 +129,8 @@ CLAUDE.md, SPEC_KEEPER.md, `.spec-keeper`, task notes, or handoffs.
 Use project-scoped resource paths (e.g., `/tasks`, `/epics`, `/decisions`,
 `/notes`). The tool automatically resolves these to
 `/api/v1/projects/elastic-agent/<resource>` using the project slug resolved
-from the config defaults and credentials from the secret store. Do NOT use
+from the `.spec-keeper/config` workspace mapping and credentials from the
+workspace credential file. Do NOT use
 obsolete root paths like `/goals` or
 `/task-queue` — use only supported project resources (`agents`, `epics`,
 `tasks`, `reservations`, `counters`, `locks`, `import`, `export`, `events`,
@@ -160,9 +145,14 @@ handoff, and resume server synchronization as soon as access is restored.
 
 ## Verification
 
-- `npm run test:spec-keeper-config` — config precedence, key normalization,
-  malformed/missing `.spec-keeper`, credential-store precedence, and
-  required-value errors.
+- `npm run test:spec-keeper-config` — legacy config precedence, key
+  normalization, malformed/missing `.spec-keeper`, credential-store
+  precedence, and required-value errors.
+- `npm run test:spec-keeper-workspace` — `.spec-keeper/config` registry
+  layout, canonical start-directory resolution, and missing-mapping errors.
+- `npm run test:spec-keeper-tool-lookup` — the SpecKeeper tool's
+  workspace-keyed lookup, credential-file loading, and fail-closed
+  missing/malformed/permission handling.
 - `npm run test:spec-keeper-routes` — project-resource route mapping and
   validation.
 - `npm run test:spec-keeper-epic-flow` and
@@ -227,7 +217,7 @@ text prefix is ever emitted for a tool call.
 - Planning and execution CRUD against supported project resources (`/tasks`,
   `/epics`, `/decisions`, `/notes`, etc.) or documented absolute
   `/api/v1/...` routes.
-- Resolving credentials from the approved secret store or environment.
+- Resolving credentials from the workspace credential file or environment.
 
 **Denied**
 - Answering simple questions with Spec Keeper.
@@ -243,8 +233,8 @@ text prefix is ever emitted for a tool call.
   verifying the target.
 
 **Required permissions**
-- Valid Cognito credentials from the approved store or a minted access token
-  for the resolved project slug.
+- Valid Cognito credentials from the workspace credential file or a minted
+  access token for the resolved project slug.
 
 ## Examples
 

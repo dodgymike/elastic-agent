@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolveSpecKeeperDefaults } from "../specKeeperConfig.js";
+import { readFileSync, statSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
+import { resolveSpecKeeperWorkspace } from "../specKeeperConfig.js";
 /**
  * Authenticated Spec Keeper client for goals, plans, decisions, and task state.
  *
@@ -14,7 +15,7 @@ export type SpecKeeperMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export interface SpecKeeperOptions {
   /** Supported project resource route (for example /tasks) or an absolute /api/v1 route. */
   path: string;
-  /** Project slug for resource routes. Defaults to SPEC_KEEPER_PROJECT_SLUG or enrolled configuration. */
+  /** Project slug for resource routes. Defaults to the `.spec-keeper/config` workspace mapping. */
   projectSlug?: string;
   /** HTTP method for the requested Spec Keeper endpoint. */
   method?: SpecKeeperMethod;
@@ -32,7 +33,7 @@ export interface SpecKeeperOptions {
   clientId?: string;
   /** Cognito region. Defaults to SPEC_KEEPER_REGION. */
   region?: string;
-  /** API origin. Defaults to SPEC_KEEPER_API_BASE or hosted Spec Keeper. */
+  /** API origin. Defaults to the `.spec-keeper/config` workspace mapping or hosted Spec Keeper. */
   apiBase?: string;
   /** Hosted API requires a non-default User-Agent header. */
   userAgent?: string;
@@ -49,6 +50,8 @@ interface SpecKeeperSecretConfig {
   projectSlug?: string;
   project_slug?: string;
 }
+
+const BUILTIN_API_BASE = "https://api.spec.elasticninja.com";
 
 /**
  * Normalize the local credential store's field names to the camelCase keys the
@@ -74,22 +77,61 @@ function normalizeSecretConfig(raw: Record<string, unknown>): SpecKeeperSecretCo
 }
 
 /**
- * Load the enrolled agent credentials from the local, permission-restricted
- * secret store. Explicit call options and environment variables always take
- * precedence, so deployments can continue to use their normal secret manager.
+ * Load the enrolled agent credentials from the workspace's credential file.
+ *
+ * The file is only loaded after the `.spec-keeper/config` workspace mapping
+ * resolves, and it must exist, parse as a JSON object, and be owner-only
+ * (no group/other read or write bits) so a missing, malformed, or overly
+ * permissive secret store fails closed before any request is sent. Explicit
+ * call options and environment variables still take precedence over the file
+ * contents.
  */
 function loadSecretConfig(filename: string): SpecKeeperSecretConfig {
+  let mode: number | undefined;
   try {
-    const value: unknown = JSON.parse(readFileSync(filename, "utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new Error("not an object");
-    }
-    return normalizeSecretConfig(value as Record<string, unknown>);
+    mode = statSync(filename).mode & 0o777;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(
+        `Spec Keeper credential file '${filename}' does not exist. Create it with SpecKeeperEnroll or migration after adding the workspace mapping to .spec-keeper/config.`,
+      );
+    }
+    throw new Error("Spec Keeper could not load its local credential store.", { cause: error });
+  }
+
+  if (process.platform !== "win32" && ((mode & 0o077) !== 0)) {
+    throw new Error(
+      `Spec Keeper credential file '${filename}' has overly permissive permissions (${mode.toString(8)}); it must not be readable or writable by group or others (for example 0600).`,
+    );
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(filename, "utf8"));
+  } catch (error) {
     // Do not expose a parsing error or file contents: this is a secret store.
     throw new Error("Spec Keeper could not load its local credential store.", { cause: error });
   }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Spec Keeper could not load its local credential store.", {
+      cause: new Error("not an object"),
+    });
+  }
+  return normalizeSecretConfig(raw as Record<string, unknown>);
+}
+
+/** Resolve a workspace `credentialFile` to an absolute path relative to the canonical start directory. */
+function resolveCredentialFile(startDirectory: string, credentialFile: string): string {
+  return isAbsolute(credentialFile) ? credentialFile : resolve(startDirectory, credentialFile);
+}
+
+/** Resolve the API base from explicit options, the workspace mapping, then the built-in default. */
+function resolveApiBase(explicit: string | undefined, configured: string | undefined): string {
+  const value = (explicit?.trim() || configured?.trim() || BUILTIN_API_BASE).replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(value)) {
+    throw new Error("Spec Keeper apiBase must start with http:// or https://.");
+  }
+  return value;
 }
 
 export interface SpecKeeperResult {
@@ -145,7 +187,7 @@ export function resolveSpecKeeperPath(path: string, projectSlug?: string): strin
   }
   if (!projectSlug || !PROJECT_SLUG_PATTERN.test(projectSlug)) {
     throw new Error(
-      "A URL-safe Spec Keeper projectSlug is required for project resource routes. Configure it in .spec-keeper (projectSlug), SPEC_KEEPER_PROJECT_SLUG, or restore the built-in default 'elastic-agent'.",
+      "A URL-safe Spec Keeper projectSlug is required for project resource routes. Configure it in .spec-keeper/config (projectSlug) for this workspace, or pass projectSlug explicitly.",
     );
   }
   return `/api/v1/projects/${projectSlug}${route}${query ? `?${query}` : ""}`;
@@ -264,7 +306,7 @@ async function getAccessToken(
  * compatible with evolving Spec Keeper project schemas.
  */
 export default async function specKeeper(options: SpecKeeperOptions): Promise<SpecKeeperResult> {
-  const defaults = resolveSpecKeeperDefaults(options);
+  const workspace = resolveSpecKeeperWorkspace();
   const {
     path,
     method = "GET",
@@ -277,10 +319,11 @@ export default async function specKeeper(options: SpecKeeperOptions): Promise<Sp
     throw new Error("Spec Keeper requires a non-empty User-Agent header.");
   }
 
-  const projectSlug = validateProjectSlug(defaults.projectSlug);
+  const projectSlug = validateProjectSlug(options.projectSlug ?? workspace.config.projectSlug);
   const requestPath = resolveSpecKeeperPath(path, projectSlug);
-  const configuredApiBase = defaults.apiBase;
-  const secretConfig = loadSecretConfig(defaults.credentialStore);
+  const configuredApiBase = resolveApiBase(options.apiBase, workspace.config.apiBase);
+  const credentialFile = resolveCredentialFile(workspace.startDirectory, workspace.config.credentialFile);
+  const secretConfig = loadSecretConfig(credentialFile);
   const accessToken = await getAccessToken(options, secretConfig, userAgent);
   const headers: Record<string, string> = {
     Accept: "application/json",
