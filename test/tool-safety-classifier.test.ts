@@ -6,9 +6,11 @@ import {
   classifyToolCall,
   classifyToolCallStatically,
   createToolSafetyLogger,
+  DEFAULT_CLASSIFIER_MODEL,
   isDockerFromEnvironment,
   normalizeToolParameters,
   parseToolSafetyClassification,
+  resolveClassifierModel,
   resolveToolSafetyPrompt,
   resolveToolSafetyPromptVariant,
   toolRiskLevel,
@@ -126,6 +128,22 @@ function mockRuntime(handler: (input: string) => Promise<string>): MultiTurnLlmR
       return responseWithText(await handler(request.input));
     },
   } as unknown as MultiTurnLlmRuntime;
+}
+
+function capturingRuntime(): {
+  readonly runtime: MultiTurnLlmRuntime;
+  readonly requests: Array<{ readonly input: string; readonly model?: string }>;
+} {
+  const requests: Array<{ input: string; model?: string }> = [];
+  return {
+    requests,
+    runtime: {
+      async create(request: { input: string; model?: string }) {
+        requests.push({ input: request.input, model: request.model });
+        return responseWithText('{"safe":true,"reason":"benign"}');
+      },
+    } as unknown as MultiTurnLlmRuntime,
+  };
 }
 
 /** Historical denial fixture record shape exported by the step 2-3 extraction. */
@@ -2104,6 +2122,86 @@ async function main(): Promise<void> {
       "classifier fails closed when the prompt file cannot be read",
       missingPrompt.safe === false && missingPrompt.source === "fallback",
     );
+
+    // ------------------------------------------------------------------
+    // 8b. Classifier model selection: the tool-safety LLM classifier uses
+    //     its dedicated deepseek-v4-flash default when no explicit model is
+    //     supplied, honors an explicit per-request model override (the CLI
+    //     --classifier-model flag), and never lets DEEPSEEK_MODEL (the main
+    //     runtime model selector) leak into the classifier default.
+    // ------------------------------------------------------------------
+    check(
+      "classifier default model constant is deepseek-v4-flash",
+      DEFAULT_CLASSIFIER_MODEL === "deepseek-v4-flash",
+    );
+    check(
+      "classifier model resolver defaults to deepseek-v4-flash without an override",
+      resolveClassifierModel() === "deepseek-v4-flash"
+        && resolveClassifierModel(undefined) === "deepseek-v4-flash"
+        && resolveClassifierModel("") === "deepseek-v4-flash"
+        && resolveClassifierModel("   ") === "deepseek-v4-flash",
+    );
+    check(
+      "classifier model resolver honors an explicit override and trims it",
+      resolveClassifierModel("deepseek-v4-pro") === "deepseek-v4-pro"
+        && resolveClassifierModel("  deepseek-v4-ultra  ") === "deepseek-v4-ultra",
+    );
+
+    const defaultModelCapture = capturingRuntime();
+    const defaultModelVerdict = await classifyToolCall("ExecuteCommand", ambiguousCommand, {
+      runtime: defaultModelCapture.runtime,
+      workspaceRoot: WORKSPACE,
+      promptPath: tempPrompt,
+      logger: silentLogger,
+    });
+    check(
+      "classifier without an explicit model sends deepseek-v4-flash as the per-request model",
+      defaultModelVerdict.safe === true
+        && defaultModelVerdict.source === "llm"
+        && defaultModelCapture.requests.length === 1
+        && defaultModelCapture.requests[0].model === "deepseek-v4-flash",
+    );
+
+    const overrideModelCapture = capturingRuntime();
+    const overrideModelVerdict = await classifyToolCall("ExecuteCommand", ambiguousCommand, {
+      runtime: overrideModelCapture.runtime,
+      model: "deepseek-v4-pro",
+      workspaceRoot: WORKSPACE,
+      promptPath: tempPrompt,
+      logger: silentLogger,
+    });
+    check(
+      "classifier with an explicit model override sends that model",
+      overrideModelVerdict.safe === true
+        && overrideModelVerdict.source === "llm"
+        && overrideModelCapture.requests.length === 1
+        && overrideModelCapture.requests[0].model === "deepseek-v4-pro",
+    );
+
+    const previousDeepseekModel = process.env.DEEPSEEK_MODEL;
+    process.env.DEEPSEEK_MODEL = "deepseek-v4-ultra";
+    try {
+      const envModelCapture = capturingRuntime();
+      const envModelVerdict = await classifyToolCall("ExecuteCommand", ambiguousCommand, {
+        runtime: envModelCapture.runtime,
+        workspaceRoot: WORKSPACE,
+        promptPath: tempPrompt,
+        logger: silentLogger,
+      });
+      check(
+        "DEEPSEEK_MODEL does not override the classifier default",
+        envModelVerdict.safe === true
+          && envModelVerdict.source === "llm"
+          && envModelCapture.requests.length === 1
+          && envModelCapture.requests[0].model === "deepseek-v4-flash",
+      );
+    } finally {
+      if (previousDeepseekModel === undefined) {
+        delete process.env.DEEPSEEK_MODEL;
+      } else {
+        process.env.DEEPSEEK_MODEL = previousDeepseekModel;
+      }
+    }
 
     // ------------------------------------------------------------------
     // 9. Regression tests from the historical denial fixture

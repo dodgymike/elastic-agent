@@ -18,7 +18,7 @@ import {
   });
   assert.deepEqual(resolveModelConfiguration("deepseek-v4"), {
     provider: "deepseek-v4",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     environmentVariable: "DEEPSEEK_MODEL",
   });
 
