@@ -308,6 +308,68 @@ the response is the plain-text summary that replaces the memory. Tests in
 `test/memory-compaction-prompt.test.ts` assert the placeholder and compression
 contract.
 
+## Prompt-cache ordering (canonical)
+
+LLM providers with prompt caching (OpenAI `cached_tokens`, DeepSeek
+`prompt_cache_hit_tokens`) match cache entries by **leading prefix**. A change
+to the first bytes of an initial request invalidates the entire cache for that
+request, so every initial (non-continuation) prompt MUST begin with a stable
+prefix and keep all dynamic content after it.
+
+The canonical order is:
+
+1. **Stable role/rules/system instructions first.** For every prompt that
+   carries `CLAUDE.md` this is `${claudeInstructions}`. For prompts that do not
+   carry it, the prompt's own static instructional body is the stable prefix
+   (`planning-necessity.prompt` for the classifier, the `reviewPlanGoal` string
+   for the review-plan prompt).
+2. **Static long-lived context second.** Stable prompt files/prose that are not
+   deployment-specific, placed before dynamic sections when they currently
+   interleave. Concretely, `execution-feedback-format.txt` moves to immediately
+   after `${claudeInstructions}` in `step-execution-prompt.txt`.
+3. **Dynamic memory, tool lists, conversation history, and tool-use responses
+   last**, in this relative order:
+   a. tool list (`toolsAvailable`);
+   b. conversation/history recap (`${promptHistory}`, `${toolHistory}`);
+   c. run/step-specific values (current prompt/work order, plan, step index and
+      text, commit instruction, execution context, completed work, feedback,
+      tool findings, remaining steps, original prompt, changes, review plan,
+      learnings, review attempt);
+   d. memory context (`[SESSION MEMORY …]` block) — appended as a **trailing**
+      section by `llm/multi-turn-runtime.ts`, never prepended;
+   e. tool-use responses — conversation continuations appended after the initial
+      user message (the runtime already appends these; the initial user message
+      stays untouched).
+
+**Hard invariant (P0):** no dynamic text may appear before the stable prefix.
+Trailing, cache-friendly additions that already satisfy the invariant are left
+where they are: `planning-suffix.txt`, `self-modification-section.txt` (flag
+gated), `startDirWarning`, retry/parse-error hints, and the DeepSeek JSON retry
+hint (a trailing system message).
+
+Per-prompt target order:
+
+| Prompt | Current (violations in **bold**) | Target |
+|---|---|---|
+| Planning-necessity | **memory prefix** → `planning-necessity.prompt` → user request | `planning-necessity.prompt` → user request → memory |
+| Opening planning | `CLAUDE.md` → history → current prompt → `planning-suffix.txt` | unchanged (memory moves from prefix to trailing via runtime) |
+| Review-plan | **memory prefix** → `reviewPlanGoal` → `planning-suffix.txt` | `reviewPlanGoal` → `planning-suffix.txt` → memory |
+| Step execution | `CLAUDE.md` → **`toolsAvailable`** → commit → plan → step → `execution-feedback-format.txt` → execution context | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context |
+| Replan | `CLAUDE.md` → completed work/feedback/findings/remaining steps | unchanged (already stable-first) |
+| Review | `CLAUDE.md` → original prompt/plan/executed steps/changes/learnings | unchanged (already stable-first) |
+| Direct (prompt mode) | `buildPrompt` (stable-first) → `toolsAvailable` → commit → start-dir warning | unchanged |
+| Direct (task mode) | **`SPEC KEEPER TASK MODE — WORK ORDER` + dynamic task id/title/status/epic first**; no `CLAUDE.md`; `toolsAvailable` not passed | `CLAUDE.md` → work-order sections → commit instruction → `toolsAvailable` |
+| Tool-use continuations | initial user message untouched; tool-result messages appended | unchanged |
+| DeepSeek JSON retry | trailing system message | unchanged |
+
+`buildTaskWorkOrderPrompt` must gain a leading stable section (the task-mode
+caller passes `claudeInstructions`) and keep the dynamic work-order header,
+commit instruction, and `toolsAvailable` after it. The multi-turn runtime's
+memory injection must be refactored from prepend to append: the
+`[SESSION MEMORY …]` block is emitted as a trailing section so it can never
+shift the stable prefix. With that change, changing memory, the tool list, or a
+tool-use response never alters the leading bytes of an initial request.
+
 ## Editing prompts
 
 - Edit the file under `/elastic-agent/prompts/` directly; the runtime loads it
