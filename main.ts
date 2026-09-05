@@ -1111,11 +1111,17 @@ const tools = [
     {
         type: "function", name: "SpecKeeperEnroll",
         usage_prompt: "tools/spec-keeper-enroll-usage.md",
-        description: "Redeem a one-time Spec Keeper enrollment token and return its enrollment recipe. The recipe contains secrets and must not be written to the repository.",
+        description: "Redeem a one-time Spec Keeper enrollment token, persist the returned credentials into .spec-keeper/<project-slug>.json with owner-only permissions, and record the workspace mapping in .spec-keeper/config.",
         parameters: {
-            type: "object", properties: { token: { type: "string", description: "Token from the #token= fragment of a Spec Keeper enrollment URL." } }, required: ["token"],
+            type: "object",
+            properties: {
+                token: { type: "string", description: "Token from the #token= fragment of a Spec Keeper enrollment URL." },
+                projectSlug: { type: "string", description: "Project slug for the .spec-keeper/config entry and credential filename; defaults to the enrollment recipe's project_slug." },
+                startDirectory: { type: "string", description: "Workspace start directory to key and write under; defaults to the process working directory." },
+            },
+            required: ["token"],
         },
-        exec_handler: ({ token }) => SpecKeeperEnroll({ token }),
+        exec_handler: (options) => SpecKeeperEnroll(options),
     },
 ];
 

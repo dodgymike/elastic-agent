@@ -1431,7 +1431,7 @@ function worktreePathViolation(
 
 function classifyIntegrationTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
   if (toolName === "SpecKeeperEnroll") {
-    return safe("SpecKeeperEnroll redeems a one-time enrollment token for its intended purpose.");
+    return classifySpecKeeperEnroll(parameters, roots);
   }
   if (toolName === "AgentBus") {
     return classifyAgentBus(parameters, roots);
@@ -1585,6 +1585,45 @@ function classifyAgentBusEnrol(parameters: Record<string, unknown>, roots: reado
     }
   }
   return safe("AgentBusEnrol redeems an in-workspace agent-bus invite for its intended purpose.");
+}
+
+/**
+ * Static classification for `SpecKeeperEnroll`. The tool redeems a one-time
+ * enrollment token and now persists the returned credentials into
+ * `.spec-keeper/<project-slug>.json` plus a non-secret `.spec-keeper/config`
+ * entry beneath the caller's workspace start directory. The token itself is
+ * never inspected or echoed; the start directory is validated like an
+ * in-workspace path so a hostile call cannot direct the credential write
+ * outside the trusted roots, and the project slug must stay URL-safe so it can
+ * never become a path-traversal filename.
+ */
+function classifySpecKeeperEnroll(parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
+  const projectSlug = stringValue(parameters.projectSlug);
+  if (projectSlug !== null && projectSlug.trim() !== "") {
+    if (/[\r\n\0]/.test(projectSlug)) {
+      return unsafe("SpecKeeperEnroll projectSlug must not contain control characters.");
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(projectSlug.trim())) {
+      return unsafe("SpecKeeperEnroll projectSlug must be a URL-safe project slug.");
+    }
+  }
+
+  const startDirectory = stringValue(parameters.startDirectory);
+  if (startDirectory !== null && startDirectory.trim() !== "") {
+    if (/[\r\n\0]/.test(startDirectory)) {
+      return unsafe("SpecKeeperEnroll startDirectory must not contain control characters.");
+    }
+    const flagged = secretTextReason(startDirectory);
+    if (flagged) return unsafe(`SpecKeeperEnroll startDirectory is unsafe: ${flagged}`);
+    if (hasPathTraversal(startDirectory)) {
+      return unsafe(`SpecKeeperEnroll startDirectory '${startDirectory}' contains '..' path traversal.`);
+    }
+    if (resolvesOutsideAllTrustedRoots(startDirectory, roots)) {
+      return unsafe(`SpecKeeperEnroll startDirectory '${startDirectory}' resolves outside the workspace.`);
+    }
+  }
+
+  return safe("SpecKeeperEnroll redeems a one-time enrollment token and persists the workspace credential store.");
 }
 
 /**
