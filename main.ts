@@ -2,6 +2,7 @@ import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/applicati
 import { resolveHighestModelConfiguration } from "./llm/model-defaults.js";
 import { selectCliProvider } from "./llm/cli-provider-selection.js";
 import { resolveCliRunMode } from "./cli-task-mode.js";
+import { resolveMaxToolCallParallelism } from "./tool-call-parallelism.js";
 import { translateCliArgs, resolveOutputGates } from "./output-verbosity.ts";
 import { defaultBusQueueFilePath, drainBusQueue } from "./loop-queue.js";
 import { classifyAgentBusMessage, messageToSearchableText } from "./loop-mode.js";
@@ -162,6 +163,7 @@ program
     .option("--very-quiet", "Suppress all standard output on success; only a catastrophic/fatal error may print (overrides --quiet)", false)
     .option("--log-prompts", "Write every LLM prompt (including any session-memory context) to prompt.log in the working directory (or PROMPT_LOG_PATH)", false)
     .option("--session-id <session-id>", "Explicit session id for this run's remembered LLM context and end-of-plan persistence; defaults to a per-run run-<uuid>")
+    .option("--max-tool-call-parallelism <n>", "Maximum number of tool calls to run concurrently within one model response (1-16; default: 4)")
     .addHelpText("after", `
 Prompt logging:
   --log-prompts    append every LLM prompt to prompt.log in the working directory
@@ -192,6 +194,15 @@ Selected-provider configuration:
   deepseek-v4     DEEPSEEK_API_KEY [DEEPSEEK_MODEL]
 
 Credentials must be supplied through the runtime environment or secret manager, never command-line arguments or source control.
+`)
+    .addHelpText("after", `
+Tool-call scheduling:
+  --max-tool-call-parallelism <n>  run up to n independent tool calls from a
+                   single model response concurrently (default: 4). Minimum 1
+                   reproduces the historical fully-sequential dispatch. The
+                   dependency-aware scheduler (TOOL_CALL_SCHEDULING.md) keeps
+                   dependent/conflicting calls ordered and only parallelizes
+                   calls proven independent. Values outside 1-16 are rejected.
 `);
 // Output-verbosity flags are the single source of truth for quiet/very-quiet
 // filtering, resolved here and used by every print site. The pure policy lives
@@ -206,6 +217,17 @@ const {
     stepVerbose,
     fatalVerbose,
 } = resolveOutputGates(options);
+// Tool-call parallelism is resolved and validated before any runtime work
+// starts so an invalid --max-tool-call-parallelism produces a clear CLI error
+// instead of a mid-run failure. The resolved value is carried on runtimeConfig
+// for the dependency-aware tool-dispatch scheduler (see TOOL_CALL_SCHEDULING.md).
+let maxToolCallParallelism: number = resolveMaxToolCallParallelism(undefined);
+try {
+    maxToolCallParallelism = resolveMaxToolCallParallelism(options.maxToolCallParallelism);
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
 // The prompt is mutable so loop mode can re-enter planning with a relevant
 // Agent Bus message as the new work order (see runAgentReplanLoop / step 5 of
 // the loop-mode plan). The first execution uses the CLI positional prompt.
@@ -472,7 +494,7 @@ const agentSourceRoot = findAgentSourceRoot(
 // protected). The result is exposed as runtimeConfig.isDocker for the steps
 // that follow, and the evidence that produced it is logged immediately.
 const dockerDetection = detectDocker();
-const runtimeConfig = { isDocker: dockerDetection.isDocker };
+const runtimeConfig = { isDocker: dockerDetection.isDocker, maxToolCallParallelism };
 // Startup diagnostic (its evidence feeds the classifier later); it is
 // non-essential so quiet/very-quiet suppress it.
 if (outputVerbose) console.log(`[DOCKER] ${describeDockerDetection(dockerDetection)}`);
@@ -2504,7 +2526,11 @@ async function runSingleStep(
     }
 }
 
-async function main(options: { review?: boolean; loop?: boolean; logPrompts?: boolean } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
+async function main(options: { review?: boolean; loop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
+    // Re-resolve the concurrency bound from the options actually passed into
+    // this run so programmatic callers and loop-mode re-entries share one
+    // authoritative value (the CLI also validated it once at startup).
+    runtimeConfig.maxToolCallParallelism = resolveMaxToolCallParallelism(options.maxToolCallParallelism);
     client = new MultiTurnLlmRuntime(
         await createRuntimeLlmAdapter({ configuration: providerSelection.configuration }),
         modelConfiguration.model,
@@ -3074,7 +3100,7 @@ function loopReplanSafetyChecks(): {
  * staged work is carried forward rather than lost; it is cleaned up only after
  * the loop finishes or when an abort/failure handler runs.
  */
-async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean; logPrompts?: boolean } = {}): Promise<{ success: boolean }> {
+async function runAgentReplanLoop(options: { review?: boolean; loop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean }> {
     // Only loop mode ever interrupts for a replan; without --loop we run once.
     if (!options.loop) {
         return main(options);

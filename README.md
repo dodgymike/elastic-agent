@@ -430,6 +430,18 @@ The integration is **optional and fail-safe**: if memory is disabled, the
 summarizer/delegate throws, or `remember()`/`getContext()` fails, the LLM
 prompts and the plan loop proceed unchanged with a single non-fatal warning.
 
+## Tool-call scheduling option
+
+`--max-tool-call-parallelism <n>` controls the maximum number of tool calls
+from a single model response that the dependency-aware scheduler may run
+concurrently. The scheduling rules are specified in `TOOL_CALL_SCHEDULING.md`.
+
+- Default `4`.
+- Minimum `1` — reproduces the historical fully-sequential dispatch exactly.
+- Maximum `16` — values outside `1`–`16` fail fast with a usage error.
+- Results are always returned to the model in the original tool-call order,
+  never in completion order.
+
 ## Memory compaction (`memory/memoryCompaction.ts`)
 
 As a run progresses, a session's per-session summary (the string
