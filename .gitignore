@@ -6,6 +6,9 @@ tmp/elastic-identity/
 spec-keeper-enrolment.json
 # Local Spec Keeper credential store; keep outside the repository.
 .spec.local.json
+# Per-workspace Spec Keeper credential files; keep outside the repository.
+# The non-secret `.spec-keeper/config` workspace registry may remain visible.
+.spec-keeper/*.json
 
 # Local Agent Bus identity store / roster metadata; keep outside the repository.
 .agent-bus.local
