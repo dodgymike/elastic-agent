@@ -1,18 +1,12 @@
-import {
-  chmodSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-  type Stats,
-} from "node:fs";
 import { join } from "node:path";
 import {
   canonicalizeSpecKeeperStartDirectory,
+  ensureSpecKeeperWorkspaceDir,
   specKeeperWorkspaceConfigPath,
   SPEC_KEEPER_WORKSPACE_DIR,
+  upsertSpecKeeperWorkspaceConfig,
+  writeSpecKeeperCredentialFile,
   type SpecKeeperWorkspaceConfig,
-  type SpecKeeperWorkspaceRegistry,
 } from "../specKeeperConfig.js";
 
 /**
@@ -72,7 +66,6 @@ export interface SpecKeeperEnrollmentResult extends SpecKeeperEnrollment {
 const REDEEM_ENDPOINT =
   "https://api.spec.elasticninja.com/api/v1/agent-enrollments/redeem";
 const PROJECT_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const CREDENTIAL_FILE_MODE = 0o600;
 const MAX_ERROR_DIAGNOSTIC_LENGTH = 512;
 const SENSITIVE_KEY_PATTERN =
   /(?:authorization|token|password|secret|credential|api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token)/i;
@@ -214,111 +207,6 @@ function buildCredentialRecord(
 }
 
 /**
- * Ensure `.spec-keeper` exists as a directory. A legacy `.spec-keeper` file
- * blocks the new layout and must be migrated (not silently deleted) first.
- */
-function ensureWorkspaceDir(specDir: string): void {
-  let existing: Stats | undefined;
-  try {
-    existing = statSync(specDir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new Error(`Spec Keeper enrollment could not inspect '${specDir}'.`, {
-        cause: error,
-      });
-    }
-  }
-
-  if (existing) {
-    if (!existing.isDirectory()) {
-      throw new Error(
-        `Spec Keeper enrollment cannot write under '${specDir}' because a file already exists there. Migrate the legacy .spec-keeper file first (or move it aside).`,
-      );
-    }
-    return;
-  }
-
-  try {
-    mkdirSync(specDir, { recursive: true, mode: 0o700 });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EEXIST") {
-      let rechecked: Stats | undefined;
-      try {
-        rechecked = statSync(specDir);
-      } catch {
-        rechecked = undefined;
-      }
-      if (rechecked?.isDirectory()) return;
-      throw new Error(
-        `Spec Keeper enrollment cannot write under '${specDir}' because a file already exists there. Migrate the legacy .spec-keeper file first (or move it aside).`,
-      );
-    }
-    throw new Error(`Spec Keeper enrollment could not create '${specDir}'.`, {
-      cause: error,
-    });
-  }
-}
-
-/** Write the credential file and enforce owner-only permissions on POSIX. */
-function writeCredentialFile(
-  credentialFile: string,
-  record: Record<string, unknown>,
-): void {
-  writeFileSync(credentialFile, `${JSON.stringify(record, null, 2)}\n`, {
-    mode: CREDENTIAL_FILE_MODE,
-  });
-  if (process.platform !== "win32") {
-    chmodSync(credentialFile, CREDENTIAL_FILE_MODE);
-  }
-}
-
-/**
- * Upsert the workspace entry into `.spec-keeper/config`. Existing entries are
- * preserved; a missing file is created, while a malformed or non-object file
- * is refused rather than overwritten.
- */
-function upsertWorkspaceConfig(
-  configPath: string,
-  canonicalStart: string,
-  entry: SpecKeeperWorkspaceConfig,
-): void {
-  let registry: SpecKeeperWorkspaceRegistry = {};
-  let existing = "";
-  try {
-    existing = readFileSync(configPath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new Error(`Spec Keeper enrollment could not read '${configPath}'.`, {
-        cause: error,
-      });
-    }
-  }
-
-  if (existing.trim()) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(existing);
-    } catch {
-      throw new Error(
-        `Spec Keeper enrollment refuses to overwrite malformed '${configPath}'. Fix or remove it before enrolling.`,
-      );
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error(
-        `Spec Keeper enrollment refuses to overwrite invalid '${configPath}'; the top-level value must be a JSON object.`,
-      );
-    }
-    registry = parsed as SpecKeeperWorkspaceRegistry;
-  }
-
-  registry[canonicalStart] = entry;
-  writeFileSync(configPath, `${JSON.stringify(registry, null, 2)}\n`, {
-    mode: 0o644,
-  });
-}
-
-/**
  * Redeem an enrollment token and persist the returned recipe in the workspace
  * credential layout. Credentials are written only to the owner-only
  * `.spec-keeper/<project-slug>.json` file; the single-use token and returned
@@ -375,10 +263,10 @@ export default async function specKeeperEnroll(
   const apiBase = resolveApiBase(enrollment.api_base);
 
   const specDir = join(canonicalStart, SPEC_KEEPER_WORKSPACE_DIR);
-  ensureWorkspaceDir(specDir);
+  ensureSpecKeeperWorkspaceDir(specDir);
   const credentialFileRelative = join(SPEC_KEEPER_WORKSPACE_DIR, `${projectSlug}.json`);
   const credentialFile = join(canonicalStart, credentialFileRelative);
-  writeCredentialFile(
+  writeSpecKeeperCredentialFile(
     credentialFile,
     buildCredentialRecord(enrollment, apiBase, projectSlug),
   );
@@ -389,7 +277,7 @@ export default async function specKeeperEnroll(
     credentialFile: credentialFileRelative,
   };
   if (apiBase) entry.apiBase = apiBase;
-  upsertWorkspaceConfig(configPath, canonicalStart, entry);
+  upsertSpecKeeperWorkspaceConfig(configPath, canonicalStart, entry);
 
   return {
     username: enrollment.username,

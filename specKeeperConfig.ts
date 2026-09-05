@@ -1,4 +1,12 @@
-import { readFileSync, realpathSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+  type Stats,
+} from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 /**
@@ -229,7 +237,10 @@ export function loadSpecKeeperDefaultsFile(options?: {
   try {
     raw = JSON.parse(readFileSync(filename, "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    const code = (error as NodeJS.ErrnoException).code;
+    // After migration `.spec-keeper` is a directory, not the legacy file. Treat
+    // it as "missing" so startup does not report a spurious read error.
+    if (code === "ENOENT" || code === "EISDIR") {
       return { config: {}, source: "missing", warnings: [] };
     }
     const reason =
@@ -465,6 +476,10 @@ export interface SpecKeeperWorkspaceConfig {
   credentialFile: string;
   /** Optional API origin override for this workspace. */
   apiBase?: string;
+  /** Optional epic defaults carried over from the legacy `.spec-keeper` file. */
+  defaultEpic?: SpecKeeperEpicDefaults;
+  /** Optional task defaults carried over from the legacy `.spec-keeper` file. */
+  defaultTask?: SpecKeeperTaskDefaults;
 }
 
 /** `.spec-keeper/config` keyed by canonical absolute start directory. */
@@ -538,6 +553,57 @@ function readWorkspaceField(
   return undefined;
 }
 
+/** Read a nested object field from a workspace entry with registry-specific warnings. */
+function readWorkspaceObject(
+  record: Record<string, unknown>,
+  keys: string[],
+  fieldLabel: string,
+  workspaceKey: string,
+  warnings: string[],
+): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    if (!(key in record)) continue;
+    const value = record[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    if (value !== undefined && value !== null) {
+      warnings.push(
+        `Spec Keeper .spec-keeper/config entry for '${workspaceKey}' has an invalid '${fieldLabel}' value; ignoring it.`,
+      );
+    }
+  }
+  return undefined;
+}
+
+function normalizeWorkspaceEpicDefaults(
+  value: Record<string, unknown>,
+  workspaceKey: string,
+  warnings: string[],
+): SpecKeeperEpicDefaults {
+  return {
+    key: readWorkspaceField(value, ["key", "epicKey", "epic_key"], "defaultEpic.key", workspaceKey, warnings),
+    title: readWorkspaceField(value, ["title"], "defaultEpic.title", workspaceKey, warnings),
+    description: readWorkspaceField(value, ["description"], "defaultEpic.description", workspaceKey, warnings),
+    status: readWorkspaceField(value, ["status"], "defaultEpic.status", workspaceKey, warnings),
+  };
+}
+
+function normalizeWorkspaceTaskDefaults(
+  value: Record<string, unknown>,
+  workspaceKey: string,
+  warnings: string[],
+): SpecKeeperTaskDefaults {
+  return {
+    key: readWorkspaceField(value, ["key", "taskKey", "task_key"], "defaultTask.key", workspaceKey, warnings),
+    epicKey: readWorkspaceField(value, ["epicKey", "epic_key"], "defaultTask.epicKey", workspaceKey, warnings),
+    keyPrefix: readWorkspaceField(value, ["keyPrefix", "key_prefix"], "defaultTask.keyPrefix", workspaceKey, warnings),
+    title: readWorkspaceField(value, ["title"], "defaultTask.title", workspaceKey, warnings),
+    description: readWorkspaceField(value, ["description"], "defaultTask.description", workspaceKey, warnings),
+    status: readWorkspaceField(value, ["status"], "defaultTask.status", workspaceKey, warnings),
+  };
+}
+
 interface NormalizedSpecKeeperWorkspaceEntry {
   key: string;
   config: SpecKeeperWorkspaceConfig;
@@ -598,6 +664,24 @@ function normalizeSpecKeeperWorkspaceEntry(
     warnings,
   );
   if (apiBase) config.apiBase = apiBase;
+
+  const epic = readWorkspaceObject(
+    record,
+    ["defaultEpic", "default_epic"],
+    "defaultEpic",
+    key,
+    warnings,
+  );
+  if (epic) config.defaultEpic = normalizeWorkspaceEpicDefaults(epic, key, warnings);
+
+  const task = readWorkspaceObject(
+    record,
+    ["defaultTask", "default_task"],
+    "defaultTask",
+    key,
+    warnings,
+  );
+  if (task) config.defaultTask = normalizeWorkspaceTaskDefaults(task, key, warnings);
 
   return { key: canonicalizeSpecKeeperStartDirectory(key), config };
 }
@@ -691,5 +775,207 @@ export function resolveSpecKeeperWorkspace(
     `Spec Keeper has no workspace mapping for start directory '${canonicalStart}'.` +
       (details.length ? `\n${details.join("\n")}` : "") +
       `\nCreate or update ${loaded.path} with an entry keyed by this start directory (projectSlug and credentialFile), or run SpecKeeperEnroll/migration to create the mapping.`,
+  );
+}
+
+/** Owner-only mode used for workspace credential files. */
+export const SPEC_KEEPER_CREDENTIAL_FILE_MODE = 0o600;
+/** Non-secret mode used for the `.spec-keeper/config` registry. */
+export const SPEC_KEEPER_WORKSPACE_CONFIG_MODE = 0o644;
+
+/** Resolve a workspace `credentialFile` to an absolute path relative to the canonical start directory. */
+export function resolveSpecKeeperCredentialFile(
+  startDirectory: string,
+  credentialFile: string,
+): string {
+  return isAbsolute(credentialFile) ? credentialFile : resolve(startDirectory, credentialFile);
+}
+
+/**
+ * Ensure `.spec-keeper` exists as a directory. A legacy `.spec-keeper` file
+ * blocks the new layout and must be migrated (not silently deleted) first.
+ */
+export function ensureSpecKeeperWorkspaceDir(specDir: string): void {
+  let existing: Stats | undefined;
+  try {
+    existing = statSync(specDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Spec Keeper could not inspect '${specDir}'.`, { cause: error });
+    }
+  }
+
+  if (existing) {
+    if (!existing.isDirectory()) {
+      throw new Error(
+        `Spec Keeper cannot write under '${specDir}' because a file already exists there. Migrate the legacy .spec-keeper file first (or move it aside).`,
+      );
+    }
+    return;
+  }
+
+  try {
+    mkdirSync(specDir, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      let rechecked: Stats | undefined;
+      try {
+        rechecked = statSync(specDir);
+      } catch {
+        rechecked = undefined;
+      }
+      if (rechecked?.isDirectory()) return;
+      throw new Error(
+        `Spec Keeper cannot write under '${specDir}' because a file already exists there. Migrate the legacy .spec-keeper file first (or move it aside).`,
+      );
+    }
+    throw new Error(`Spec Keeper could not create '${specDir}'.`, { cause: error });
+  }
+}
+
+/** Write a workspace credential file and enforce owner-only permissions on POSIX. */
+export function writeSpecKeeperCredentialFile(
+  credentialFile: string,
+  record: Record<string, unknown>,
+): void {
+  writeFileSync(credentialFile, `${JSON.stringify(record, null, 2)}\n`, {
+    mode: SPEC_KEEPER_CREDENTIAL_FILE_MODE,
+  });
+  if (process.platform !== "win32") {
+    chmodSync(credentialFile, SPEC_KEEPER_CREDENTIAL_FILE_MODE);
+  }
+}
+
+/**
+ * Upsert one workspace entry into `.spec-keeper/config`. Existing entries are
+ * preserved; a missing file is created, while a malformed or non-object file
+ * is refused rather than overwritten.
+ */
+export function upsertSpecKeeperWorkspaceConfig(
+  configPath: string,
+  canonicalStart: string,
+  entry: SpecKeeperWorkspaceConfig,
+): void {
+  let registry: SpecKeeperWorkspaceRegistry = {};
+  let existing = "";
+  try {
+    existing = readFileSync(configPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Spec Keeper could not read '${configPath}'.`, { cause: error });
+    }
+  }
+
+  if (existing.trim()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(existing);
+    } catch {
+      throw new Error(
+        `Spec Keeper refuses to overwrite malformed '${configPath}'. Fix or remove it before continuing.`,
+      );
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(
+        `Spec Keeper refuses to overwrite invalid '${configPath}'; the top-level value must be a JSON object.`,
+      );
+    }
+    registry = parsed as SpecKeeperWorkspaceRegistry;
+  }
+
+  registry[canonicalStart] = entry;
+  writeFileSync(configPath, `${JSON.stringify(registry, null, 2)}\n`, {
+    mode: SPEC_KEEPER_WORKSPACE_CONFIG_MODE,
+  });
+}
+
+/** Combined runtime defaults: workspace routing plus legacy epic/task defaults. */
+export interface ResolvedSpecKeeperRuntimeDefaults {
+  /** URL-safe project slug from the workspace mapping (undefined when unconfigured). */
+  projectSlug?: string;
+  /** API base from the workspace mapping or the built-in fallback. */
+  apiBase: string;
+  /** Absolute path of the workspace credential file (undefined when unconfigured). */
+  credentialFile?: string;
+  defaultEpic?: SpecKeeperEpicDefaults;
+  defaultTask?: SpecKeeperTaskDefaults;
+  /** Resolved workspace mapping, or null when no mapping exists yet. */
+  workspace: ResolvedSpecKeeperWorkspace | null;
+  warnings: string[];
+}
+
+/**
+ * Resolve Spec Keeper runtime defaults.
+ *
+ * The project slug and API base come from the `.spec-keeper/config` workspace
+ * mapping (never from stale legacy `.spec-keeper` operational fields), while
+ * `defaultEpic`/`defaultTask` come from the workspace entry when present or
+ * the legacy `.spec-keeper` file while migration is still pending. When no
+ * workspace mapping exists yet, this returns a fallback object with a null
+ * workspace and an actionable warning so the run can proceed and Spec Keeper
+ * calls fail closed only when actually attempted.
+ */
+export function resolveSpecKeeperRuntimeDefaults(options?: {
+  startDirectory?: string;
+  env?: NodeJS.ProcessEnv;
+}): ResolvedSpecKeeperRuntimeDefaults {
+  const startDirectory = options?.startDirectory ?? process.cwd();
+  const env = options?.env ?? process.env;
+  const legacy = loadSpecKeeperDefaultsFile({ cwd: startDirectory, env });
+  const warnings = [...legacy.warnings];
+
+  let workspace: ResolvedSpecKeeperWorkspace | null;
+  try {
+    workspace = resolveSpecKeeperWorkspace(startDirectory);
+    warnings.push(...workspace.warnings);
+  } catch (error) {
+    workspace = null;
+    warnings.push(error instanceof Error ? error.message : String(error));
+    return {
+      projectSlug: undefined,
+      apiBase: BUILTIN_API_BASE,
+      credentialFile: undefined,
+      defaultEpic: legacy.config.defaultEpic,
+      defaultTask: legacy.config.defaultTask,
+      workspace: null,
+      warnings,
+    };
+  }
+
+  const configuredApiBase = workspace.config.apiBase ?? BUILTIN_API_BASE;
+  const apiBase = configuredApiBase.replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(apiBase)) {
+    throw new Error(
+      "Spec Keeper apiBase must start with http:// or https:// (resolved from the workspace mapping).",
+    );
+  }
+
+  return {
+    projectSlug: workspace.config.projectSlug,
+    apiBase,
+    credentialFile: resolveSpecKeeperCredentialFile(
+      workspace.startDirectory,
+      workspace.config.credentialFile,
+    ),
+    defaultEpic: workspace.config.defaultEpic ?? legacy.config.defaultEpic,
+    defaultTask: workspace.config.defaultTask ?? legacy.config.defaultTask,
+    workspace,
+    warnings,
+  };
+}
+
+/** One-line, secret-safe summary of resolved runtime defaults for logs. */
+export function describeSpecKeeperRuntimeDefaults(
+  defaults: ResolvedSpecKeeperRuntimeDefaults,
+): string {
+  const workspace = defaults.workspace;
+  const projectSlugSource = workspace ? "workspace" : "unconfigured";
+  const apiBaseSource = workspace?.config.apiBase ? "workspace" : "builtin";
+  const credentialFileSource = workspace ? "workspace" : "unconfigured";
+  return (
+    `projectSlug=${defaults.projectSlug ?? "(none)"} (source: ${projectSlugSource}), ` +
+    `apiBase=${redactUrlCredentialsForLogging(defaults.apiBase)} (source: ${apiBaseSource}), ` +
+    `credentialFile=${defaults.credentialFile ?? "(none)"} (source: ${credentialFileSource})`
   );
 }

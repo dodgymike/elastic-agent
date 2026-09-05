@@ -153,6 +153,9 @@ handoff, and resume server synchronization as soon as access is restored.
 - `npm run test:spec-keeper-tool-lookup` — the SpecKeeper tool's
   workspace-keyed lookup, credential-file loading, and fail-closed
   missing/malformed/permission handling.
+- `npm run test:spec-keeper-migration` — legacy `.spec-keeper` file +
+  `.spec.local.json` migration into the workspace layout, secure permissions,
+  and runtime-defaults reconciliation.
 - `npm run test:spec-keeper-routes` — project-resource route mapping and
   validation.
 - `npm run test:spec-keeper-epic-flow` and
@@ -161,7 +164,7 @@ handoff, and resume server synchronization as soon as access is restored.
 Manual/dry-run output must include a startup line under the `[SPEC KEEPER]`
 label, for example:
 
-    [SPEC KEEPER] defaults loaded: projectSlug=elastic-agent (source: spec-keeper), apiBase=https://api.spec.elasticninja.com (source: spec-keeper), credentialStore=.spec.local.json (source: spec-keeper)
+    [SPEC KEEPER] defaults loaded: projectSlug=elastic-agent (source: workspace), apiBase=https://api.spec.elasticninja.com (source: workspace), credentialFile=<canonical-start-dir>/.spec-keeper/elastic-agent.json (source: workspace)
 
 followed by one concise `[SPEC KEEPER]` line per operation (epic sync, plan
 update, task create/fetch/status change, review completion). Request and

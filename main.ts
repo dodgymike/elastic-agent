@@ -127,7 +127,7 @@ import {
   syncPlanStepTasks,
   epicIdentifier,
 } from "./specKeeperFlow.ts";
-import { resolveSpecKeeperDefaults, describeSpecKeeperDefaults } from "./specKeeperConfig.ts";
+import { resolveSpecKeeperRuntimeDefaults, describeSpecKeeperRuntimeDefaults } from "./specKeeperConfig.ts";
 import { fetchSpecKeeperTask, describeTaskWorkOrder } from "./specKeeperTaskFetch.ts";
 import type { TaskWorkOrder } from "./specKeeperTaskFetch.ts";
 import { claimSpecKeeperTask, describeClaimedSpecKeeperTask } from "./specKeeperTaskClaim.ts";
@@ -2545,11 +2545,14 @@ async function main(options: { review?: boolean; loop?: boolean; logPrompts?: bo
     }
 
     // Resolve Spec Keeper operational defaults once before any planning or
-    // execution sync. This loads the local .spec-keeper file (when present) and
-    // reports the winning config source without ever logging secret values.
-    const specKeeperDefaults = resolveSpecKeeperDefaults();
+    // execution sync. The project slug and API base come from the
+    // `.spec-keeper/config` workspace mapping (never from stale legacy
+    // `.spec-keeper` operational fields), while defaultEpic/defaultTask come
+    // from that mapping or the legacy file while migration is still pending.
+    // Secret values are never logged.
+    const specKeeperDefaults = resolveSpecKeeperRuntimeDefaults();
     for (const warning of specKeeperDefaults.warnings) status.warning(warning);
-    status.specKeeper(`defaults loaded: ${describeSpecKeeperDefaults(specKeeperDefaults)}`);
+    status.specKeeper(`defaults loaded: ${describeSpecKeeperRuntimeDefaults(specKeeperDefaults)}`);
 
     // Task mode seeds the runtime from an existing Spec Keeper task: fetch it
     // by id, claim it, and convert it into the initial agent prompt. The
