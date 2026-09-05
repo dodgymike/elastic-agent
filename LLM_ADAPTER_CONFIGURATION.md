@@ -221,7 +221,7 @@ The CLI help lists the selected-provider credential and model variables. Pass cr
 | --- | --- | --- | --- |
 | `openai` | `OPENAI_API_KEY` | `gpt-4.1-mini` | `OPENAI_MODEL` |
 | `bedrock-claude` | `AWS_REGION` or `AWS_DEFAULT_REGION`, plus the standard AWS credential-provider chain | `anthropic.claude-sonnet-4-20250514-v1:0` | `BEDROCK_CLAUDE_MODEL` |
-| `deepseek-v4` | `DEEPSEEK_API_KEY` | `deepseek-chat` | `DEEPSEEK_MODEL` |
+| `deepseek-v4` | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` | `DEEPSEEK_MODEL` |
 
 Only the selected provider's credential and model variables are read. A selected-provider model override must be non-blank; otherwise the documented default is used. Model availability and Bedrock access remain account- and region-specific.
 
@@ -230,9 +230,47 @@ For example, configure DeepSeek without persisting a credential in the repositor
 ```sh
 export LLM_PROVIDER=deepseek-v4
 export DEEPSEEK_API_KEY="..." # inject from a secret manager in production
-export DEEPSEEK_MODEL=deepseek-chat # optional
+export DEEPSEEK_MODEL=deepseek-v4-pro # optional
 npm start -- "Plan the deployment work."
 ```
+
+### Planner model override (`--planner-model`)
+
+`--planner-model <model-id>` optionally overrides the planner model for the run. When the flag is omitted, the selected provider's default planner model is used (the `Default model` column in the table above). When the flag is supplied, `main.ts` resolves the requested model against the provider catalogs instead of silently substituting the default.
+
+Accepted planner model IDs:
+
+| Provider ID | Accepted `--planner-model` values |
+| --- | --- |
+| `openai` | `gpt-4.1-mini`, `gpt-4.1` |
+| `bedrock-claude` | `anthropic.claude-sonnet-4-20250514-v1:0`, `anthropic.claude-opus-4-20250514-v1:0`, `claude-sonnet-5`, `claude-opus-5` |
+| `deepseek-v4` | `deepseek-v4-pro`, `deepseek-v4-flash` |
+
+DeepSeek V4 Pro/Flash are requested by their short IDs (`deepseek-v4-pro`, `deepseek-v4-flash`). Claude Opus 5 and Claude Sonnet 5 via AWS are requested by the short IDs `claude-opus-5` and `claude-sonnet-5`; Claude Sonnet/Opus 4 are requested by their full Amazon Bedrock IDs shown above. Model availability and Bedrock model access remain account- and region-specific.
+
+Provider auto-selection when `--planner-model` is supplied:
+
+1. The currently selected provider is used unchanged when its catalog already contains the requested model.
+2. Otherwise the resolver searches every built-in provider and selects the first provider whose catalog contains the model. The selected provider is tried first, and remaining providers are tried in sorted provider-ID order, so duplicate model IDs resolve deterministically.
+3. When no provider supports the requested model, startup fails with an actionable error that lists every supported planner model instead of silently falling back.
+
+A blank `--planner-model` value is rejected at startup with `--planner-model requires a non-empty model ID.` Examples:
+
+```sh
+# Omitted: use the selected provider's default planner model.
+npm start -- --provider openai "Plan the deployment work."
+
+# A model already in the selected provider's catalog stays on that provider.
+npm start -- --provider openai --planner-model gpt-4.1 "Plan the deployment work."
+
+# Auto-select DeepSeek V4 Flash even though openai is the selected provider.
+npm start -- --provider openai --planner-model deepseek-v4-flash "Plan the deployment work."
+
+# Auto-select AWS Bedrock Claude for Claude Opus 5.
+npm start -- --provider deepseek-v4 --planner-model claude-opus-5 "Plan the deployment work."
+```
+
+The planner runtime is shared by the tool-safety classifier, the git-command router, and the planning-necessity classifier. When `--planner-model` auto-selects a different provider, those auxiliary LLM paths use the resolved provider's adapter and model as well; `--classifier-model` still overrides only the tool-safety classifier's per-request model.
 
 The multi-turn CLI uses the compatibility runtime to retain its plan/tool-call continuation, in-process response chaining, normalized usage accounting, and provider error propagation while provider adapters remain stateless. `LLM_PROVIDER` and `--provider` select an adapter; the model resolver selects the matching default or provider-specific override.
 
