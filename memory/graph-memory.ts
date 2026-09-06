@@ -165,6 +165,21 @@ export class GraphMemoryModule implements MemoryModule {
   /** The most recent non-fatal failure reported by this module, if any. */
   lastFailure: GraphFailureReport | null = null;
 
+  /**
+   * Advertised v2 capability surface (MI-11). The graph module is an in-memory
+   * projection; graph nodes are not persisted and it does not advertise
+   * compaction, forgetting, or export. Kept as an inline literal so this module
+   * does not gain a compile-time dependency on the v2 contract; the canonical
+   * constants live in `memory/backend-capabilities.ts`.
+   */
+  readonly capabilities = {
+    durable: false,
+    retrievalPurposes: ["prompt-context"] as const,
+    supportsCompaction: false,
+    supportsForget: false,
+    supportsExport: false,
+  };
+
   constructor(options: GraphMemoryOptions = {}) {
     this.store = options.store ?? new InMemoryGraphStore();
     this.summarizer = options.summarizer ?? this.defaultSummarizer;

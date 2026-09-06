@@ -1,21 +1,17 @@
 /**
- * Focused tests for the memory backend SELECTION semantics that main.ts wires
- * up via ELAGENT_MEMORY_TYPE.
+ * Focused tests for the memory backend SELECTION semantics wired through the
+ * unified composition factory (memory/backend-factory.ts), which main.ts uses
+ * for ELAGENT_MEMORY_TYPE.
  *
- * main.ts's selection lives inline in main() and is not importable without
- * booting the whole agent, so this test pins the same behavior at the module
- * layer, documenting the contract that main.ts depends on:
+ * The factory is the single source of truth for selection, so this test pins:
  *
- *   - default (ELAGENT_MEMORY_TYPE unset or "persistent")  -> createPersistentMemoryModule
- *     (a PersistentMemoryModule, the persistent/disk-backed default backend).
- *   - "in-memory" -> createInMemoryMemoryModule (an InMemoryMemoryModule).
- *   - "concat" | "both" -> createCompositeMemoryModule wrapping a persistent
- *     primary + in-memory secondary (concatenation mode).
- *
- * Each branch is expressed as a small helper mirroring the exact factory calls
- * in main.ts (lines ~305-340). If the runtime's default ever drifts back to
- * in-memory, or the concat pairing changes, these assertions fail and force a
- * deliberate, documented decision.
+ *   - default (ELAGENT_MEMORY_TYPE unset)              -> persistent legacy
+ *   - "in-memory"                                      -> volatile InMemoryMemoryModule
+ *   - "graph"                                          -> GraphMemoryModule projection
+ *   - "concat" | "both"                                -> CompositeMemoryModule
+ *                                                         (persistent owner + in-memory projection)
+ *   - "persistent-v2"                                  -> opt-in PersistentV2MemoryModule
+ *   - any unrecognized value                           -> MemoryBackendSelectionError
  *
  * Follows the project's test conventions: plain `node:assert/strict`, a
  * `main().catch(...)` entrypoint, compiled with tsc and run with node.
@@ -23,87 +19,66 @@
 
 import assert from "node:assert/strict";
 import {
-  CompositeMemoryModule,
-  createCompositeMemoryModule,
-} from "../memory/compositeMemory.js";
-import { InMemoryMemoryModule, createInMemoryMemoryModule } from "../memory/inMemory.js";
-import { PersistentMemoryModule, createPersistentMemoryModule } from "../memory/persistent.js";
-import type { MemoryModule } from "../memory/types.js";
+  MemoryBackendSelectionError,
+  createMemoryBackend,
+  resolveMemoryTypeSelection,
+} from "../memory/backend-factory.js";
+import { CompositeMemoryModule } from "../memory/compositeMemory.js";
+import { GraphMemoryModule } from "../memory/graph-memory.js";
+import { InMemoryMemoryModule } from "../memory/inMemory.js";
+import { PersistentMemoryModule } from "../memory/persistent.js";
+import { PersistentV2MemoryModule } from "../memory/persistent-v2.js";
 
-/**
- * Mirrors main.ts's default-backend branch: ELAGENT_MEMORY_TYPE unset (or
- * "persistent") selects the persistent, disk-backed PersistentMemoryModule.
- */
-function selectDefaultMemory(persistentOptions: Record<string, unknown> = {}): MemoryModule {
-  return createPersistentMemoryModule(persistentOptions);
-}
-
-/**
- * Mirrors main.ts's "in-memory" branch: a volatile InMemoryMemoryModule.
- */
-function selectInMemoryMemory(): MemoryModule {
-  return createInMemoryMemoryModule({});
-}
-
-/**
- * Mirrors main.ts's "concat" | "both" branch: a CompositeMemoryModule wrapping a
- * durable persistent primary and an in-memory secondary.
- */
-function selectConcatMemory(persistentOptions: Record<string, unknown> = {}): MemoryModule {
-  return createCompositeMemoryModule({
-    primary: createPersistentMemoryModule(persistentOptions),
-    secondary: createInMemoryMemoryModule({}),
-    headers: { primary: "persistent memory", secondary: "in-memory memory" },
-  });
-}
-
-async function testDefaultIsPersistent(): Promise<void> {
-  // The default backend must be the persistent (disk-backed) module, NOT the
-  // in-memory module — a real behavior change that this test locks in.
-  const defaultModule = selectDefaultMemory({ outputDir: "memory-output" });
+async function testDefaultIsPersistentLegacy(): Promise<void> {
+  const handle = createMemoryBackend({});
+  assert.equal(handle.kind, "persistent");
   assert.ok(
-    defaultModule instanceof PersistentMemoryModule,
-    "default backend must be PersistentMemoryModule (persistent)",
+    handle.module instanceof PersistentMemoryModule,
+    "default backend must be the persistent legacy module",
   );
   assert.ok(
-    !(defaultModule instanceof InMemoryMemoryModule),
+    !(handle.module instanceof InMemoryMemoryModule),
     "default backend must NOT be the in-memory module",
   );
-
-  // An explicit "persistent" selection yields the same module type.
-  const explicitPersistent = selectDefaultMemory({ outputDir: "memory-output" });
-  assert.ok(explicitPersistent instanceof PersistentMemoryModule);
+  // remember() is in-process; durability is only established at finalize.
+  assert.equal(handle.capabilities.durable, false);
 }
 
-async function testInMemorySelection(): Promise<void> {
-  const module = selectInMemoryMemory();
-  assert.ok(
-    module instanceof InMemoryMemoryModule,
-    "'in-memory' selects InMemoryMemoryModule",
-  );
-  assert.ok(!(module instanceof PersistentMemoryModule));
+async function testExplicitSelections(): Promise<void> {
+  assert.ok(createMemoryBackend({ type: "in-memory" }).module instanceof InMemoryMemoryModule);
+  assert.ok(createMemoryBackend({ type: "graph" }).module instanceof GraphMemoryModule);
+  assert.ok(createMemoryBackend({ type: "concat" }).module instanceof CompositeMemoryModule);
+  assert.ok(createMemoryBackend({ type: "both" }).module instanceof CompositeMemoryModule);
 }
 
 async function testConcatSelectionIsCompositeOverPersistentAndInMemory(): Promise<void> {
-  // Concatenation mode is a CompositeMemoryModule (not a bare single backend).
-  const composite = selectConcatMemory({ outputDir: "memory-output" });
+  const handle = createMemoryBackend({ type: "concat" });
+  const composite = handle.module as CompositeMemoryModule;
   assert.ok(composite instanceof CompositeMemoryModule, "concat wraps a CompositeMemoryModule");
+  assert.equal(handle.capabilities.durable, false, "legacy persistent owner is not per-append durable");
+  assert.ok(handle.compactionStore !== null, "compaction routes through the composite to the owner");
+}
 
-  // The composite exposes the durable finalize passthrough used by
-  // finalizePersistentMemory() at end of plan, and its primary is the
-  // persistent backend while the secondary is in-memory.
-  const finalizable = composite as CompositeMemoryModule & {
-    finalize(sessionId: string): Promise<unknown>;
-  };
-  assert.equal(typeof finalizable.finalize, "function");
-  assert.ok(composite instanceof CompositeMemoryModule);
+async function testPersistentV2IsOptIn(): Promise<void> {
+  const handle = createMemoryBackend({ type: "persistent-v2" });
+  assert.ok(handle.module instanceof PersistentV2MemoryModule, "persistent-v2 selects the event-store bridge");
+  assert.equal(handle.capabilities.durable, true, "persistent-v2 appends are durable");
+}
+
+async function testUnknownSelectionRejected(): Promise<void> {
+  assert.throws(() => createMemoryBackend({ type: "bogus" }), MemoryBackendSelectionError);
+  assert.throws(() => resolveMemoryTypeSelection("bogus"), /unrecognized memory backend type/);
+  assert.equal(resolveMemoryTypeSelection(undefined), "persistent");
+  assert.equal(resolveMemoryTypeSelection(""), "persistent");
 }
 
 async function main(): Promise<void> {
-  await testDefaultIsPersistent();
-  await testInMemorySelection();
+  await testDefaultIsPersistentLegacy();
+  await testExplicitSelections();
   await testConcatSelectionIsCompositeOverPersistentAndInMemory();
-  console.log("memory-selection.test.ts: OK (default=persistent; in-memory; concat=composite)");
+  await testPersistentV2IsOptIn();
+  await testUnknownSelectionRejected();
+  console.log("memory-selection.test.ts: OK (factory default=persistent; all selections; persistent-v2 opt-in; unknown rejected)");
 }
 
 main().catch((error: unknown) => {

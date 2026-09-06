@@ -229,3 +229,37 @@ export type {
   SafeCompactionResult,
   SafeCompactorOptions,
 } from "./safe-compaction.js";
+
+export {
+  GRAPH_PROJECTION_CAPABILITIES,
+  LEGACY_PERSISTENT_CAPABILITIES,
+  PERSISTENT_V2_CAPABILITIES,
+  UNKNOWN_BACKEND_CAPABILITIES,
+  VOLATILE_MEMORY_CAPABILITIES,
+  capabilitiesOf,
+  describeCapabilityGap,
+  hasExplicitCapabilities,
+} from "./backend-capabilities.js";
+export type { MemoryBackendCapabilityProvider } from "./backend-capabilities.js";
+
+export {
+  PersistentV2MemoryModule,
+  createPersistentV2MemoryModule,
+} from "./persistent-v2.js";
+export type {
+  PersistentV2FailureReport,
+  PersistentV2MemoryOptions,
+} from "./persistent-v2.js";
+
+export {
+  MemoryBackendSelectionError,
+  SUPPORTED_MEMORY_TYPES,
+  createMemoryBackend,
+  resolveCompactionStore,
+  resolveMemoryTypeSelection,
+} from "./backend-factory.js";
+export type {
+  MemoryBackendFactoryOptions,
+  MemoryBackendHandle,
+  MemoryTypeSelection,
+} from "./backend-factory.js";

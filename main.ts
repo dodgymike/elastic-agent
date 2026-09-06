@@ -42,23 +42,8 @@ import {
 import { detectDocker, describeDockerDetection } from "./docker-detection.js";
 import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
-import {
-    createInMemoryMemoryModule,
-    type InMemoryMemoryOptions,
-} from "./memory/inMemory.js";
-import {
-    createGraphMemoryModule,
-    type GraphMemoryOptions,
-} from "./memory/graph-memory.js";
-import {
-    createPersistentMemoryModule,
-    type PersistentMemoryOptions,
-} from "./memory/persistent.js";
-import {
-    createCompositeMemoryModule,
-    type FinalizableMemoryModule,
-} from "./memory/compositeMemory.js";
-import { MemoryCompactor, type CompactionSummaryStore } from "./memory/memoryCompaction.js";
+import { createMemoryBackend, type MemoryBackendHandle } from "./memory/backend-factory.js";
+import { MemoryCompactor } from "./memory/memoryCompaction.js";
 import type {
     MemoryAction,
     MemoryJsonValue,
@@ -384,6 +369,7 @@ let client: MultiTurnLlmRuntime;
 // optional and fail-safe: if memory cannot be attached (or a remember() call
 // fails) the LLM prompts and plan loop proceed unchanged.
 let agentMemory: MemoryModule | null;
+let agentMemoryBackend: MemoryBackendHandle | null = null;
 let agentSessionId: string;
 {
     // A dedicated session id scopes this run's remembered context. The CLI
@@ -397,75 +383,35 @@ let agentSessionId: string;
         : `run-${randomUUID()}`;
     // ELAGENT_MEMORY_DISABLE=1 opts out entirely (fail-open): the plan loop
     // and LLM prompts run exactly as they did before this integration. When
-    // enabled, a MemoryModule is created here (swappable via dependency
-    // injection — an operator could supply a different factory or a delegating
-    // chain in the future) without the need to create a module.
-    //
-    // ELAGENT_MEMORY_TYPE selects the backend:
-    //   - (unset / "persistent") -> the default persistent MemoryModule
-    //     (createPersistentMemoryModule), which records plan steps in process
-    //     memory exactly like the in-memory module AND persists + summarises
-    //     the full session to a durable per-session file when finalize() is
-    //     called at end of plan (see finalizePersistentMemory below). It keeps
-    //     the same remember()/getContext() contract; ELAGENT_MEMORY_OUTPUT_DIR
-    //     (or ELAGENT_MEMORY_OUTPUT_PATH) selects where the documents land.
-    //   - "in-memory" -> the volatile in-process in-memory MemoryModule
-    //     (createInMemoryMemoryModule), unchanged from prior behavior; useful
-    //     when an operator does not want end-of-plan persistence.
-    //   - "graph" -> the graph-backed GraphMemoryModule
-    //     (createGraphMemoryModule), which models each plan step as graph
-    //     nodes/typed edges so later turns can retrieve a chain of related
-    //     steps instead of flat history. It keeps the same MemoryModule
-    //     interface, so the remember() call sites and LLM getContext()
-    //     injection are unchanged; summarization uses the same optional
-    //     MemorySummarizer contract (an operator can inject an LLM-backed
-    //     summarizer via the factory options; absent an LLM backend the module
-    //     falls back to its deterministic chain renderer, exactly as the
-    //     in-memory module falls back to defaultHistorySummarizer).
-    //   - "concat" | "both" -> concatenation mode: a CompositeMemoryModule
-    //     (createCompositeMemoryModule) wraps the durable persistent store as
-    //     primary and the in-memory store as secondary, so remember() updates
-    //     BOTH stores and getContext() concatenates their labelled context
-    //     (durable first, then in-memory). finalize() forwards to the durable
-    //     primary at end of plan (see finalizePersistentMemory below) while the
-    //     volatile in-memory secondary keeps short-term context live across
-    //     turns within this process.
+    // enabled, the unified composition factory (memory/backend-factory.ts)
+    // validates ELAGENT_MEMORY_TYPE and returns a capability-bearing handle:
+    //   - (unset / "persistent") -> the legacy persistent end-of-plan module.
+    //   - "in-memory"            -> the volatile in-process module.
+    //   - "graph"                -> the in-memory graph projection.
+    //   - "concat" | "both"      -> one authoritative persistent owner plus an
+    //                              in-memory projection (no duplicate durable
+    //                              writes and no repeated context blocks).
+    //   - "persistent-v2"        -> the opt-in SQLite event-store backend.
+    // Unrecognized values are rejected with an actionable error instead of
+    // silently falling back to persistent memory.
     const disabled =
         process.env.ELAGENT_MEMORY_DISABLE === "1" ||
         process.env.ELAGENT_MEMORY_DISABLE === "true";
-    const memoryType = process.env.ELAGENT_MEMORY_TYPE ?? "";
     if (disabled) {
         agentMemory = null;
-    } else if (memoryType === "graph") {
-        const graphOptions: GraphMemoryOptions = {};
-        agentMemory = createGraphMemoryModule(graphOptions);
-    } else if (memoryType === "in-memory") {
-        const memoryOptions: InMemoryMemoryOptions = {};
-        agentMemory = createInMemoryMemoryModule(memoryOptions);
-    } else if (memoryType === "concat" || memoryType === "both") {
-        // Concatenation mode: durable persistent (primary) + in-memory
-        // (secondary). Both inner modules receive the same remember() input and
-        // the same session/user context; getContext() concatenates their
-        // labelled summaries. The composite's finalize() passthrough lets the
-        // durable primary flush at end of plan.
-        const persistentOptions: PersistentMemoryOptions = {
-            outputDir: process.env.ELAGENT_MEMORY_OUTPUT_DIR,
-            filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
-        };
-        const memoryOptions: InMemoryMemoryOptions = {};
-        agentMemory = createCompositeMemoryModule({
-            primary: createPersistentMemoryModule(persistentOptions),
-            secondary: createInMemoryMemoryModule(memoryOptions),
-            headers: { primary: "persistent memory", secondary: "in-memory memory" },
-        });
     } else {
-        // Default backend: persistent (disk-backed) memory when ELAGENT_MEMORY_TYPE
-        // is unset or explicitly "persistent".
-        const persistentOptions: PersistentMemoryOptions = {
-            outputDir: process.env.ELAGENT_MEMORY_OUTPUT_DIR,
-            filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
-        };
-        agentMemory = createPersistentMemoryModule(persistentOptions);
+        try {
+            agentMemoryBackend = createMemoryBackend({
+                type: process.env.ELAGENT_MEMORY_TYPE,
+                outputDir: process.env.ELAGENT_MEMORY_OUTPUT_DIR,
+                filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
+                eventStorePath: process.env.ELAGENT_MEMORY_EVENT_STORE_PATH,
+            });
+            agentMemory = agentMemoryBackend.module;
+        } catch (error) {
+            console.error(`Invalid memory backend selection: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
     }
 }
 // Memory compaction for the summary-based memory backends. The compactor is
@@ -484,36 +430,17 @@ try {
 let memoryCompactorInitialized = false;
 
 /**
- * True when a memory backend exposes the narrow summary read/set interface the
- * compactor needs. Recognizes both the `CompactionSummaryStore` method names
- * (`getSummary`/`setSummary`) and the real backends' native names
- * (`summaryForSession`/`setSummaryForSession`) so runtime compaction is not
- * silently disabled for either a future `CompactionSummaryStore`-styled store or
- * an `InMemoryMemoryModule`/`PersistentMemoryModule`.
- */
-function hasCompactionSummaryStore(module: MemoryModule | null): boolean {
-    if (!module) return false;
-    const store = module as unknown as Partial<CompactionSummaryStore> & {
-        summaryForSession?: (id: string) => string | undefined;
-        setSummaryForSession?: (id: string, s: string) => void;
-    };
-    const hasGet =
-        typeof store?.getSummary === "function" ||
-        typeof store?.summaryForSession === "function";
-    const hasSet =
-        typeof store?.setSummary === "function" ||
-        typeof store?.setSummaryForSession === "function";
-    return hasGet && hasSet;
-}
-
-/**
  * Build the MemoryCompactor once on first use. Never throws; any resolution
  * failure logs a non-fatal warning and leaves compaction disabled.
+ *
+ * The compaction owner is resolved by the unified backend factory (a
+ * capability check, not a concrete class check) so compaction routes to the
+ * authoritative owner exactly once — including through the composite wrapper.
  */
 async function ensureMemoryCompactor(): Promise<void> {
     if (memoryCompactorInitialized) return;
     memoryCompactorInitialized = true;
-    if (!hasCompactionSummaryStore(agentMemory) || !memoryCompactionPrompt) return;
+    if (!agentMemoryBackend?.compactionStore || !memoryCompactionPrompt) return;
     try {
         const adapter = await createRuntimeLlmAdapter({ configuration: providerSelection.configuration });
         let highestModel: string;
@@ -523,7 +450,7 @@ async function ensureMemoryCompactor(): Promise<void> {
             highestModel = modelConfiguration.model;
         }
         memoryCompactor = new MemoryCompactor({
-            store: agentMemory as unknown as CompactionSummaryStore,
+            store: agentMemoryBackend.compactionStore,
             adapter,
             highestModel,
             promptTemplate: memoryCompactionPrompt,
@@ -2284,15 +2211,13 @@ async function rememberAgentStep(options: {
  * actions, outcome, reasoning, plan label), so nothing secret is written.
  */
 async function finalizePersistentMemory(): Promise<void> {
-    if (!agentMemory) return;
-    // The base MemoryModule interface has no finalize(); only durable modules
-    // (PersistentMemoryModule) and the composite concatenation wrapper expose
-    // it. Detect by capability so both the direct persistent backend and the
-    // concat wrapper (whose primary is persistent) are persisted at end of plan.
-    const finalizable = agentMemory as Partial<FinalizableMemoryModule>;
-    if (typeof finalizable.finalize !== "function") return;
+    if (!agentMemoryBackend) return;
+    // The backend handle routes finalize to the authoritative owner exactly
+    // once (direct durable backends and the composite wrapper alike) and
+    // resolves undefined for non-durable backends (in-memory/graph).
     try {
-        const result = await finalizable.finalize(agentSessionId);
+        const result = await agentMemoryBackend.finalize(agentSessionId);
+        if (result === undefined) return;
         const path = typeof result === "string" && result.length > 0
             ? result
             : "end-of-plan memory";

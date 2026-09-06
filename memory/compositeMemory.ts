@@ -1,41 +1,39 @@
 /**
- * Composite (concatenation) MemoryModule for the elastic-agent runtime.
+ * Composite MemoryModule for the elastic-agent runtime (MI-11 semantics).
  *
- * A `CompositeMemoryModule` wraps two `MemoryModule` instances — a `primary`
- * and a `secondary` — and satisfies the transport-agnostic `MemoryModule`
- * contract from `memory/types.ts` by forwarding every operation to both:
+ * A `CompositeMemoryModule` composes one authoritative owner with optional
+ * non-durable projection/cache layers and satisfies the transport-agnostic
+ * `MemoryModule` contract from `memory/types.ts`.
  *
- *  - `remember(input)` records the completed plan step on BOTH modules so each
- *    backend keeps an up-to-date history (e.g. the durable persistent store and
- *    the ephemeral in-memory store).
- *  - `getContext(request)` retrieves the summarized context from BOTH modules
- *    and concatenates them into a single LLM-ready text block, primary context
- *    first then secondary context, each under its own separator header. This is
- *    the "concatenation mode" that lets an agent surface durable long-term
- *    memory alongside volatile short-term memory in one prompt.
- *  - `finalize(sessionId)` is an optional end-of-plan passthrough. The base
- *    `MemoryModule` interface does not declare it, but `PersistentMemoryModule`
- *    (and other durable modules) expose it so the plan loop can persist the
- *    session summary at end of plan. When the primary exposes a `finalize`, the
- *    composite forwards the call so end-of-plan persistence still happens even
- *    though the composite itself is not a `PersistentMemoryModule`.
- *
- * Design goals (mirroring `memory/inMemory.ts` and `memory/persistent.ts`):
- *  - Transport-agnostic: no SDK objects, credentials, or storage backends.
- *  - Swappable via dependency injection: the two wrapped instances are injected
- *    through the factory, so any backend pairing can be composed.
- *  - Chainable: a composite may itself be wrapped or composed further, so a
- *    chain of stores can be built without changing the agent's call sites.
- *  - Fail-safe: a failure in one wrapped module is absorbed and surfaced via
- *    `lastFailure`; it is never propagated to abort the plan loop. On
- *    getContext(), if one module fails the other's context is still returned.
- *
- * Ordering: primary context is emitted before secondary context, each separated
- * by a named marker so the LLM prompt can distinguish the two sources. The
- * separator headers are configurable via options and default to a stable
- * human/LLM-readable form.
+ * Design rules changed by MI-11:
+ *  - `remember(input)` records the step on the authoritative `primary` owner
+ *    exactly once. Projection layers are updated only when they explicitly
+ *    advertise `durable: false`, so the same evidence is never appended as a
+ *    durable write twice.
+ *  - `getContext(request)` retrieves the owner first and merges projection
+ *    blocks while dropping exact duplicate text, so each logical fact appears
+ *    once. A projection whose text duplicates the owner contributes nothing.
+ *  - Lifecycle operations (`finalize`, `initialize`, `flush`, `close`, and the
+ *    compaction read/set surface) route to the authoritative owner exactly
+ *    once; projections are derived and are never flushed, closed, or
+ *    compacted.
+ *  - Fail-safe: failures in a projection are absorbed and surfaced via
+ *    `lastFailure`; they never abort the plan loop.
  */
 
+import {
+  capabilitiesOf,
+  hasExplicitCapabilities,
+} from "./backend-capabilities.js";
+import type {
+  MemoryCapabilitiesV2,
+  MemoryCloseResultV2,
+  MemoryFlushResultV2,
+  MemoryInitResultV2,
+  MemoryModuleV2,
+  MemoryScopeV2,
+} from "./contracts-v2.js";
+import type { CompactionSummaryStore } from "./memoryCompaction.js";
 import type {
   ContextRequest,
   MemoryContext,
@@ -46,64 +44,62 @@ import type {
 
 /**
  * The optional end-of-plan lifecycle exposed by durable backends (e.g.
- * `PersistentMemoryModule`). Kept local to this module so the composite can
- * forward to a durable primary without importing the concrete class.
+ * `PersistentMemoryModule` or `PersistentV2MemoryModule`). Kept local to this
+ * module so the composite can forward to a durable owner without importing the
+ * concrete class.
  */
 export interface FinalizableMemoryModule extends MemoryModule {
-  /** Persist/summarise the end-of-plan memory for `sessionId`. */
+  /** Persist/flush the end-of-plan memory for `sessionId`. */
   finalize(sessionId: string): Promise<unknown>;
 }
 
-/** How a composite getContext() failure is reported to the caller. */
+/** How a composite remember()/getContext() failure is reported to the caller. */
 export interface CompositeFailureReport {
-  /** True when the primary module's getContext()/remember() threw. */
+  /** True when the authoritative owner's remember()/getContext() threw. */
   primaryFailed: boolean;
-  /** True when the secondary module's getContext()/remember() threw. */
+  /** True when any projection's remember()/getContext() threw. */
   secondaryFailed: boolean;
-  /** Non-empty strings describe the first primary/secondary error. */
+  /** Non-empty strings describe the first failure(s). */
   errorMessages: string[];
 }
 
 /**
- * Header/label used to bracket each wrapped module's context block in the
- * concatenated getContext() output.
+ * Header/label used to bracket the owner and the first projection block in the
+ * merged getContext() output.
  */
 export interface CompositeContextHeaders {
-  /** Marker line above the primary module's context (default "primary memory"). */
+  /** Marker line above the owner's context (default "primary memory"). */
   readonly primary?: string;
-  /** Marker line above the secondary module's context (default "secondary memory"). */
+  /** Marker line above the first projection's context (default "secondary memory"). */
   readonly secondary?: string;
 }
 
 /**
  * Factory options accepted by createCompositeMemoryModule.
  *
- * `primary` and `secondary` are the two wrapped MemoryModules. `headers`
- * customises the separator markers; additional backend-specific options are
- * accepted via `MemoryModuleFactoryOptions`-style extras.
+ * `primary` is the authoritative owner. `secondary`, `projections`, and
+ * `delegate` are optional projection/cache layers; they may accelerate
+ * retrieval but are never authoritative and never receive a durable write.
  */
 export interface CompositeMemoryOptions {
-  /** The first MemoryModule whose context/remember wins the ordering. */
+  /** The authoritative MemoryModule whose writes/context win. */
   readonly primary: MemoryModule;
-  /** The second MemoryModule whose context is appended after the primary. */
-  readonly secondary: MemoryModule;
-  /** Optional separator markers for the concatenated context blocks. */
+  /** Optional first projection/cache layer. */
+  readonly secondary?: MemoryModule;
+  /** Optional additional projection/cache layers. */
+  readonly projections?: readonly MemoryModule[];
+  /** Optional separator markers for merged context blocks. */
   readonly headers?: CompositeContextHeaders;
-  /** Optional delegate MemoryModule to forward remember/getContext calls to. */
+  /** Optional legacy delegate, treated as an additional projection. */
   readonly delegate?: MemoryModule;
 }
 
 /**
- * Composite MemoryModule that delegates every operation to a primary and a
- * secondary MemoryModule and concatenates their summarized context.
- *
- * This implements the "concatenation mode": both stores are always written on
- * remember(), and both contribute distinct, labeled blocks to getContext().
+ * Composite MemoryModule with one authoritative owner and optional projections.
  */
 export class CompositeMemoryModule implements MemoryModule {
-  private readonly primary: MemoryModule;
-  private readonly secondary: MemoryModule;
-  private readonly delegate?: MemoryModule;
+  private readonly owner: MemoryModule;
+  private readonly projections: readonly MemoryModule[];
   private readonly labels: { primary: string; secondary: string };
 
   /** The most recent non-fatal failure reported by this module, if any. */
@@ -111,48 +107,55 @@ export class CompositeMemoryModule implements MemoryModule {
 
   constructor(options: CompositeMemoryOptions) {
     if (!options.primary) {
-      throw new Error("CompositeMemoryModule requires a primary MemoryModule");
+      throw new Error("CompositeMemoryModule requires an authoritative primary MemoryModule");
     }
-    if (!options.secondary) {
-      throw new Error("CompositeMemoryModule requires a secondary MemoryModule");
-    }
-    this.primary = options.primary;
-    this.secondary = options.secondary;
-    this.delegate = options.delegate;
+    this.owner = options.primary;
+    this.projections = [
+      options.secondary,
+      ...(options.projections ?? []),
+      options.delegate,
+    ].filter((module): module is MemoryModule => module !== undefined);
     this.labels = {
       primary: options.headers?.primary ?? "primary memory",
       secondary: options.headers?.secondary ?? "secondary memory",
     };
   }
 
+  /** The composite advertises the authoritative owner's capabilities. */
+  get capabilities(): MemoryCapabilitiesV2 {
+    return capabilitiesOf(this.owner);
+  }
+
   /**
-   * Record one completed plan step on both wrapped modules.
-   *
-   * Failures in either module are absorbed into `lastFailure` and reported via
-   * the returned error list; they never reject, so the plan loop can continue
-   * safely. The primary is written first, then the secondary.
+   * Record one completed plan step on the authoritative owner exactly once,
+   * then update non-durable projections (caches) without duplicating durable
+   * writes. Projections that do not advertise capabilities are skipped.
    */
   async remember(input: RememberInput): Promise<void> {
-    const report: CompositeFailureReport = { primaryFailed: false, secondaryFailed: false, errorMessages: [] };
+    const report: CompositeFailureReport = {
+      primaryFailed: false,
+      secondaryFailed: false,
+      errorMessages: [],
+    };
 
     try {
-      await this.primary.remember(input);
+      await this.owner.remember(input);
     } catch (error) {
       report.primaryFailed = true;
       report.errorMessages = [...report.errorMessages, summarizeError(error)];
     }
 
-    try {
-      await this.secondary.remember(input);
-    } catch (error) {
-      report.secondaryFailed = true;
-      report.errorMessages = [...report.errorMessages, summarizeError(error)];
-    }
-
-    if (this.delegate) {
+    for (const projection of this.projections) {
+      // Only update projections that are explicitly known non-durable. This
+      // prevents the same evidence from being appended to a second durable
+      // store, while still letting a volatile cache accelerate retrieval.
+      if (!hasExplicitCapabilities(projection) || capabilitiesOf(projection).durable) {
+        continue;
+      }
       try {
-        await this.delegate.remember(input);
+        await projection.remember(input);
       } catch (error) {
+        report.secondaryFailed = true;
         report.errorMessages = [...report.errorMessages, summarizeError(error)];
       }
     }
@@ -161,59 +164,64 @@ export class CompositeMemoryModule implements MemoryModule {
   }
 
   /**
-   * Retrieve the summarized context from both wrapped modules and concatenate
-   * them, primary first then secondary, each under a named separator header.
-   *
-   * Fail-safe: if one module's getContext() throws, the other's context is
-   * still returned (the failure is recorded on `lastFailure`). Empty blocks
-   * are omitted so a store with no memory does not pollute the summary.
+   * Retrieve merged context from the owner plus projections, dropping exact
+   * duplicate text blocks so each logical fact appears once. Fail-safe: if a
+   * projection's getContext() throws, the other blocks are still returned.
    */
   async getContext(request: ContextRequest): Promise<MemoryContextResult> {
-    const primary = await this.safeGetContext("primary", this.primary, request);
-    const secondary = await this.safeGetContext("secondary", this.secondary, request);
-
-    const blocks = [primary, secondary].filter(
-      (result): result is MemoryContextResult => result !== null,
-    );
-    const matched: MemoryContext[] = [];
-    for (const block of blocks) {
-      for (const context of block.matchedContexts) {
-        if (!matched.includes(context)) matched.push(context);
-      }
+    const owner = await this.safeGetContext(this.owner, request, "primary");
+    const projectionResults: MemoryContextResult[] = [];
+    for (const projection of this.projections) {
+      const result = await this.safeGetContext(projection, request, "secondary");
+      if (result) projectionResults.push(result);
     }
 
     const parts: string[] = [];
-    const labelFor = (block: MemoryContextResult, label: string): void => {
-      const text = block.text.trim();
-      if (text.length === 0) return;
-      parts.push(`--- ${label} ---\n${text}`);
+    const seenText = new Set<string>();
+    const matched: MemoryContext[] = [];
+    const seenContexts = new Set<MemoryContext>();
+
+    const addBlock = (result: MemoryContextResult | null, label: string): void => {
+      if (!result) return;
+      const text = result.text.trim();
+      if (text.length > 0 && !seenText.has(text)) {
+        seenText.add(text);
+        parts.push(`--- ${label} ---\n${text}`);
+      }
+      for (const context of result.matchedContexts) {
+        if (!seenContexts.has(context)) {
+          seenContexts.add(context);
+          matched.push(context);
+        }
+      }
     };
-    if (primary) labelFor(primary, this.labels.primary);
-    if (secondary) labelFor(secondary, this.labels.secondary);
+
+    addBlock(owner, this.labels.primary);
+    for (let index = 0; index < projectionResults.length; index += 1) {
+      const label = index === 0 ? this.labels.secondary : `projection ${index + 1}`;
+      addBlock(projectionResults[index], label);
+    }
 
     let text = parts.join("\n\n");
     if (request.maxChars !== undefined && text.length > request.maxChars) {
       text = `${text.slice(0, request.maxChars)}…`;
     }
 
+    const blocks = [owner, ...projectionResults].filter(
+      (result): result is MemoryContextResult => result !== null,
+    );
     const hasMemory = blocks.some((block) => block.hasMemory || block.text.length > 0);
     return { text, matchedContexts: matched, hasMemory };
   }
 
   /**
-   * Optional end-of-plan passthrough.
-   *
-   * The base `MemoryModule` interface does not declare finalize(); this method
-   * exists so a durable primary (e.g. `PersistentMemoryModule`) can still be
-   * flushed when the composite is used in concatenation mode. When the primary
-   * exposes a finalize, it is invoked and its result returned; otherwise this
-   * returns undefined. Failures are absorbed and recorded on `lastFailure`.
+   * End-of-plan passthrough: forwards to the authoritative owner's finalize()
+   * exactly once. Projections are derived and are never finalized. Returns
+   * undefined when the owner is not finalizable.
    */
   async finalize(sessionId: string): Promise<unknown> {
-    const finalizable = this.primary as Partial<FinalizableMemoryModule>;
-    if (typeof finalizable.finalize !== "function") {
-      return undefined;
-    }
+    const finalizable = this.owner as Partial<FinalizableMemoryModule>;
+    if (typeof finalizable.finalize !== "function") return undefined;
     try {
       return await finalizable.finalize(sessionId);
     } catch (error) {
@@ -226,10 +234,62 @@ export class CompositeMemoryModule implements MemoryModule {
     }
   }
 
+  /** v2 lifecycle routing: initialize the authoritative owner exactly once. */
+  async initialize(scope: MemoryScopeV2): Promise<MemoryInitResultV2> {
+    const owner = this.owner as Partial<Pick<MemoryModuleV2, "initialize">>;
+    if (typeof owner.initialize === "function") return owner.initialize(scope);
+    return { status: "ready", scope };
+  }
+
+  /** v2 lifecycle routing: flush the authoritative owner exactly once. */
+  async flush(scope: MemoryScopeV2): Promise<MemoryFlushResultV2> {
+    const owner = this.owner as Partial<Pick<MemoryModuleV2, "flush">>;
+    if (typeof owner.flush === "function") return owner.flush(scope);
+    return { status: "failure", reason: "composite owner is not durable; flush is unsupported" };
+  }
+
+  /** v2 lifecycle routing: close the authoritative owner exactly once. */
+  async close(scope: MemoryScopeV2): Promise<MemoryCloseResultV2> {
+    const owner = this.owner as Partial<Pick<MemoryModuleV2, "close">>;
+    if (typeof owner.close === "function") return owner.close(scope);
+    return { status: "closed" };
+  }
+
+  /** Compaction read surface routed to the authoritative owner. */
+  getSummary(sessionId: string): string | undefined {
+    return this.ownerSummaryStore()?.getSummary(sessionId);
+  }
+
+  /** Compaction write surface routed to the authoritative owner. */
+  setSummary(sessionId: string, summary: string): void {
+    this.ownerSummaryStore()?.setSummary(sessionId, summary);
+  }
+
+  private ownerSummaryStore(): CompactionSummaryStore | null {
+    const owner = this.owner as Partial<CompactionSummaryStore> & {
+      summaryForSession?: (id: string) => string | undefined;
+      setSummaryForSession?: (id: string, summary: string) => void;
+    };
+    const get =
+      typeof owner.getSummary === "function"
+        ? owner.getSummary.bind(owner)
+        : typeof owner.summaryForSession === "function"
+          ? (id: string): string | undefined => owner.summaryForSession!(id)
+          : undefined;
+    const set =
+      typeof owner.setSummary === "function"
+        ? owner.setSummary.bind(owner)
+        : typeof owner.setSummaryForSession === "function"
+          ? (id: string, summary: string): void => owner.setSummaryForSession!(id, summary)
+          : undefined;
+    if (!get || !set) return null;
+    return { getSummary: get, setSummary: set };
+  }
+
   private async safeGetContext(
-    which: "primary" | "secondary",
     module: MemoryModule,
     request: ContextRequest,
+    which: "primary" | "secondary",
   ): Promise<MemoryContextResult | null> {
     try {
       return await module.getContext(request);
@@ -249,7 +309,8 @@ export class CompositeMemoryModule implements MemoryModule {
 
 /**
  * Dependency-injection factory for CompositeMemoryModule, satisfying the
- * `MemoryModuleFactory` reference so the runtime can compose two stores.
+ * `MemoryModuleFactory` reference so the runtime can compose one owner with
+ * optional projections.
  */
 export const createCompositeMemoryModule = (
   options: CompositeMemoryOptions,

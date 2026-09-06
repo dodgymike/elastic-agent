@@ -19,6 +19,7 @@
  */
 
 import assert from "node:assert/strict";
+import { capabilitiesOf } from "../memory/backend-capabilities.js";
 import {
   InMemoryMemoryModule,
   createInMemoryMemoryModule,
@@ -355,6 +356,16 @@ async function main(): Promise<void> {
     await module.remember(planStepInput(0, "factory step", "completed"));
     assert.equal(module.countForSession(SESSION), 1);
     assert.equal(delegate.remembered.length, 1, "factory-created module should delegate");
+  }
+
+  // MI-11 capability advertisement: the in-memory backend is honest about its
+  // volatile nature while still exposing the summary read/set surface the
+  // compactor needs.
+  {
+    const caps = capabilitiesOf(new InMemoryMemoryModule());
+    assert.equal(caps.durable, false, "in-memory appends are not durable");
+    assert.equal(caps.supportsCompaction, true, "in-memory exposes a compaction summary store");
+    assert.ok(caps.retrievalPurposes.includes("prompt-context"));
   }
 
   console.log("Memory module tests passed (interface, in-memory, chaining, LLM integration, remember-after-step)");

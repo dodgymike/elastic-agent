@@ -22,6 +22,7 @@
  */
 
 import assert from "node:assert/strict";
+import { capabilitiesOf } from "../memory/backend-capabilities.js";
 import {
   GraphMemoryModule,
   createGraphMemoryModule,
@@ -405,6 +406,16 @@ async function main(): Promise<void> {
     const step = store.getNode(stepNodeId(SESSION, 1));
     assert.equal(step?.attributes?.stepIndex, 1, "missing step context falls back to 1");
     assert.deepEqual(step?.attributes?.actions, ["tool-a"]);
+  }
+
+  // MI-11 capability advertisement: the graph backend is an in-memory
+  // projection and must not imply graph nodes are persisted.
+  {
+    const caps = capabilitiesOf(new GraphMemoryModule());
+    assert.equal(caps.durable, false, "graph nodes are not persisted");
+    assert.equal(caps.supportsCompaction, false);
+    assert.equal(caps.supportsForget, false);
+    assert.ok(caps.retrievalPurposes.includes("prompt-context"));
   }
 
   console.log("Graph memory module tests passed (nodes, upsert, chain edges, getContext, chaining, fail-safe)");

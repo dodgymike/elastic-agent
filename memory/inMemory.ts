@@ -158,6 +158,20 @@ export class InMemoryMemoryModule implements MemoryModule {
   /** The most recent non-fatal failure reported by this module, if any. */
   lastFailure: MemoryFailureReport | null = null;
 
+  /**
+   * Advertised v2 capability surface (MI-11). Volatile, prompt-context only,
+   * compaction-capable through its summary read/set surface. Kept as an inline
+   * literal so this module does not gain a compile-time dependency on the v2
+   * contract; the canonical constants live in `memory/backend-capabilities.ts`.
+   */
+  readonly capabilities = {
+    durable: false,
+    retrievalPurposes: ["prompt-context"] as const,
+    supportsCompaction: true,
+    supportsForget: false,
+    supportsExport: false,
+  };
+
   constructor(options: InMemoryMemoryOptions = {}) {
     this.summarizer = options.summarizer ?? defaultHistorySummarizer;
     this.delegate = options.delegate;

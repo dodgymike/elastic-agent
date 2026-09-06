@@ -1,22 +1,20 @@
 /**
- * Focused tests for the composite concatenation memory module
- * (`memory/compositeMemory.ts`).
+ * Focused tests for the composite memory module (`memory/compositeMemory.ts`)
+ * under its MI-11 authoritative-owner semantics.
  *
  * Coverage:
- *  1. Constructor validation (primary/secondary required).
- *  2. remember() forwards to BOTH wrapped modules.
- *  3. getContext() concatenates primary context first then secondary, each
- *     under its own separator header, with configurable labels.
- *  4. Fail-safe: when one module's getContext() throws, the other's context is
- *     still returned.
- *  5. Fail-safe: when one module's remember() throws, the composite reports it
- *     on lastFailure but does not reject.
- *  6. finalize() passthrough: forwards to a durable (finalizable) primary.
- *  7. Real concat-mode wiring (as main.ts sets up): a durable
- *     PersistentMemoryModule primary + InMemoryMemoryModule secondary — both
- *     stores are updated on remember() and both labelled blocks appear in
- *     getContext(), with session/user context reaching both inner modules and
- *     finalize() flushing the durable primary.
+ *  1. Constructor validation (an authoritative primary is required; secondary
+ *     projections are optional).
+ *  2. remember() writes the authoritative owner exactly once and updates only
+ *     explicitly non-durable projections (never duplicating durable writes).
+ *  3. getContext() merges owner context first, omits exact duplicate text
+ *     blocks, and respects configurable labels.
+ *  4. Fail-safe: when one module's getContext()/remember() throws, the other's
+ *     context is still returned / the failure is recorded.
+ *  5. finalize() routes to the authoritative owner exactly once.
+ *  6. Real concat-mode wiring (persistent owner + in-memory projection) writes
+ *     the owner once, updates the cache projection, and does not repeat
+ *     identical context blocks.
  *
  * Follows the project's test conventions: plain `node:assert/strict`, a
  * `main().catch(...)` entrypoint, compiled with tsc and run with node.
@@ -39,8 +37,25 @@ import type {
   MemoryModule,
   RememberInput,
 } from "../memory/types.js";
+import type { MemoryCapabilitiesV2 } from "../memory/contracts-v2.js";
 
 const SESSION = "session-composite";
+
+const NON_DURABLE_CAPABILITIES: MemoryCapabilitiesV2 = {
+  durable: false,
+  retrievalPurposes: ["prompt-context"],
+  supportsCompaction: false,
+  supportsForget: false,
+  supportsExport: false,
+};
+
+const DURABLE_CAPABILITIES: MemoryCapabilitiesV2 = {
+  durable: true,
+  retrievalPurposes: ["prompt-context", "replay", "audit", "export"],
+  supportsCompaction: false,
+  supportsForget: false,
+  supportsExport: false,
+};
 
 /* ------------------------------------------------------------------ *
  * Helpers
@@ -51,16 +66,19 @@ class StubMemory implements MemoryModule {
   readonly remembered: RememberInput[] = [];
   readonly name: string;
   result: MemoryContextResult;
+  readonly capabilities?: MemoryCapabilitiesV2;
   /** When set, remember() throws. */
   throwOnRemember = false;
   /** When set, getContext() throws. */
   throwOnGetContext = false;
   /** Optional custom finalize callback for testing passthrough. */
   finalizeImpl?: (sessionId: string) => Promise<unknown>;
+  finalizeCalls = 0;
 
-  constructor(name: string, result: MemoryContextResult) {
+  constructor(name: string, result: MemoryContextResult, capabilities?: MemoryCapabilitiesV2) {
     this.name = name;
     this.result = result;
+    this.capabilities = capabilities;
   }
 
   async remember(input: RememberInput): Promise<void> {
@@ -74,6 +92,7 @@ class StubMemory implements MemoryModule {
   }
 
   async finalize(sessionId: string): Promise<unknown> {
+    this.finalizeCalls += 1;
     if (this.finalizeImpl) return this.finalizeImpl(sessionId);
     return `finalized:${sessionId}`;
   }
@@ -104,17 +123,16 @@ const secondaryResult: MemoryContextResult = {
  * Tests
  * ------------------------------------------------------------------ */
 
-async function testConstructorRequiresModules(): Promise<void> {
+async function testConstructorRequiresOwner(): Promise<void> {
   assert.throws(
     // @ts-expect-error intentionally missing primary
     () => new CompositeMemoryModule({ secondary: new StubMemory("s", secondaryResult) }),
-    /requires a primary/,
+    /requires an authoritative primary/,
   );
-  assert.throws(
-    // @ts-expect-error intentionally missing secondary
-    () => new CompositeMemoryModule({ primary: new StubMemory("p", primaryResult) }),
-    /requires a secondary/,
-  );
+  // Secondary projections are optional under the new ownership model.
+  const ownerOnly = new CompositeMemoryModule({ primary: new StubMemory("p", primaryResult) });
+  assert.ok(ownerOnly instanceof CompositeMemoryModule);
+
   // Factory with valid modules succeeds.
   const factoryModule = createCompositeMemoryModule({
     primary: new StubMemory("p", primaryResult),
@@ -128,32 +146,30 @@ async function testConstructorRequiresModules(): Promise<void> {
   assert.ok(aliasModule instanceof CompositeMemoryModule);
 }
 
-async function testRememberForwardsToBoth(): Promise<void> {
-  const primary = new StubMemory("p", primaryResult);
-  const secondary = new StubMemory("s", secondaryResult);
-  const module = new CompositeMemoryModule({ primary, secondary });
+async function testRememberWritesOwnerOnceAndUpdatesExplicitNonDurableProjection(): Promise<void> {
+  const owner = new StubMemory("p", primaryResult);
+  const cache = new StubMemory("s", secondaryResult, NON_DURABLE_CAPABILITIES);
+  const durableProjection = new StubMemory("d", secondaryResult, DURABLE_CAPABILITIES);
+  const module = new CompositeMemoryModule({
+    primary: owner,
+    secondary: cache,
+    projections: [durableProjection],
+  });
 
   await module.remember(rememberInput(1));
   await module.remember(rememberInput(2));
 
-  assert.equal(primary.remembered.length, 2, "primary receives every remember");
-  assert.equal(secondary.remembered.length, 2, "secondary receives every remember");
-  assert.equal(secondary.remembered[0].extra?.step, 1);
+  assert.equal(owner.remembered.length, 2, "authoritative owner receives every remember");
+  assert.equal(cache.remembered.length, 2, "non-durable projection receives cache updates");
+  assert.equal(durableProjection.remembered.length, 0, "durable projection is never double-written");
+  assert.equal(cache.remembered[0].extra?.step, 1);
   assert.equal(module.lastFailure, null, "no failure on successful remember");
-
-  // A real in-memory backend pair also holds both histories.
-  const memA = createInMemoryMemoryModule({});
-  const memB = createInMemoryMemoryModule({});
-  const composite = new CompositeMemoryModule({ primary: memA, secondary: memB });
-  await composite.remember(rememberInput());
-  const ctx = await composite.getContext({ session_id: SESSION });
-  assert.equal(ctx.hasMemory, true);
 }
 
-async function testGetContextConcatenatesPrimaryFirst(): Promise<void> {
+async function testGetContextMergesOwnerFirst(): Promise<void> {
   const module = new CompositeMemoryModule({
     primary: new StubMemory("p", primaryResult),
-    secondary: new StubMemory("s", secondaryResult),
+    secondary: new StubMemory("s", secondaryResult, NON_DURABLE_CAPABILITIES),
   });
   const ctx = await module.getContext({ session_id: SESSION });
 
@@ -167,10 +183,19 @@ async function testGetContextConcatenatesPrimaryFirst(): Promise<void> {
   assert.equal(ctx.hasMemory, true);
 }
 
+async function testGetContextDropsDuplicateTextBlocks(): Promise<void> {
+  const owner = new StubMemory("p", { text: "same fact", matchedContexts: [], hasMemory: true });
+  const cache = new StubMemory("s", { text: "same fact", matchedContexts: [], hasMemory: true }, NON_DURABLE_CAPABILITIES);
+  const module = new CompositeMemoryModule({ primary: owner, secondary: cache });
+
+  const ctx = await module.getContext({ session_id: SESSION });
+  assert.equal(ctx.text.split("same fact").length - 1, 1, "identical text appears exactly once");
+}
+
 async function testGetContextUsesCustomHeaders(): Promise<void> {
   const module = new CompositeMemoryModule({
     primary: new StubMemory("p", primaryResult),
-    secondary: new StubMemory("s", { text: "volatile", matchedContexts: [], hasMemory: true }),
+    secondary: new StubMemory("s", { text: "volatile", matchedContexts: [], hasMemory: true }, NON_DURABLE_CAPABILITIES),
     headers: { primary: "persistent", secondary: "in-memory" },
   });
   const ctx = await module.getContext({ session_id: SESSION });
@@ -180,7 +205,7 @@ async function testGetContextUsesCustomHeaders(): Promise<void> {
 
 async function testGetContextFailSafeKeepsOtherContext(): Promise<void> {
   const primary = new StubMemory("p", primaryResult);
-  const secondary = new StubMemory("s", secondaryResult);
+  const secondary = new StubMemory("s", secondaryResult, NON_DURABLE_CAPABILITIES);
   secondary.throwOnGetContext = true;
   const module = new CompositeMemoryModule({ primary, secondary });
 
@@ -192,7 +217,7 @@ async function testGetContextFailSafeKeepsOtherContext(): Promise<void> {
 
 async function testRememberFailSafeDoesNotReject(): Promise<void> {
   const primary = new StubMemory("p", primaryResult);
-  const secondary = new StubMemory("s", secondaryResult);
+  const secondary = new StubMemory("s", secondaryResult, NON_DURABLE_CAPABILITIES);
   secondary.throwOnRemember = true;
   const module = new CompositeMemoryModule({ primary, secondary });
 
@@ -201,14 +226,16 @@ async function testRememberFailSafeDoesNotReject(): Promise<void> {
   assert.equal(module.lastFailure?.secondaryFailed, true, "recorded secondary failure");
 }
 
-async function testFinalizePassthrough(): Promise<void> {
+async function testFinalizeRoutesToOwnerOnce(): Promise<void> {
   const primary = new StubMemory("p", primaryResult);
   primary.finalizeImpl = async (sessionId) => `finalized-${sessionId}`;
-  const secondary = new StubMemory("s", secondaryResult);
+  const secondary = new StubMemory("s", secondaryResult, NON_DURABLE_CAPABILITIES);
   const module = new CompositeMemoryModule({ primary, secondary });
 
   const result = await module.finalize(SESSION);
   assert.equal(result, `finalized-${SESSION}`);
+  assert.equal(primary.finalizeCalls, 1, "owner finalize called once");
+  assert.equal(secondary.finalizeCalls, 0, "projections are never finalized");
 
   // A non-finalizable primary yields undefined without throwing.
   const inMemory = createInMemoryMemoryModule({});
@@ -217,8 +244,8 @@ async function testFinalizePassthrough(): Promise<void> {
 }
 
 async function testRealConcatWiring(): Promise<void> {
-  // Mirrors the concat-mode setup in main.ts: a durable PersistentMemoryModule
-  // primary + an InMemoryMemoryModule secondary, with named headers.
+  // Mirrors the concat-mode setup in the unified factory: an authoritative
+  // PersistentMemoryModule owner + an InMemoryMemoryModule cache projection.
   const dir = await mkdtemp(join(tmpdir(), "elagent-concat-"));
   try {
     const persistent = createPersistentMemoryModule({ outputDir: dir }) as PersistentMemoryModule;
@@ -238,39 +265,38 @@ async function testRealConcatWiring(): Promise<void> {
     };
     await module.remember(input);
 
-    // Both inner stores are updated (point 3: concat updates both stores).
-    assert.equal(persistent.countForSession(SESSION), 1, "persistent primary updated");
-    assert.equal(inMemory.countForSession(SESSION), 1, "in-memory secondary updated");
+    // The owner is written once and the in-memory cache projection is updated.
+    assert.equal(persistent.countForSession(SESSION), 1, "persistent owner updated");
+    assert.equal(inMemory.countForSession(SESSION), 1, "in-memory projection updated");
 
-    // getContext() concatenates both labelled blocks, persistent first.
+    // Both stores render identical summaries over the same input, so the
+    // composite returns the fact once (owner block only).
     const ctx = await module.getContext({ session_id: SESSION, user_id: "user-concat" });
     assert.match(ctx.text, /--- persistent memory ---/);
-    assert.match(ctx.text, /--- in-memory memory ---/);
-    const persistentIdx = ctx.text.indexOf("--- persistent memory ---");
-    const inMemoryIdx = ctx.text.indexOf("--- in-memory memory ---");
-    assert.ok(persistentIdx >= 0 && inMemoryIdx >= 0);
-    assert.ok(persistentIdx < inMemoryIdx, "persistent block precedes in-memory block");
+    assert.ok(!ctx.text.includes("--- in-memory memory ---"), "duplicate projection block omitted");
+    assert.equal(ctx.text.split(`Session ${SESSION} history:`).length - 1, 1, "summary text appears once");
     assert.equal(ctx.hasMemory, true);
 
-    // The composite's finalize() passthrough flushes the durable primary.
+    // The composite's finalize() passthrough flushes the durable owner.
     const path = (await module.finalize(SESSION)) as string;
     assert.equal(typeof path, "string");
-    assert.ok((path as string).endsWith(".json"), "durable primary finalize writes a document");
+    assert.ok((path as string).endsWith(".json"), "durable owner finalize writes a document");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }
 
 async function main(): Promise<void> {
-  await testConstructorRequiresModules();
-  await testRememberForwardsToBoth();
-  await testGetContextConcatenatesPrimaryFirst();
+  await testConstructorRequiresOwner();
+  await testRememberWritesOwnerOnceAndUpdatesExplicitNonDurableProjection();
+  await testGetContextMergesOwnerFirst();
+  await testGetContextDropsDuplicateTextBlocks();
   await testGetContextUsesCustomHeaders();
   await testGetContextFailSafeKeepsOtherContext();
   await testRememberFailSafeDoesNotReject();
-  await testFinalizePassthrough();
+  await testFinalizeRoutesToOwnerOnce();
   await testRealConcatWiring();
-  console.log("composite-memory.test.ts: OK");
+  console.log("composite-memory.test.ts: OK (authoritative owner, deduped retrieval, routed lifecycle)");
 }
 
 main().catch((error) => {

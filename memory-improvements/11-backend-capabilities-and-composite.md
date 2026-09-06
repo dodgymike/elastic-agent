@@ -1,6 +1,6 @@
 # MI-11 — Unify backend capabilities and eliminate duplicate composite context
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-09](09-context-budget-and-cache.md), [MI-10](10-safe-compaction.md)
 
@@ -40,10 +40,10 @@ choose equivalent locations if current architecture makes them more appropriate.
 
 ## Acceptance criteria
 
-- [ ] All advertised configurations enforce scope and complete-request budgets; capability gaps are reported before work requires them.
-- [ ] Composite retrieval returns each logical fact once and performs one authoritative durable append per event.
-- [ ] Flush/close/forget/compact reach the owner once even through wrappers. Failures preserve their typed category.
-- [ ] Existing backend selections have documented compatibility behavior; persistent-v2 is opt-in at the end of this task.
+- [x] All advertised configurations enforce scope and complete-request budgets; capability gaps are reported before work requires them.
+- [x] Composite retrieval returns each logical fact once and performs one authoritative durable append per event.
+- [x] Flush/close/forget/compact reach the owner once even through wrappers. Failures preserve their typed category.
+- [x] Existing backend selections have documented compatibility behavior; persistent-v2 is opt-in at the end of this task.
 
 ## Validation
 
@@ -62,14 +62,34 @@ Do not delete the old graph/in-memory implementations to make tests pass. Deprec
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-10 commits present.
+Prerequisite evidence: MI-09 DONE (c7c4d0f); MI-10 DONE (2db6a34).
+Reproduction / old behavior: inline if/else selection silently fell back to persistent for any unrecognized ELAGENT_MEMORY_TYPE; composite wrote identical input into two independent histories and concatenated duplicate context; finalize/compaction were detected by concrete-ish casts rather than capability/lifecycle interfaces.
 Changed files and behavior:
+  - memory/backend-capabilities.ts (new): canonical capability constants, capabilitiesOf/hasExplicitCapabilities, and capability-gap diagnostics.
+  - memory/backend-factory.ts (new): validated selection (SUPPORTED_MEMORY_TYPES), MemoryBackendSelectionError for unknown values, and MemoryBackendHandle with lifecycle/compaction/finalize routing.
+  - memory/persistent-v2.ts (new): opt-in persistent-v2 bridge from the v1 MemoryModule contract to MemoryEventStore (durable appends, structured retrieval, flush/close lifecycle).
+  - memory/compositeMemory.ts: one authoritative owner plus optional non-durable projections; remember() writes the owner exactly once; retrieval drops exact duplicate text blocks; finalize/flush/close/compaction route to the owner exactly once.
+  - memory/inMemory.ts, memory/persistent.ts, memory/graph-memory.ts: advertise inline v2 capability surfaces (volatile / end-of-plan durable / projection).
+  - memory/index.ts: export the new capability, factory, and persistent-v2 surfaces.
+  - main.ts: selection now goes through createMemoryBackend and rejects unknown values with an actionable error; compactor and end-of-plan finalize route through the backend handle (no concrete class checks).
+  - test/memory-backend-capabilities.test.ts (new): shared conformance suite with fake projections and write-count assertions.
+  - test/memory-selection.test.ts, test/composite-memory.test.ts, test/graph-memory.test.ts, test/memory.test.ts: extended for capabilities, persistent-v2 opt-in, deduplicated retrieval, and routed lifecycle.
+  - package.json: updated memory test-script file lists and added test:memory-backend-capabilities.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-backend-capabilities -> exit 0
+  - npm run test:memory-selection -> exit 0
+  - npm run test:composite-memory -> exit 0
+  - npm run test:memory -> exit 0
+  - npm run test:graph-memory -> exit 0
+  - npm run test:memory-context-budget -> exit 0
+  - npm run test:memory-safe-compaction -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: no storage schema change. ELAGENT_MEMORY_TYPE now rejects unrecognized values instead of silently choosing persistent memory; persistent-v2 is opt-in and honors ELAGENT_MEMORY_EVENT_STORE_PATH. Existing selections are preserved and the default remains persistent until MI-16.
+Residual limitations and follow-up IDs: forgetting/export/retention are MI-13; health/efficiency metrics are MI-14. In-memory and graph remain documented limited modes (session-keyed; volatile/projection). The build script does not yet list the new modules explicitly (MI-16 integration).
+Rollback notes: restore the pre-MI-11 compositeMemory.ts and main.ts selection, or remove the additive backend-capabilities/backend-factory/persistent-v2 files and their index exports.
+Implementation commit(s): (recorded at commit time)
 ```

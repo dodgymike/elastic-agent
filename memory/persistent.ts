@@ -167,6 +167,21 @@ export class PersistentMemoryModule implements MemoryModule {
   /** The most recent non-fatal failure reported by this module, if any. */
   lastFailure: PersistentFailureReport | null = null;
 
+  /**
+   * Advertised v2 capability surface (MI-11). `remember()` is in-process and
+   * not durable per append; durability is established only by end-of-plan
+   * `finalize()`. Summary compaction is supported. Kept as an inline literal so
+   * this module does not gain a compile-time dependency on the v2 contract; the
+   * canonical constants live in `memory/backend-capabilities.ts`.
+   */
+  readonly capabilities = {
+    durable: false,
+    retrievalPurposes: ["prompt-context"] as const,
+    supportsCompaction: true,
+    supportsForget: false,
+    supportsExport: false,
+  };
+
   constructor(options: PersistentMemoryOptions = {}) {
     this.summarizer = options.summarizer ?? defaultHistorySummarizer;
     this.delegate = options.delegate;
