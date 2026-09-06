@@ -82,3 +82,15 @@ Residual limitations and follow-up IDs: LLM summarizer integration stays opt-in 
 Rollback notes: remove the additive module and exports; derived summaries rebuild from events.
 Implementation commit(s): 80985f7 (implementation + tests); completion record commit follows.
 ```
+
+Verification re-check (verification pass, plan step 5): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:memory-incremental-summary, test:memory-compaction,
+    test:persistent-memory, test:memory-facts, build.
+  - The recorded literal `npx tsc --noEmit ... memory/index.ts` check was run through the
+    dedicated TypeCheck tool (repo-approved fixed flags, memory/index.ts, noEmit); exit 0.
+  - git diff --check clean.
+  - Prerequisite re-confirmed: MI-06 Status DONE; commits b08954a/b451455 (MI-06) and
+    80985f7 (MI-07) present in git log.
+  - Skipped checks: none. No code change.
