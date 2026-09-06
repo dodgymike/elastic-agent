@@ -1,6 +1,6 @@
 # MI-07 — Make summaries incremental, revisioned, and cancelable
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-06](06-structured-facts-and-provenance.md)
 
@@ -60,14 +60,25 @@ Do not silently introduce a second provider or send memories to a new service. C
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-06 commits present.
+Prerequisite evidence: MI-06 DONE (b08954a/b451455).
+Reproduction / old behavior: persistent backend re-summarized full history after every remember and during finalize; no cursor/versioning/stale protection existed.
 Changed files and behavior:
+  - memory/incremental-summary.ts (new): SummaryCheckpointV2, IncrementalSummaryManager, deterministic offline renderer; batched, revisioned, cancelable advances.
+  - memory/index.ts: export the incremental summary surface.
+  - test/memory-incremental-summary.test.ts (new): non-quadratic batching, invalid-output retry, stale out-of-order completion, timeout retention, versioning, no-call paths.
+  - package.json: add test:memory-incremental-summary script.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-incremental-summary -> exit 0
+  - npm run test:memory-compaction -> exit 0
+  - npm run test:persistent-memory -> exit 0
+  - npm run test:memory-facts -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: derived summary policyVersion=1; no storage schema change.
+Residual limitations and follow-up IDs: LLM summarizer integration stays opt-in via injected IncrementalSummarizer; finalization flush wiring for the new backend lands with rollout (MI-16).
+Rollback notes: remove the additive module and exports; derived summaries rebuild from events.
+Implementation commit(s): 80985f7 (implementation + tests); completion record commit follows.
 ```
