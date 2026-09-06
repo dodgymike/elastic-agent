@@ -140,7 +140,7 @@ Planning advertises only these research tools and rejects mutation calls before
 dispatch. Allowed calls use the normal safety classifier, execution policy,
 rendering, and tool handlers. Shell commands are deferred to execution.
 
-Research can span 12 tool-call rounds and 48 calls, including calls made during
+Research can span 100 tool-call rounds and 250 calls, including calls made during
 JSON repair. Exhausting either limit aborts planning before further tools run.
 Tools retain their existing per-call limits, and user cancellation is honored.
 These are call-count limits, not a new overall wall-clock deadline.

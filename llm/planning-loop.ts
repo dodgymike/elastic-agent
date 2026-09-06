@@ -34,8 +34,8 @@ export async function runPlanningLoop(options: {
     maxToolCalls?: number;
     maxParseRetries?: number;
 }) {
-    const maxRounds = options.maxToolRounds ?? 12;
-    const maxCalls = options.maxToolCalls ?? 48;
+    const maxRounds = options.maxToolRounds ?? 100;
+    const maxCalls = options.maxToolCalls ?? 250;
     const maxRetries = options.maxParseRetries ?? 1;
     for (const limit of [maxRounds, maxCalls, maxRetries]) {
         if (!Number.isSafeInteger(limit) || limit < 0) throw new Error("Planning limits must be nonnegative integers.");
