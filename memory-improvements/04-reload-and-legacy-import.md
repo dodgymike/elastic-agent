@@ -1,6 +1,6 @@
 # MI-04 — Restore sessions and import legacy memory safely
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-03](03-durable-event-store.md)
 
@@ -62,14 +62,29 @@ No automatic bulk migration. Import failures do not prevent an unrelated session
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-03 commits present.
+Prerequisite evidence: MI-03 DONE (5d12c2f/71d18bd).
+Reproduction / old behavior: PersistentMemoryModule had no disk loader; README implied reusing --session-id would recall across runs when the default backend is write-only.
 Changed files and behavior:
+  - memory/session-loader.ts (new): loadSession distinguishes absent/ready/failure and rebuilds a session view by paging committed events.
+  - memory/legacy-import.ts (new): explicit caller-selected import with size/version/identity/step/field validation; stable source-digest-derived event IDs; unverified imported claims; quarantineLegacyFile helper; originals never modified.
+  - memory/index.ts: export loader and importer.
+  - README.md: corrected the --session-id recall claim to distinguish old write-only backend from new event-store restart recall.
+  - test/memory-reload.test.ts (new): process A/B/C reload and scope isolation.
+  - test/memory-import.test.ts (new): idempotent re-import, no implicit merge, safe failure cases.
+  - package.json: add test:memory-reload and test:memory-import scripts.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-reload -> exit 0
+  - npm run test:memory-import -> exit 0
+  - npm run test:memory-contract-v2 -> exit 0
+  - npm run test:memory-privacy -> exit 0
+  - npm run test:memory-event-store -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: importer records migrationVersion=1 and sourceDigest on imported events; legacy files remain untouched.
+Residual limitations and follow-up IDs: derived checkpoints are not yet produced (later tasks); import of a specific unreadable session reports failure but does not quarantine automatically (operator uses quarantineLegacyFile).
+Rollback notes: remove the additive loader/importer and their callers; imported state remains separate and originals remain available.
+Implementation commit(s): e37a96e (implementation + tests + README); completion record commit follows.
 ```
