@@ -203,10 +203,10 @@ completion record and the implementation commits visible in git.
 
 | Task | Status | Implementation | Completion record | Verification |
 | --- | --- | --- | --- | --- |
-| MI-01 | DONE | `0d732be` | `0dfa638` | Verification recorded in `70550b7` and `f1d3d4c`; BLOCKED on unsupported workspace Node v18.19.1 (project engines require >=22.9.0). |
+| MI-01 | DONE | `0d732be` | `0dfa638` | Re-verified in `1ca2574` under supported Node v22.23.2 (`verification-protocol.md`); no change needed. |
 | MI-02 | DONE | `8ff18b8` | `6268b56` | Verified in `f84a04e` under `verification-protocol.md`; no change needed. |
-| MI-03 | DONE | `5d12c2f` | `71d18bd` | Verification recorded in `08618d3`; BLOCKED on unsupported workspace Node v18.19.1 (project engines require >=22.9.0). |
-| MI-04 | DONE | `e37a96e` | `ac048b4` | Verification recorded in `45ef099`; BLOCKED on unsupported workspace Node v18.19.1 (project engines require >=22.9.0). |
+| MI-03 | DONE | `5d12c2f` | `71d18bd` | Re-verified in `074f6b0` under supported Node v22.23.2 (`verification-protocol.md`); no change needed. |
+| MI-04 | DONE | `e37a96e` | `ac048b4` | Re-verified in `ee4ad9f` under supported Node v22.23.2 (`verification-protocol.md`); no change needed. |
 | MI-05 | DONE | `7c40eca` | `e79e9ea` | Verified in `dccc5e1` under `verification-protocol.md`; no change needed. |
 | MI-06 | DONE | `b08954a` | `b451455` | Verified in `0443231` under `verification-protocol.md`; no change needed. |
 | MI-07 | DONE | `80985f7` | `cddc5ab` | Verified in `eb7df15` under `verification-protocol.md`; no change needed. |
@@ -222,10 +222,10 @@ completion record and the implementation commits visible in git.
 
 Commit `940221c` introduces the one-task-at-a-time verification protocol
 (`verification-protocol.md`); it defines how verification runs and is not itself
-a pass/fail result. Only MI-01, MI-03, and MI-04 remain blocked on the
-unsupported workspace Node v18.19.1 (project engines require >=22.9.0) and have
-not been re-verified under that protocol.
+a pass/fail result. MI-01, MI-03, and MI-04 were re-verified under supported
+Node v22.23.2 (commits `1ca2574`, `074f6b0`, and `ee4ad9f`); no task remains
+blocked on verification.
 
 > Index reconciliation note (documentation-only): this index was reconciled with
-> the verification-pass commits recorded in the table above; no implementation
-> changes were made.
+> the verification-pass and re-verification commits recorded in the table above;
+> no implementation changes were made.
