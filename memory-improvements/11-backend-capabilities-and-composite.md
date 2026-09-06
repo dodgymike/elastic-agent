@@ -91,5 +91,5 @@ Validation commands and actual results:
 Schema / configuration / compatibility changes: no storage schema change. ELAGENT_MEMORY_TYPE now rejects unrecognized values instead of silently choosing persistent memory; persistent-v2 is opt-in and honors ELAGENT_MEMORY_EVENT_STORE_PATH. Existing selections are preserved and the default remains persistent until MI-16.
 Residual limitations and follow-up IDs: forgetting/export/retention are MI-13; health/efficiency metrics are MI-14. In-memory and graph remain documented limited modes (session-keyed; volatile/projection). The build script does not yet list the new modules explicitly (MI-16 integration).
 Rollback notes: restore the pre-MI-11 compositeMemory.ts and main.ts selection, or remove the additive backend-capabilities/backend-factory/persistent-v2 files and their index exports.
-Implementation commit(s): (recorded at commit time)
+Implementation commit(s): 1b615eb (implementation + tests + completion record)
 ```
