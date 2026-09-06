@@ -1,6 +1,6 @@
 # MI-09 — Assemble bounded memory context while preserving prompt caching
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-07](07-incremental-summaries.md), [MI-08](08-relevant-retrieval.md)
 
@@ -65,14 +65,24 @@ Do not promise a cache hit based only on ordering: provider behavior and prefix 
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-08 commits present.
+Prerequisite evidence: MI-07 DONE (80985f7/cddc5ab); MI-08 DONE (249698d/b2e9689).
+Reproduction / old behavior: only summary characters were budgeted; runtime had no complete-request memory budget or structured context assembly.
 Changed files and behavior:
+  - memory/context-assembly.ts (new): MemoryContextAssembler with capacity/output reserve, conservative estimator, stable-prefix preservation, whole-record trimming, omitted counts, budget errors, no-memory mode.
+  - memory/index.ts: export the context assembly surface.
+  - test/memory-context-budget.test.ts (new): capacity, stable prefix, constraint preservation, no-memory requests.
+  - package.json: add test:memory-context-budget script.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-context-budget -> exit 0
+  - npm run test:multi-turn-memory -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+  - npm run test:prompt-builder -> FAIL (pre-existing, unrelated to MI-09): prompts/build-prompt-skeleton.txt does not match the golden fixture (missing recent-prompt/tool-history lines). Not touched by this task; recorded as unavailable/pre-existing.
+Schema / configuration / compatibility changes: no storage schema change; context assembly is a derived renderer.
+Residual limitations and follow-up IDs: provider/model-aware tokenizer is injected, conservative fallback is documented; actual cache hits remain provider-dependent; pre-existing prompt-builder golden mismatch needs a separate fix.
+Rollback notes: remove the additive assembly module and exports.
+Implementation commit(s): c7c4d0f (implementation + tests); completion record commit follows.
 ```
