@@ -69,6 +69,22 @@ import {
 } from "./plan-model.js";
 import { tryApplyPlanPatch } from "./plan-patch.js";
 import {
+    createRunState,
+    loadRunState,
+    writeRunState,
+    type RunStateCompletionRecord,
+    type RunStateToolEffect,
+    type RunStateWorkspaceIdentity,
+} from "./run-state.js";
+import {
+    buildToolEffectRecord,
+    reconcileRecovery,
+    sanitizeIdempotencyToken,
+    specKeeperStepTaskKey,
+    toolEffectReference,
+    type RecoveryDecision,
+} from "./run-state-reconcile.js";
+import {
     computeReplanProgress,
     parseReplanDecision,
     patchFromRevisedSteps,
@@ -107,7 +123,7 @@ import {
     throwIfReplanAttemptLimitReached,
     throwIfReplanTimeBudgetExceeded,
 } from "./llm/replan-abort.js";
-import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktree, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence, listWorktrees } from "./worktree.js";
+import { ensureWorktree, stageAllInWorktree, cleanupWorktree, commitInWorktreeWithTrailer, mergeWorktreeIntoMain, stagedChangesSummary, committedChangesSummary, latestCommitEvidence, listWorktrees } from "./worktree.js";
 import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 import { renderToolPhase, terminalColorEnabled, truncate, stringify } from "./tool-renderer.js";
@@ -531,6 +547,9 @@ async function ensureMemoryCompactor(): Promise<void> {
 const claudeInstructions = readFileSync("CLAUDE.md", "utf-8");
 const dataFilename = "/tmp/data.json";
 const memoryFilename = process.env.ELASTIC_AGENT_MEMORY_PATH ?? "/tmp/elastic-agent-memory.json";
+// Durable run-state (PI-06): the authoritative execution record kept separate
+// from summarized memory so memory compaction/loss cannot erase it.
+const runStateFilename = process.env.ELASTIC_AGENT_RUN_STATE_PATH ?? "/tmp/elastic-agent-run-state.json";
 const historyLimit = 10;
 const maxReplanAttempts = 3;
 const maxConsecutiveNoProgressReplans = 2;
@@ -1510,6 +1529,159 @@ function saveMemory(memory, filename = memoryFilename) {
 }
 function readData(filename = dataFilename) { try { return JSON.parse(readFileSync(filename, "utf-8")); } catch (error) { status.warning(`Failed to read saved data; starting with a new configuration: ${error instanceof Error ? error.message : String(error)}`); return null; } }
 
+/** Current git branch for a checkout, or null when git cannot be inspected. */
+function currentGitBranch(cwd: string): string | null {
+    try {
+        const result = spawnSync("git", ["branch", "--show-current"], { cwd, encoding: "utf-8" });
+        if (result.status !== 0) return null;
+        const branch = (result.stdout ?? "").trim();
+        return branch.length > 0 ? branch : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Workspace/branch identity used to scope durable run-state to one checkout. */
+function currentRunStateIdentity(): RunStateWorkspaceIdentity {
+    return {
+        workspacePath: workspaceInit.pwd,
+        branch: currentGitBranch(mainCwd),
+        worktreePath: executionWorktreePath,
+    };
+}
+
+/** Authoritative completion records derived from the local completion ledger. */
+function runStateCompletionRecords(configData: any, planModel: any): RunStateCompletionRecord[] {
+    const completed = Array.isArray(configData?.completedSteps) ? configData.completedSteps : [];
+    const records: RunStateCompletionRecord[] = [];
+    for (const entry of completed) {
+        const stepId = Number.isInteger(entry?.stepId) && entry.stepId > 0
+            ? entry.stepId
+            : (Number.isInteger(entry?.step) && entry.step > 0 ? entry.step : null);
+        if (stepId === null || typeof entry?.outcome !== "string") continue;
+        const criteria = planModel ? planModelCriteriaById(planModel, stepId) : [];
+        records.push({
+            stepId,
+            outcome: entry.outcome,
+            completionCriteria: criteria.length > 0 ? criteria : [`Step ${stepId} ${entry.outcome}.`],
+            ...(entry.feedbackResponseId === null || typeof entry.feedbackResponseId === "string"
+                ? { feedbackResponseId: entry.feedbackResponseId }
+                : {}),
+            ...(typeof entry.timestamp === "string" ? { recordedAt: entry.timestamp } : {}),
+        });
+    }
+    return records;
+}
+
+/** Persist the current plan/attempt position as a sealed durable run-state. */
+function persistRunState(configData: any, activeStepId: number | null, attemptId: string | null): void {
+    const planModel = configData?.planModel ?? null;
+    if (!planModel || typeof planModel.planId !== "string" || !Number.isInteger(planModel.version)) return;
+    try {
+        const state = createRunState({
+            planId: planModel.planId,
+            planVersion: planModel.version,
+            activeStepId,
+            attemptId,
+            workspaceIdentity: currentRunStateIdentity(),
+            evidenceReferences: Array.isArray(configData?.runStateEvidenceReferences)
+                ? configData.runStateEvidenceReferences
+                : [],
+            completedSteps: runStateCompletionRecords(configData, planModel),
+        });
+        writeRunState(runStateFilename, state);
+    } catch (error) {
+        status.warning(`Could not persist durable run-state: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+/** Remove the durable run-state after a finalized or deliberately aborted run. */
+function clearRunState(): void {
+    try {
+        rmSync(runStateFilename, { force: true });
+    } catch (error) {
+        status.warning(`Could not clear durable run-state: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+/** Record one tool side effect and persist it in the durable run-state. */
+function recordRunStateToolEffect(configData: any, effect: RunStateToolEffect): void {
+    if (!Array.isArray(configData.runStateEvidenceReferences)) configData.runStateEvidenceReferences = [];
+    configData.runStateEvidenceReferences.push(toolEffectReference(effect));
+    persistRunState(configData, effect.stepId, effect.attemptId);
+}
+
+/** Integrations that carry an idempotency key usable for resume verification. */
+function toolEffectIntegrationFor(toolName: string): "spec-keeper" | undefined {
+    return toolName === "SpecKeeper" || toolName === "SpecKeeperEnroll" ? "spec-keeper" : undefined;
+}
+
+/** True when a tool call may produce an external side effect worth recording. */
+function shouldRecordToolEffect(toolName: string): boolean {
+    if (toolName === "SpecKeeper" || toolName === "SpecKeeperEnroll" || toolName === "AgentBusEnrol") return true;
+    if (toolName === "Write" || toolName === "Edit" || toolName === "Delete" || toolName === "Mkdir" || toolName === "Rmdir" || toolName === "FileOps") return true;
+    if (toolName === "ExecuteCommand" || toolName === "RunPackageScript" || toolName === "RunScript" || toolName === "RunNodeTest" || toolName === "GoToolchain" || toolName === "TypeCheck") return true;
+    if (toolName === "HttpRequest" || toolName === "Git") return true;
+    return false;
+}
+
+/** Record side effects from one dispatched tool-call batch into run-state. */
+function recordStepToolEffects(configData: any, dispatchedCalls: any[]): void {
+    const planModel = configData?.planModel ?? null;
+    if (!planModel || typeof planModel.planId !== "string") return;
+    const attemptId = typeof configData?.currentAttemptId === "string" ? configData.currentAttemptId : "";
+    if (!attemptId) return;
+    const stepId = planModelStepIdByIndex(planModel, configData.currentExecutionIndex ?? 0)
+        ?? (Number.isInteger(configData?.currentExecutionIndex) ? configData.currentExecutionIndex + 1 : 1);
+    for (const dispatched of dispatchedCalls) {
+        const output = dispatched?.output;
+        const toolName = typeof output?.name === "string" ? output.name : "";
+        const toolCallId = typeof output?.call_id === "string" ? output.call_id : "";
+        if (!toolCallId || !shouldRecordToolEffect(toolName)) continue;
+        const integration = toolEffectIntegrationFor(toolName);
+        const idempotencyKey = integration === "spec-keeper"
+            ? specKeeperStepTaskKey(planModel.planId, stepId)
+            : undefined;
+        recordRunStateToolEffect(configData, buildToolEffectRecord({
+            stepId,
+            attemptId,
+            toolCallId,
+            ...(toolName ? { toolName } : {}),
+            ...(integration ? { integration } : {}),
+            ...(idempotencyKey ? { idempotencyKey } : {}),
+        }));
+    }
+}
+
+/** Classify and act on a previously persisted run-state before any execution. */
+function applyResumeDecision(decision: RecoveryDecision): void {
+    switch (decision.status) {
+        case "fresh":
+            return;
+        case "replay-safe":
+            status.success("Run-state recovery: the prior attempt produced no external effects; a fresh attempt is safe.");
+            return;
+        case "untrusted":
+            throw new RunAbortError("unable-to-complete", "planning", `Refusing to resume from an untrusted run-state artifact: ${decision.reason}`);
+        case "incompatible":
+            throw new RunAbortError("unable-to-complete", "planning", `Refusing to resume from an incompatible run-state artifact: ${decision.reason}`);
+        case "succeeded":
+            throw new RunAbortError("unable-to-complete", "planning", `Run-state recovery: step ${decision.stepId} already succeeded (recorded ${decision.recordedAt ?? "earlier"}); refusing to blindly re-execute it. Resolve the interrupted run or remove ${runStateFilename}.`);
+        case "failed":
+            throw new RunAbortError("unable-to-complete", "planning", `Run-state recovery: step ${decision.stepId} already ${decision.outcome}; refusing to blindly re-execute it. Resolve the interrupted run or remove ${runStateFilename}.`);
+        case "uncertain":
+            throw new RunAbortError("unable-to-complete", "planning", `Run-state recovery: ${decision.reason} Resolve the interrupted work or remove ${runStateFilename}.`);
+    }
+}
+
+/** Stable review-commit trailer for idempotent review commits. */
+function reviewCommitTrailer(configData: any): string {
+    const planModel = configData?.planModel ?? null;
+    const planId = planModel?.planId ? sanitizeIdempotencyToken(planModel.planId) : "plan";
+    const version = Number.isInteger(planModel?.version) ? planModel.version : 1;
+    return `Elastic-Agent-Run: ${planId}-v${version}-review`;
+}
+
 /** Operational Spec Keeper options derived from resolved defaults (no secrets). */
 function specKeeperClientOptions(defaults: any) {
     return { projectSlug: defaults?.projectSlug, apiBase: defaults?.apiBase };
@@ -1521,12 +1693,18 @@ function specKeeperClientOptions(defaults: any) {
  * same mapping runExecutionPhase uses) is what keeps an external Spec Keeper
  * task attached to the right step when a replan reorders or rewrites steps.
  */
-function planStepTaskDescriptors(planModel: any, activeSteps: string[]): Array<{ stepId: number; title: string }> {
+function planStepTaskDescriptors(planModel: any, activeSteps: string[]): Array<{ stepId: number; title: string; key?: string }> {
     if (!Array.isArray(activeSteps)) return [];
-    return activeSteps.map((title, index) => ({
-        stepId: planModel ? (planModelStepIdByIndex(planModel, index) ?? index + 1) : index + 1,
-        title: typeof title === "string" && title.trim().length > 0 ? title : `Plan step ${index + 1}`,
-    }));
+    return activeSteps.map((title, index) => {
+        const stepId = planModel ? (planModelStepIdByIndex(planModel, index) ?? index + 1) : index + 1;
+        return {
+            stepId,
+            title: typeof title === "string" && title.trim().length > 0 ? title : `Plan step ${index + 1}`,
+            // Stable plan+step key makes Spec Keeper task create/reuse
+            // idempotent across replans and process restarts.
+            ...(planModel?.planId ? { key: specKeeperStepTaskKey(planModel.planId, stepId) } : {}),
+        };
+    });
 }
 
 /** Return a state's step tasks whether stored as a Map or a legacy array. */
@@ -2659,6 +2837,10 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
         toolOutputs = [];
         const functionCalls = (response.output ?? []).filter((output) => output.type === "function_call");
         const dispatchedCalls = await dispatchToolCallsBatch(functionCalls, configData, `plan-${index + 1}`);
+        // Record external side effects from this batch into the durable
+        // run-state so a crash after an effect but before the step's success
+        // recording is classified as uncertain, never blindly replayed.
+        recordStepToolEffects(configData, dispatchedCalls);
         for (const dispatched of dispatchedCalls) {
             toolOutputs.push(functionCallOutput(dispatched.output, dispatched.toolResponse));
             appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
@@ -2741,6 +2923,12 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             // criteria below are what the run records and replans against.
             const stepId = planModel ? (planModelStepIdByIndex(planModel, index) ?? index + 1) : index + 1;
             const stepCriteria = planModel ? planModelCriteriaById(planModel, stepId) : [];
+            // Durable run-state: record the in-flight attempt before any tool
+            // call so a crash before an effect is replay-safe and a crash after
+            // an effect is reconciled instead of blindly repeated.
+            configData.currentAttemptId = randomUUID();
+            configData.currentExecutionIndex = index;
+            persistRunState(configData, stepId, configData.currentAttemptId);
             // Resolve the external step task by stable step ID, never by array
             // position, so a reordered plan keeps the right Spec Keeper task.
             const stepTask = specKeeperState?.stepTasks instanceof Map
@@ -2779,6 +2967,9 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             // next replan/review cycle but is never reported as completed work.
             if (snapshot.ledgerEntry) {
                 configData.completedSteps.push(snapshot.ledgerEntry);
+                // Success recording is now durable: a crash after this point
+                // resumes as succeeded/failed instead of replaying the attempt.
+                persistRunState(configData, stepId, configData.currentAttemptId);
             }
             const reduction = snapshot.reduced;
             logAgentEvent({ event: "step", step: index + 1, status: reduction.outcome, tldr: feedbackEntry?.valid ? (feedbackEntry.feedback.summary || executedStep) : (feedbackEntry?.validationError || "Invalid execution feedback") });
@@ -3119,6 +3310,12 @@ async function runSingleStep(
  */
 async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
     agentLogRun = randomUUID();
+    // Durable run-state reconciliation (PI-06): before any planning or tool
+    // execution, load the sealed run-state left by a previous invocation and
+    // classify the interrupted attempt. Untrusted/incompatible artifacts and
+    // ambiguous (uncertain) effects abort instead of being blindly replayed;
+    // only a fresh or replay-safe state proceeds.
+    applyResumeDecision(reconcileRecovery(loadRunState(runStateFilename), currentRunStateIdentity()));
     // Re-resolve the concurrency bound from the options actually passed into
     // this run so programmatic callers and loop-mode re-entries share one
     // authoritative value (the CLI also validated it once at startup).
@@ -3289,9 +3486,11 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
         status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
         if (noPlanLoopReplan) {
             status.replan("Loop mode: relevant bus message received after direct execution; deferring completion so the plan can be re-planning with the message as the new work order.", hierarchyIndent("plan"));
+            clearRunState();
             return { success: true, loopReplanPending: true };
         }
         status.success(isTaskMode ? "Task-mode direct execution complete. Stopping." : "Direct execution complete. Stopping.");
+        clearRunState();
         return { success: true };
     }
 
@@ -3379,6 +3578,9 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     configData.replanElapsedMs = 0;
     configData.lastResponseId = null;
     configData.lastToolCallIds = [];
+    // Persist the new plan's identity before any step runs so an interrupted
+    // execution phase can be reconciled on the next invocation.
+    persistRunState(configData, null, null);
     saveData(configData);
     if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
 
@@ -3511,7 +3713,18 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
                         // and merge the worktree branch into the current (main) branch.
                         stageAllInWorktree(executionWorktreePath);
                         const summary = summarizeReview(review);
-                        commitInWorktree(executionWorktreePath, `review happy: ${summary}`);
+                        // Idempotent review commit: a stable trailer prevents a
+                        // resume from creating a duplicate commit of the same work.
+                        const trailer = reviewCommitTrailer(configData);
+                        const commitResult = commitInWorktreeWithTrailer(executionWorktreePath, `review happy: ${summary}`, trailer);
+                        if (commitResult.uncertain) {
+                            throw new Error("Review passed but the worktree commit could not be verified idempotently; the staged work was left for inspection instead of risking a duplicate commit.");
+                        }
+                        if (commitResult.committed) {
+                            status.success(`Created review commit in the worktree (review happy: ${summary}).`);
+                        } else {
+                            status.success(`Review work was already committed (${commitResult.existingHash}); reusing the existing commit.`);
+                        }
                         mergeWorktreeIntoMain(executionWorktreeBranch, mainCwd);
                         status.success(`Committed satisfied review work into main (review happy: ${summary}).`);
                     } catch (error) {
@@ -3604,6 +3817,7 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     if (reviewOutcome === "failed") {
         status.error("Review did not pass; the work was left uncommitted and the task was marked blocked.");
         cleanupExecutionWorktree();
+        clearRunState();
         return { success: false };
     }
 
@@ -3622,6 +3836,7 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
         // work order instead of treating this as a normal completed run.
         const totals = totalUsage(configData.tokenUsage);
         status.success(`Total token usage: total=${totals.total} cached=${totals.cached} total_minus_cache=${totals.totalMinusCache}`);
+        clearRunState();
         return { success: true, loopReplanPending: true };
     }
 
@@ -3640,6 +3855,10 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     await finalizePersistentMemory();
     reportMemoryHealth();
     status.success(isTaskMode ? "Task-mode plan execution complete. Stopping." : "Plan complete. Stopping.");
+    // A finalized successful run leaves no resume state behind: clear the
+    // durable run-state so the next invocation starts fresh instead of
+    // aborting on a stale "already succeeded" record.
+    clearRunState();
     cleanupExecutionWorktree();
     return { success: true };
 }
@@ -3878,6 +4097,7 @@ entrypointOutcome
             // SIGINT can still force-exit.
             status.abort(abortBlockText(error));
             recordLastAbort(activeConfigData, error);
+            clearRunState();
             cleanupExecutionWorktree(true);
             if (mainCheckoutMayHavePartialWork) {
                 status.abort("main-checkout changes were left as-is; no automatic rollback was performed");

@@ -147,6 +147,67 @@ export function commitInWorktree(worktreePath: string, message: string): void {
 }
 
 /**
+ * Search the worktree history for a commit carrying the exact `trailer` text
+ * (for example `Elastic-Agent-Run: <idempotency-key>`). Returns a
+ * discriminated result so callers can distinguish "definitely absent" (safe to
+ * commit) from "unknown" (git could not be inspected), which must not be
+ * treated as permission to create a potentially duplicate commit.
+ */
+export function findCommitByTrailer(
+  worktreePath: string,
+  trailer: string,
+): { found: boolean; hash: string | null; uncertain: boolean } {
+  if (!trailer || typeof trailer !== "string" || trailer.includes("\u0000") || /[\r\n]/.test(trailer)) {
+    throw new Error("findCommitByTrailer requires a single-line trailer string.");
+  }
+  const result = spawnSync(
+    "git",
+    ["log", "--format=%H", "--fixed-strings", "--grep", trailer],
+    { cwd: worktreePath, encoding: "utf-8" },
+  );
+  if (result.status !== 0) {
+    return { found: false, hash: null, uncertain: true };
+  }
+  const hash = (result.stdout ?? "").trim().split("\n")[0].trim();
+  return { found: hash.length > 0, hash: hash.length > 0 ? hash : null, uncertain: false };
+}
+
+/** Result of an idempotent worktree commit attempt. */
+export interface IdempotentCommitResult {
+  /** True when a new commit was created. */
+  readonly committed: boolean;
+  /** Hash of the already-present commit when a duplicate was avoided. */
+  readonly existingHash: string | null;
+  /** True when git could not be inspected; the commit was NOT created. */
+  readonly uncertain: boolean;
+}
+
+/**
+ * Commit staged worktree changes exactly once for a given idempotency trailer.
+ *
+ * A commit carrying the trailer is detected first (literal `git log --grep`
+ * with `--fixed-strings`); when found, no new commit is created. When git
+ * cannot be inspected, the result is `uncertain` and nothing is committed, so
+ * a resume never blindly duplicates a commit — the caller reports the
+ * ambiguous effect for inspection instead.
+ */
+export function commitInWorktreeWithTrailer(
+  worktreePath: string,
+  message: string,
+  trailer: string,
+): IdempotentCommitResult {
+  const existing = findCommitByTrailer(worktreePath, trailer);
+  if (existing.uncertain) {
+    return { committed: false, existingHash: null, uncertain: true };
+  }
+  if (existing.found) {
+    return { committed: false, existingHash: existing.hash, uncertain: false };
+  }
+  commitInWorktree(worktreePath, `${message}\n\n${trailer}`);
+  return { committed: true, existingHash: null, uncertain: false };
+}
+
+/**
  * Merge the worktree branch into another checkout (typically the main branch).
  * `branchName` is the branch that was created by createWorktree/ensureWorktree
  * for staging. The merge is run from `repoRoot` (the main checkout), bringing

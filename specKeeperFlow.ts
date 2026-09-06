@@ -301,6 +301,12 @@ export interface PlanStepSyncOptions extends Omit<SpecKeeperOptions, "path"> {
 export interface PlanStepTaskDescriptor {
   readonly stepId: number;
   readonly title: string;
+  /**
+   * Optional stable idempotency key, matched exactly before title keywords.
+   * Supplying one makes task create/reuse idempotent across replans and
+   * process restarts (the same plan+step always resolves the same task).
+   */
+  readonly key?: string;
 }
 
 /** Result of syncing plan step tasks keyed by stable step ID. */
@@ -497,6 +503,7 @@ export async function syncPlanStepTasksById(
       {
         ...options,
         title: descriptor.title,
+        ...(descriptor.key ? { key: descriptor.key } : {}),
         description: `Plan step ${descriptor.stepId} under epic ${epicId ?? "(no id)"}: ${descriptor.title}`,
         epicId,
         defaultStatus: index === 0 ? "in_progress" : "todo",
@@ -563,6 +570,7 @@ export async function reconcilePlanStepTasks(
       {
         ...options,
         title: descriptor.title,
+        ...(descriptor.key ? { key: descriptor.key } : {}),
         description: `Plan step ${descriptor.stepId} under epic ${epicId ?? "(no id)"}: ${descriptor.title}`,
         epicId,
         defaultStatus: "todo",

@@ -44,6 +44,9 @@ import { basename, dirname, join } from "node:path";
 import type { PlanStepId, StepEvidenceReference } from "./plan-model.js";
 import { isTerminalOutcome, type StepOutcome } from "./step-outcome.js";
 
+/** Outcomes that close out an attempt with a definitive result. */
+export type TerminalStepOutcome = "succeeded" | "failed" | "blocked" | "invalid";
+
 /** The schema version emitted by this module. */
 export const RUN_STATE_SCHEMA_VERSION = 1 as const;
 
@@ -79,7 +82,7 @@ export interface RunStateCompletionRecord {
     /** Stable plan-model step ID that completed. */
     readonly stepId: PlanStepId;
     /** Terminal normalized outcome (succeeded/failed/blocked/invalid). */
-    readonly outcome: StepOutcome;
+    readonly outcome: TerminalStepOutcome;
     /** Completion criteria for the step at the time it completed. */
     readonly completionCriteria: readonly string[];
     /** Attempt ID the step completed under, when known. */
@@ -88,6 +91,25 @@ export interface RunStateCompletionRecord {
     readonly feedbackResponseId?: string | null;
     /** ISO-8601 timestamp when the completion was recorded. */
     readonly recordedAt?: string;
+}
+
+/**
+ * A recorded tool side effect stored inside a `StepEvidenceReference.evidence`
+ * payload. The run-state schema treats the `evidence` value as opaque JSON; the
+ * resume reconciliation layer (`run-state-reconcile.ts`) interprets this shape
+ * to decide whether an interrupted attempt already applied an external effect.
+ */
+export interface RunStateToolEffect {
+    readonly kind: "elastic-agent-tool-effect";
+    readonly stepId: PlanStepId;
+    readonly attemptId: string;
+    readonly toolCallId: string;
+    readonly toolName?: string;
+    /** Integration the effect belongs to, when it supports idempotent checks. */
+    readonly integration?: "git" | "spec-keeper";
+    /** Idempotency key the integration can use to verify/deduplicate the effect. */
+    readonly idempotencyKey?: string;
+    readonly recordedAt: string;
 }
 
 /** The complete durable run-state payload. */
@@ -381,7 +403,7 @@ function normalizeCompletionRecord(raw: unknown, index: number): RunStateComplet
     const recordedAt = optionalIso(raw.recordedAt, `${where} 'recordedAt'`);
     return {
         stepId,
-        outcome: outcome as StepOutcome,
+        outcome: outcome as TerminalStepOutcome,
         completionCriteria,
         ...(attemptId !== undefined ? { attemptId } : {}),
         ...(feedbackResponseId !== undefined ? { feedbackResponseId } : {}),
