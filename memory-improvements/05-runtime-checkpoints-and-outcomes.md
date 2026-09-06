@@ -87,4 +87,15 @@ Schema / configuration / compatibility changes: outcome vocabulary extended (add
 Residual limitations and follow-up IDs: runtime main.ts wiring stays opt-in until MI-16; hard-kill can still lose an uncommitted event (documented); external side-effect reconciliation remains with the execution lifecycle.
 Rollback notes: remove the additive writer/exports and revert the vocabulary additions; no stored-data migration required.
 Implementation commit(s): 7c40eca (implementation + tests); completion record commit follows.
+
+Verification re-check (verification pass, plan step 3): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:memory-runtime-checkpoint, test:abort-paths,
+    test:multi-turn-memory, test:memory-event-store, test:memory-reload,
+    test:memory-contract-v2, build.
+  - The recorded literal `npx tsc --noEmit ... memory/index.ts` check was run through the
+    dedicated TypeCheck tool (repo-approved fixed flags, memory/index.ts, noEmit); exit 0.
+  - git diff --check clean.
+  - Skipped checks: none. No code change.
 ```
