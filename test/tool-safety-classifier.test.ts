@@ -1554,7 +1554,7 @@ async function main(): Promise<void> {
       dockerPromptCapture.push(input);
       return '{"safe":true,"reason":"docker prompt ok"}';
     });
-    const dockerPromptResult = await classifyToolCall("ExecuteCommand", { command: "mkdir -p ./build" }, {
+    const dockerPromptResult = await classifyToolCall("ExecuteCommand", { command: "node -e \"console.log('hello')\"" }, {
       runtime: dockerPromptRuntime,
       workspaceRoot: WORKSPACE,
       promptDirectory: promptRepoRoot,
@@ -1576,7 +1576,7 @@ async function main(): Promise<void> {
       nonDockerPromptCapture.push(input);
       return '{"safe":true,"reason":"non-docker prompt ok"}';
     });
-    const nonDockerPromptResult = await classifyToolCall("ExecuteCommand", { command: "mkdir -p ./build" }, {
+    const nonDockerPromptResult = await classifyToolCall("ExecuteCommand", { command: "node -e \"console.log('hello')\"" }, {
       runtime: nonDockerPromptRuntime,
       workspaceRoot: WORKSPACE,
       promptDirectory: promptRepoRoot,
@@ -1871,19 +1871,26 @@ async function main(): Promise<void> {
     );
 
     // ------------------------------------------------------------------
-    // 6c. Static allow-list for verified safe false-positive patterns:
-    //     read-only Git/diff checks, read-only inspections with /dev/null
-    //     redirections or grep pattern arguments, cwd changes into an
-    //     allowed root, and build/test commands. Destructive cleanup such as
+    // 6c. ExecuteCommand duplicates of dedicated tools (grep/rg, ls, pwd,
+    //     cat, find, mkdir, rmdir, and single-file rm) are refused with an
+    //     actionable "use the dedicated tool" reason. Read-only Git/diff
+    //     checks, cwd changes into an allowed root, and build/test commands
+    //     stay on the static allow-list; destructive cleanup such as
     //     `rm -rf test/.x-build` stays ambiguous (LLM-reviewed).
     // ------------------------------------------------------------------
     check(
-      "grep inspection with a /dev/null redirect is statically safe",
-      staticVerdict("ExecuteCommand", { command: "grep -rn \"x\" main.ts 2>/dev/null | head -20" }).decision === "safe",
+      "grep through ExecuteCommand is refused with a Grep redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "grep -rn \"x\" main.ts 2>/dev/null | head -20" });
+        return verdict.decision === "unsafe" && /duplicates the Grep tool/.test(verdict.reason);
+      })(),
     );
     check(
-      "grep inspection with a quoted -v pattern is statically safe",
-      staticVerdict("ExecuteCommand", { command: "grep -RIn -E 'x' . | grep -v \"/dist/\" | head -20" }).decision === "safe",
+      "grep with a quoted -v pattern is refused with a Grep redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "grep -RIn -E 'x' . | grep -v \"/dist/\" | head -20" });
+        return verdict.decision === "unsafe" && /Use Grep\(\{ pattern, path \}\)/.test(verdict.reason);
+      })(),
     );
     check(
       "git diff --check is statically safe",
@@ -1906,8 +1913,60 @@ async function main(): Promise<void> {
       staticVerdict("ExecuteCommand", { command: "npx tsc --outDir test/.check tool-safety-classifier.ts && node -e \"console.log('/workspace/start')\"" }).decision === "ambiguous",
     );
     check(
-      "grep for process.env is not a protected credential file read",
-      staticVerdict("ExecuteCommand", { command: "grep -n -e 'process.env' tool-safety-classifier.ts | head" }).decision === "safe",
+      "grep for process.env through ExecuteCommand is refused with a Grep redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "grep -n -e 'process.env' tool-safety-classifier.ts | head" });
+        return verdict.decision === "unsafe" && /Use Grep\(\{ pattern, path \}\)/.test(verdict.reason);
+      })(),
+    );
+    check(
+      "ls through ExecuteCommand is refused with a ListDirectory redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "ls -la" });
+        return verdict.decision === "unsafe" && /Use ListDirectory\(\{ directory \}\)/.test(verdict.reason);
+      })(),
+    );
+    check(
+      "pwd through ExecuteCommand is refused with a GetWorkingDirectory redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "pwd" });
+        return verdict.decision === "unsafe" && /Use GetWorkingDirectory\(\)/.test(verdict.reason);
+      })(),
+    );
+    check(
+      "cat through ExecuteCommand is refused with a Read redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "cat package.json" });
+        return verdict.decision === "unsafe" && /Use Read instead/.test(verdict.reason);
+      })(),
+    );
+    check(
+      "find through ExecuteCommand is refused with a Find redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "find . -name '*.ts'" });
+        return verdict.decision === "unsafe" && /Use Find\(\{ path, name, type, maxdepth \}\)/.test(verdict.reason);
+      })(),
+    );
+    check(
+      "mkdir through ExecuteCommand is refused with an Mkdir redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "mkdir -p ./build" });
+        return verdict.decision === "unsafe" && /Use Mkdir\(\{ path, recursive \}\)/.test(verdict.reason);
+      })(),
+    );
+    check(
+      "rmdir through ExecuteCommand is refused with an Rmdir redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "rmdir ./build" });
+        return verdict.decision === "unsafe" && /Use Rmdir\(\{ path, recursive \}\)/.test(verdict.reason);
+      })(),
+    );
+    check(
+      "single-file rm through ExecuteCommand is refused with a Delete redirect",
+      (() => {
+        const verdict = staticVerdict("ExecuteCommand", { command: "rm scratch.txt" });
+        return verdict.decision === "unsafe" && /Use Delete\(\{ path, file_hash, file_size \}\)/.test(verdict.reason);
+      })(),
     );
     check(
       "grep --include=*.json recursive read is denied as a data.json read",
@@ -1989,7 +2048,7 @@ async function main(): Promise<void> {
       suppressedAllowed.safe === true && suppressedCapture.lines.length === 0,
     );
 
-    const ambiguousCommand = { command: "mkdir -p ./build" };
+    const ambiguousCommand = { command: "node -e \"console.log('hello')\"" };
     check(
       "benign-but-unfamiliar command is ambiguous statically",
       staticVerdict("ExecuteCommand", ambiguousCommand).decision === "ambiguous",
@@ -2236,6 +2295,10 @@ async function main(): Promise<void> {
     // `node -e` inspection scripts) are approved by a permissive LLM mock,
     // matching the production path where the updated prompt and static
     // allow-list resolve them. Statically-safe records never reach the mock.
+    // ExecuteCommand duplicates of dedicated tools (grep/rg, ls, pwd, cat,
+    // find, mkdir, rmdir, single-file rm) are now deliberately refused with an
+    // actionable redirect, so those historical false positives are accepted as
+    // intentionally redirected rather than treated as allowed.
     const permissiveRuntime = mockRuntime(async () => '{"safe":true,"reason":"historical read-only inspection"}');
     const falsePositiveProblems: string[] = [];
     for (const record of historicalFalsePositives) {
@@ -2252,11 +2315,15 @@ async function main(): Promise<void> {
         logger: silentLogger,
       });
       if (!classification.safe) {
-        falsePositiveProblems.push(`${record.toolName} (${classification.source}): ${classification.reason}`);
+        const redirectedToDedicatedTool =
+          classification.source === "static" && /because it duplicates /.test(classification.reason);
+        if (!redirectedToDedicatedTool) {
+          falsePositiveProblems.push(`${record.toolName} (${classification.source}): ${classification.reason}`);
+        }
       }
     }
     check(
-      `all ${historicalFalsePositives.length} historical false positives are now allowed`,
+      `all ${historicalFalsePositives.length} historical false positives are now allowed or redirected to a dedicated tool`,
       historicalFalsePositives.length === 958 && falsePositiveProblems.length === 0,
     );
     for (const problem of falsePositiveProblems.slice(0, 10)) {

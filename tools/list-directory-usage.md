@@ -2,14 +2,16 @@
 
 ## Purpose
 
-List the entries of a directory non-recursively, returning each entry's name,
-parent path, and joined path.
+List the entries of a directory non-recursively, returning the listed
+directory, its symlink-resolved real path, and each entry's name, joined path,
+and type.
 
 ## When to use
 
-Use `ListDirectory` to list the immediate children of a directory. Use
-`ExecuteCommand` (for example `find` or `ls -la`) when you need recursive
-listing or must distinguish files from directories.
+Use `ListDirectory` to list the immediate children of a directory and
+distinguish files, directories, and symlinks. Use `Find` when you need
+recursive listing; use `GetWorkingDirectory` when you only need `pwd` plus the
+real path.
 
 ## Required parameters
 
@@ -17,38 +19,40 @@ listing or must distinguish files from directories.
 
 ## Result
 
-An array of entries, each with:
+An object with:
 
-- `name` (string): entry name.
-- `parentPath` (string): the directory that was listed.
-- `path` (string): `parentPath/name`.
+- `directory` (string): the directory that was listed, as supplied after
+  validation.
+- `realDirectory` (string): the symlink-resolved real path of that directory.
+- `entries` (array): immediate children, each with:
+  - `name` (string): entry name.
+  - `path` (string): `directory/name`.
+  - `type` (string): `file`, `directory`, `symlink`, or `other`.
 
 ## Formatted terminal output
 
 The runtime first announces the call as `ListDirectory({...})`. While the call
-runs, an in-place timer line ticks on the same terminal line (for example
-`⏱ 0.50s` in color mode, or `elapsed 0.50s` in non-TTY logs) and is finalized
-with the total elapsed time when the call completes or fails. Terminal state
-is cleaned up on exit.
+runs, an in-place timer line ticks on the same terminal line and is finalized
+with the total elapsed time when the call completes or fails.
 
 On completion the terminal renders `ListDirectory({...})` followed by a green
 circle and a short result summary on success, or a red circle and the error
 message on failure. In no-color/non-TTY contexts the circle degrades to plain
-text while the status and summary are still shown. No `[SUCCESS]` or `[ERROR]`
-text prefix is ever emitted for a tool call.
+text while the status and summary are still shown. No `[SUCCESS]` or
+`[ERROR]` text prefix is ever emitted for a tool call.
 
 ## Error handling
 
 - Invalid `directory` value: `TypeError`.
-- `readdir` I/O errors (e.g. missing directory, permissions) propagate.
+- `realpath` or `readdir` I/O errors (e.g. missing directory, permissions)
+  propagate.
 
 ## Critical operating constraints
 
 - `directory` must be a non-empty string without NUL characters.
 - Non-recursive: only direct children are returned.
-- The response does not include whether an entry is a file or directory; use
-  `ExecuteCommand` (for example `ls -la` or `find`) to distinguish files from
-  directories or to recurse.
+- The `type` field distinguishes files, directories, symlinks, and other
+  special entries, so `ls -la` is not needed for that distinction.
 
 ## Safe use
 

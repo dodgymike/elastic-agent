@@ -366,6 +366,25 @@ function renderExecuteCommandFailed(toolCall: ToolCallDescriptor, error: unknown
     return renderToolCommand(toolCall, error, options);
 }
 
+/** Process-tool success: render only the green circle on a clean success. */
+function renderProcessToolSucceeded(toolCall: ToolCallDescriptor, result: unknown, options: ToolRendererOptions): string[] | undefined {
+    const streams = commandStreamsFrom(result);
+    if (streams && streams.exitCode === 0 && streams.stderr.trim() === "") {
+        return [` ${ansiHelpers(options.color).green("●")}`];
+    }
+    return renderToolCommand(toolCall, result, options);
+}
+
+function renderProcessToolFailed(toolCall: ToolCallDescriptor, error: unknown, options: ToolRendererOptions): string[] | undefined {
+    return renderToolCommand(toolCall, error, options);
+}
+
+const processToolRenderer: ToolRenderer = {
+    pending: renderGenericPending,
+    succeeded: renderProcessToolSucceeded,
+    failed: renderProcessToolFailed,
+};
+
 /** Maximum diff lines rendered per Edit result. Keeps terminal output bounded. */
 const MAX_EDIT_DIFF_LINES = 120;
 
@@ -864,6 +883,16 @@ export const toolRenderers: Record<string, ToolRenderer> = {
         succeeded: renderGitSucceeded,
         failed: renderGitFailed,
     },
+    RunPackageScript: { ...processToolRenderer },
+    TypeCheck: { ...processToolRenderer },
+    GoToolchain: { ...processToolRenderer },
+    GetWorkingDirectory: { ...genericToolRenderer },
+    PathInfo: { ...genericToolRenderer },
+    FileHash: { ...genericToolRenderer },
+    FileOps: { ...genericToolRenderer },
+    Help: { ...genericToolRenderer },
+    RunScript: { ...processToolRenderer },
+    RunNodeTest: { ...processToolRenderer },
     AgentBus: { ...redactedToolRenderer },
     SpecKeeper: { ...redactedToolRenderer },
     SpecKeeperEnroll: { ...redactedToolRenderer },

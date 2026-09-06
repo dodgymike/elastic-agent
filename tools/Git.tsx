@@ -149,6 +149,115 @@ export interface GitWorktreeModeOptions extends GitBaseOptions {
   newPath?: string;
 }
 
+/** Read-only `show` mode. */
+export interface GitShowModeOptions extends GitBaseOptions {
+  mode: "show";
+  /** Revision or object to show; defaults to HEAD. */
+  revision?: string;
+  /** Convenience single path filter. */
+  path?: string;
+  /** Optional repo-relative path filters. */
+  paths?: readonly string[];
+}
+
+/** Read-only `rev-parse` mode. */
+export interface GitRevParseModeOptions extends GitBaseOptions {
+  mode: "rev-parse";
+  /** Revision expression to resolve (for example HEAD or main..HEAD). */
+  revision: string;
+  /** Append `--abbrev-ref`. */
+  abbrevRef?: boolean;
+}
+
+/** Read-only `check-ignore` mode. */
+export interface GitCheckIgnoreModeOptions extends GitBaseOptions {
+  mode: "check-ignore";
+  /** Repo-relative paths to test against ignore rules. */
+  paths: readonly string[];
+  /** Append `--verbose`. */
+  verbose?: boolean;
+}
+
+/** Read-only `branch` mode (lists branches). */
+export interface GitBranchModeOptions extends GitBaseOptions {
+  mode: "branch";
+  /** List both remote-tracking and local branches (`--all`). */
+  all?: boolean;
+  /** List remote-tracking branches (`--remotes`). */
+  remotes?: boolean;
+}
+
+/** Read-only `remote` mode (lists remotes with URLs). */
+export interface GitRemoteModeOptions extends GitBaseOptions {
+  mode: "remote";
+}
+
+/** Read-only `config` mode (gets a config value). */
+export interface GitConfigModeOptions extends GitBaseOptions {
+  mode: "config";
+  /** Config key, for example `user.name`. */
+  key: string;
+}
+
+/** Read-only `cat-file` mode (pretty-prints an object). */
+export interface GitCatFileModeOptions extends GitBaseOptions {
+  mode: "cat-file";
+  /** Object name to pretty-print (commit, tree, blob, or tag). */
+  object: string;
+}
+
+/** Read-only `clean --dry-run` mode. */
+export interface GitCleanModeOptions extends GitBaseOptions {
+  mode: "clean";
+  /** Optional repo-relative path filters. */
+  paths?: readonly string[];
+}
+
+/** Mutating `checkout` action. */
+export interface GitCheckoutOptions extends GitBaseOptions {
+  action: "checkout";
+  /** Branch, tag, or commit to check out. */
+  target: string;
+}
+
+/** Mutating `restore` action. */
+export interface GitRestoreOptions extends GitBaseOptions {
+  action: "restore";
+  /** Repo-relative paths to restore. */
+  paths: readonly string[];
+  /** Restore the index instead of the worktree (`--staged`). */
+  staged?: boolean;
+}
+
+/** Mutating `stash` action. */
+export interface GitStashOptions extends GitBaseOptions {
+  action: "stash";
+  subcommand: "push" | "pop" | "list";
+}
+
+/** Mutating `branch-create` action. */
+export interface GitBranchCreateOptions extends GitBaseOptions {
+  action: "branch-create";
+  name: string;
+  /** Optional start point for the new branch. */
+  startPoint?: string;
+}
+
+/** Mutating `branch-delete` action. */
+export interface GitBranchDeleteOptions extends GitBaseOptions {
+  action: "branch-delete";
+  name: string;
+  /** Use `-D` instead of the safe `-d` delete. */
+  force?: boolean;
+}
+
+/** Mutating `config-set` action (workspace-local only). */
+export interface GitConfigSetOptions extends GitBaseOptions {
+  action: "config-set";
+  key: string;
+  value: string;
+}
+
 /** Legacy `list` action retained for backward compatibility. */
 export interface ListGitChangesOptions extends GitBaseOptions {
   action: "list";
@@ -176,16 +285,38 @@ export type GitOptions =
   | GitDiffModeOptions
   | GitLsFilesModeOptions
   | GitWorktreeModeOptions
+  | GitShowModeOptions
+  | GitRevParseModeOptions
+  | GitCheckIgnoreModeOptions
+  | GitBranchModeOptions
+  | GitRemoteModeOptions
+  | GitConfigModeOptions
+  | GitCatFileModeOptions
+  | GitCleanModeOptions
   | ListGitChangesOptions
   | StageGitChangesOptions
-  | CommitGitChangesOptions;
+  | CommitGitChangesOptions
+  | GitCheckoutOptions
+  | GitRestoreOptions
+  | GitStashOptions
+  | GitBranchCreateOptions
+  | GitBranchDeleteOptions
+  | GitConfigSetOptions;
 
 type GitModeOptions =
   | GitStatusModeOptions
   | GitLogModeOptions
   | GitDiffModeOptions
   | GitLsFilesModeOptions
-  | GitWorktreeModeOptions;
+  | GitWorktreeModeOptions
+  | GitShowModeOptions
+  | GitRevParseModeOptions
+  | GitCheckIgnoreModeOptions
+  | GitBranchModeOptions
+  | GitRemoteModeOptions
+  | GitConfigModeOptions
+  | GitCatFileModeOptions
+  | GitCleanModeOptions;
 
 /**
  * Inspects a repository (status, log, diff, ls-files), manages linked
@@ -220,6 +351,22 @@ export default async function Git(options: GitOptions): Promise<GitCommandResult
         return runGit(buildLsFilesArgs(options), options.cwd);
       case "worktree":
         return runGit(buildWorktreeArgs(options), options.cwd);
+      case "show":
+        return runGit(buildShowArgs(options), options.cwd);
+      case "rev-parse":
+        return runGit(buildRevParseArgs(options), options.cwd);
+      case "check-ignore":
+        return runGit(buildCheckIgnoreArgs(options), options.cwd);
+      case "branch":
+        return runGit(buildBranchArgs(options), options.cwd);
+      case "remote":
+        return runGit(["remote", "-v"], options.cwd);
+      case "config":
+        return runGit(buildConfigArgs(options), options.cwd);
+      case "cat-file":
+        return runGit(buildCatFileArgs(options), options.cwd);
+      case "clean":
+        return runGit(buildCleanArgs(options), options.cwd);
       default:
         throw new TypeError(
           `Unknown Git mode: ${String((options as { mode: unknown }).mode)}.`,
@@ -258,6 +405,60 @@ export default async function Git(options: GitOptions): Promise<GitCommandResult
         throw new TypeError("commit requires a non-empty message.");
       }
       return runGit(["commit", "-m", options.message], options.cwd);
+
+    case "checkout": {
+      const target = options.target;
+      validateNonEmptyString(target, "target");
+      if (target.startsWith("-")) throw new TypeError("target must not start with '-'.");
+      return runGit(["checkout", target], options.cwd);
+    }
+
+    case "restore": {
+      const paths = options.paths ?? [];
+      if (paths.length === 0) throw new TypeError("restore requires at least one path.");
+      for (const path of paths) validatePath(path);
+      const args = ["restore"];
+      if (options.staged === true) args.push("--staged");
+      args.push("--", ...paths);
+      return runGit(args, options.cwd);
+    }
+
+    case "stash": {
+      const subcommand = options.subcommand;
+      if (subcommand !== "push" && subcommand !== "pop" && subcommand !== "list") {
+        throw new TypeError('stash subcommand must be "push", "pop", or "list".');
+      }
+      return runGit(["stash", subcommand], options.cwd);
+    }
+
+    case "branch-create": {
+      const name = options.name;
+      validateBranchName(name);
+      const args = ["branch", name];
+      if (options.startPoint !== undefined) {
+        validateNonEmptyString(options.startPoint, "startPoint");
+        if (options.startPoint.startsWith("-")) throw new TypeError("startPoint must not start with '-'.");
+        args.push(options.startPoint);
+      }
+      return runGit(args, options.cwd);
+    }
+
+    case "branch-delete": {
+      const name = options.name;
+      validateBranchName(name);
+      return runGit(["branch", options.force === true ? "-D" : "-d", name], options.cwd);
+    }
+
+    case "config-set": {
+      const key = options.key;
+      const value = options.value;
+      validateConfigKey(key);
+      if (typeof value !== "string" || value.length === 0) {
+        throw new TypeError("config-set requires a non-empty value.");
+      }
+      if (value.includes("\0")) throw new TypeError("value cannot contain NUL characters.");
+      return runGit(["config", "--local", key, value], options.cwd);
+    }
 
     default:
       throw new TypeError(
@@ -343,6 +544,107 @@ function buildLsFilesArgs(options: GitLsFilesModeOptions): string[] {
 
   appendPaths(args, collectPaths(undefined, options.paths));
   return args;
+}
+
+function buildShowArgs(options: GitShowModeOptions): string[] {
+  const args = ["show"];
+  if (options.revision !== undefined) {
+    validateNonEmptyString(options.revision, "revision");
+    if (options.revision.startsWith("-")) throw new TypeError("revision must not start with '-'.");
+    args.push(options.revision);
+  } else {
+    args.push("HEAD");
+  }
+  appendPaths(args, collectPaths(options.path, options.paths));
+  return args;
+}
+
+function buildRevParseArgs(options: GitRevParseModeOptions): string[] {
+  const args = ["rev-parse"];
+  if (options.abbrevRef === true) args.push("--abbrev-ref");
+  validateNonEmptyString(options.revision, "revision");
+  if (options.revision.startsWith("-")) throw new TypeError("revision must not start with '-'.");
+  args.push(options.revision);
+  return args;
+}
+
+function buildCheckIgnoreArgs(options: GitCheckIgnoreModeOptions): string[] {
+  const paths = options.paths ?? [];
+  if (paths.length === 0) throw new TypeError("check-ignore requires at least one path.");
+  for (const path of paths) validatePath(path);
+  const args = ["check-ignore"];
+  if (options.verbose === true) args.push("--verbose");
+  args.push("--", ...paths);
+  return args;
+}
+
+function buildBranchArgs(options: GitBranchModeOptions): string[] {
+  const args = ["branch"];
+  if (options.all === true) args.push("--all");
+  if (options.remotes === true) args.push("--remotes");
+  return args;
+}
+
+function buildConfigArgs(options: GitConfigModeOptions): string[] {
+  const key = options.key;
+  validateConfigKey(key);
+  return ["config", "--get", key];
+}
+
+function buildCatFileArgs(options: GitCatFileModeOptions): string[] {
+  const object = options.object;
+  validateNonEmptyString(object, "object");
+  if (object.startsWith("-")) throw new TypeError("object must not start with '-'.");
+  return ["cat-file", "-p", object];
+}
+
+function buildCleanArgs(options: GitCleanModeOptions): string[] {
+  const args = ["clean", "--dry-run"];
+  appendPaths(args, collectPaths(undefined, options.paths));
+  return args;
+}
+
+function validateBranchName(value: string): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("branch name must be a non-empty string.");
+  }
+  if (/[\u0000-\u0020\u007f]/.test(value)) {
+    throw new TypeError("branch name must not contain whitespace or control characters.");
+  }
+  if (value.startsWith("-")) {
+    throw new TypeError("branch name must not start with '-'.");
+  }
+  if (
+    value.includes("..") ||
+    value.includes("@{") ||
+    value.includes("\\") ||
+    value.includes("~") ||
+    value.includes("^") ||
+    value.includes(":") ||
+    value.includes("?") ||
+    value.includes("*") ||
+    value.includes("[")
+  ) {
+    throw new TypeError("branch name must not contain any of: '..', '@{', '\\', '~', '^', ':', '?', '*', '['.");
+  }
+  if (value.startsWith("/") || value.endsWith("/")) {
+    throw new TypeError("branch name must not start or end with '/'.");
+  }
+}
+
+function validateConfigKey(value: string): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("key must be a non-empty string.");
+  }
+  if (value.includes("\0")) {
+    throw new TypeError("key cannot contain NUL characters.");
+  }
+  if (value.startsWith("-")) {
+    throw new TypeError("key must not start with '-'.");
+  }
+  if (/[\u0000-\u0020\u007f]/.test(value)) {
+    throw new TypeError("key must not contain whitespace or control characters.");
+  }
 }
 
 const WORKTREE_SUBCOMMANDS = ["list", "add", "remove", "move", "prune"] as const;
@@ -829,9 +1131,9 @@ function runGit(command: string[], cwd?: string): Promise<GitCommandResult> {
 export const GitParameters: Record<string, unknown> = {
   type: "object",
   properties: {
-    mode: { type: "string", enum: ["status", "log", "diff", "ls-files", "worktree"] },
-    action: { type: "string", enum: ["list", "stage", "commit"] },
-    subcommand: { type: "string", enum: ["list", "add", "remove", "move", "prune"] },
+    mode: { type: "string", enum: ["status", "log", "diff", "ls-files", "worktree", "show", "rev-parse", "check-ignore", "branch", "remote", "config", "cat-file", "clean"] },
+    action: { type: "string", enum: ["list", "stage", "commit", "checkout", "restore", "stash", "branch-create", "branch-delete", "config-set"] },
+    subcommand: { type: "string", enum: ["list", "add", "remove", "move", "prune", "push", "pop"] },
     cwd: { type: "string" },
     format: { type: "string", enum: ["short", "porcelain", "branch"] },
     branch: { type: "boolean" },
@@ -839,6 +1141,7 @@ export const GitParameters: Record<string, unknown> = {
     stat: { type: "boolean" },
     maxCount: { type: "integer" },
     all: { type: "boolean" },
+    remotes: { type: "boolean" },
     revision: { type: "string" },
     path: { type: "string" },
     paths: { type: "array", items: { type: "string" } },
@@ -854,6 +1157,14 @@ export const GitParameters: Record<string, unknown> = {
     oldPath: { type: "string" },
     newPath: { type: "string" },
     message: { type: "string" },
+    abbrevRef: { type: "boolean" },
+    verbose: { type: "boolean" },
+    key: { type: "string" },
+    value: { type: "string" },
+    object: { type: "string" },
+    target: { type: "string" },
+    name: { type: "string" },
+    startPoint: { type: "string" },
   },
   anyOf: [{ required: ["mode"] }, { required: ["action"] }],
 };

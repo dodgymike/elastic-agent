@@ -7,18 +7,18 @@ import { normalizeToolParameters, parseToolSafetyClassification } from "./tool-s
  * Preflight router that keeps git commands out of ExecuteCommand.
  *
  * The dedicated `Git` tool owns the supported repository operations (status,
- * log, diff, ls-files, worktree list/add/remove/move/prune, stage, commit).
- * When a model still issues a git command
- * through `ExecuteCommand`, this module decides what should happen before the
- * general safety classifier runs:
+ * log, diff, ls-files, worktree list/add/remove/move/prune, show, rev-parse,
+ * check-ignore, branch, remote, config, cat-file, clean --dry-run, stage,
+ * commit, checkout, restore, stash, branch create/delete, and config set).
+ * When a model still issues a git command through `ExecuteCommand`, this
+ * module decides what should happen before the general safety classifier runs:
  *
  * 1. Non-git commands are returned as `{ action: "none" }` and fall through to
  *    the normal ExecuteCommand path.
  * 2. Git commands whose subcommand maps unambiguously to a registered Git tool
  *    mode/action are refused with an actionable "use Git(...)" message.
- * 3. Git commands whose mapping is unclear (for example show, stash, tag,
- *    branch, checkout, config, check-ignore, rev-parse, push, or --version)
- *    are sent to the LLM classifier together with the available Git
+ * 3. Git commands whose mapping is unclear (for example tag, reset, push, or
+ *    --version) are sent to the LLM classifier together with the available Git
  *    tool list. The classifier decides whether to allow the ExecuteCommand
  *    call; a refusal is returned verbatim and the call is blocked.
  *
@@ -74,8 +74,22 @@ const GIT_TOOL_LIST_TEXT = [
   'Git({ mode: "worktree", subcommand: "remove" }) -> git worktree remove; params: path (string), force (boolean)',
   'Git({ mode: "worktree", subcommand: "move" }) -> git worktree move; params: oldPath (string), newPath (string)',
   'Git({ mode: "worktree", subcommand: "prune" }) -> git worktree prune; no extra params',
+  'Git({ mode: "show" }) -> git show; params: revision (string, default HEAD), path (string), paths (string[])',
+  'Git({ mode: "rev-parse" }) -> git rev-parse; params: revision (string, required), abbrevRef (boolean)',
+  'Git({ mode: "check-ignore" }) -> git check-ignore; params: paths (string[], required), verbose (boolean)',
+  'Git({ mode: "branch" }) -> git branch (list); params: all (boolean), remotes (boolean)',
+  'Git({ mode: "remote" }) -> git remote -v (list)',
+  'Git({ mode: "config" }) -> git config --get; params: key (string, required) (read-only)',
+  'Git({ mode: "cat-file" }) -> git cat-file -p; params: object (string, required)',
+  'Git({ mode: "clean" }) -> git clean --dry-run; params: paths (string[])',
   'Git({ action: "stage" }) -> git add; params: paths (string[]) or all (boolean)',
   'Git({ action: "commit" }) -> git commit; params: message (string)',
+  'Git({ action: "checkout" }) -> git checkout; params: target (string, required)',
+  'Git({ action: "restore" }) -> git restore; params: paths (string[], required), staged (boolean)',
+  'Git({ action: "stash" }) -> git stash push|pop|list; params: subcommand (required)',
+  'Git({ action: "branch-create" }) -> git branch <name>; params: name (string, required), startPoint (string)',
+  'Git({ action: "branch-delete" }) -> git branch -d|-D <name>; params: name (string, required), force (boolean)',
+  'Git({ action: "config-set" }) -> git config --local <key> <value>; params: key, value (required)',
 ].join("\n");
 
 function defaultLogger(level: "info" | "error", message: string): void {
@@ -176,6 +190,30 @@ function clearGitRoute(subcommand: string | null): string | null {
       return 'ExecuteCommand refuses git add because it maps to the Git tool. Use Git({ action: "stage", paths: ["<path>"] }) or Git({ action: "stage", all: true }) instead.';
     case "commit":
       return 'ExecuteCommand refuses git commit because it maps to the Git tool. Use Git({ action: "commit", message: "..." }) instead.';
+    case "worktree":
+      return 'ExecuteCommand refuses git worktree because it maps to the Git tool. Use Git({ mode: "worktree", subcommand: "list" | "add" | "remove" | "move" | "prune", ... }) instead.';
+    case "show":
+      return 'ExecuteCommand refuses git show because it maps to the Git tool. Use Git({ mode: "show", revision: "..." }) instead.';
+    case "rev-parse":
+      return 'ExecuteCommand refuses git rev-parse because it maps to the Git tool. Use Git({ mode: "rev-parse", revision: "..." }) instead.';
+    case "check-ignore":
+      return 'ExecuteCommand refuses git check-ignore because it maps to the Git tool. Use Git({ mode: "check-ignore", paths: ["<path>"] }) instead.';
+    case "branch":
+      return 'ExecuteCommand refuses git branch because it maps to the Git tool. Use Git({ mode: "branch" }) to list, Git({ action: "branch-create", name }) or Git({ action: "branch-delete", name }) to mutate.';
+    case "remote":
+      return 'ExecuteCommand refuses git remote because it maps to the Git tool. Use Git({ mode: "remote" }) instead.';
+    case "config":
+      return 'ExecuteCommand refuses git config because it maps to the Git tool. Use Git({ mode: "config", key }) to read or Git({ action: "config-set", key, value }) to write workspace-local config.';
+    case "cat-file":
+      return 'ExecuteCommand refuses git cat-file because it maps to the Git tool. Use Git({ mode: "cat-file", object }) instead.';
+    case "clean":
+      return 'ExecuteCommand refuses git clean because it maps to the Git tool. Use Git({ mode: "clean" }) for the read-only dry-run.';
+    case "checkout":
+      return 'ExecuteCommand refuses git checkout because it maps to the Git tool. Use Git({ action: "checkout", target }) instead.';
+    case "restore":
+      return 'ExecuteCommand refuses git restore because it maps to the Git tool. Use Git({ action: "restore", paths: ["<path>"] }) instead.';
+    case "stash":
+      return 'ExecuteCommand refuses git stash because it maps to the Git tool. Use Git({ action: "stash", subcommand: "push" | "pop" | "list" }) instead.';
     default:
       return null;
   }

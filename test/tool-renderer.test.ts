@@ -56,10 +56,22 @@ const colored = { color: true };
         "Http",
         "HttpRequest",
         "ListDirectory",
+        "Mkdir",
+        "Rmdir",
         "Find",
         "Grep",
         "ExecuteCommand",
         "Git",
+        "RunPackageScript",
+        "TypeCheck",
+        "GoToolchain",
+        "GetWorkingDirectory",
+        "PathInfo",
+        "FileHash",
+        "FileOps",
+        "Help",
+        "RunScript",
+        "RunNodeTest",
         "AgentBus",
         "SpecKeeper",
         "SpecKeeperEnroll",
@@ -709,6 +721,51 @@ const colored = { color: true };
     assert.ok(!joined.includes(failurePwValue), "password in failure text must be redacted");
     assert.ok(!joined.includes(failureAccessValue), "access token in failure text must be redacted");
     assert.ok(joined.includes("[REDACTED]"), "failed secret-carrying output must be redacted");
+}
+
+// 35. Process-tool renderer entries (RunPackageScript, TypeCheck, GoToolchain,
+// RunScript, RunNodeTest) share the process-tool renderer: the pending phase
+// owns the generic label, clean success renders only the green circle, and any
+// non-empty stderr or non-zero exit delegates to the shared command helper.
+{
+    const processToolNames = [
+        "RunPackageScript",
+        "TypeCheck",
+        "GoToolchain",
+        "RunScript",
+        "RunNodeTest",
+    ];
+    for (const name of processToolNames) {
+        assert.ok(toolRenderers[name], `renderer map must include ${name}`);
+    }
+
+    const pkgCall = { name: "RunPackageScript", arguments: '{"script":"build"}' };
+    assertLines(
+        renderToolPhase("pending", pkgCall, undefined, plain),
+        ['RunPackageScript({"script":"build"})'],
+    );
+    assertLines(
+        renderToolPhase("succeeded", pkgCall, { exitCode: 0, stdout: "ok\n", stderr: "" }, plain),
+        [" ●"],
+    );
+    assertLines(
+        renderToolPhase("succeeded", pkgCall, { exitCode: 0, stdout: "ok\n", stderr: "warn\n" }, plain),
+        [" ●", " ok", " warn"],
+    );
+    assertLines(
+        renderToolPhase("succeeded", pkgCall, { exitCode: 1, stdout: "out\n", stderr: "err\n" }, plain),
+        [" ● exit 1", " err", " out"],
+    );
+    assertLines(
+        renderToolPhase("failed", pkgCall, "process died", plain),
+        [" ● process died"],
+    );
+
+    const typeCall = { name: "TypeCheck", arguments: '{"files":["a.ts"]}' };
+    assertLines(
+        renderToolPhase("pending", typeCall, undefined, plain),
+        ['TypeCheck({"files":["a.ts"]})'],
+    );
 }
 
 console.log("Tool-call renderer fixtures passed.");

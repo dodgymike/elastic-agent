@@ -617,6 +617,10 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
     case "Find":
     case "Grep":
     case "Http":
+    case "GetWorkingDirectory":
+    case "PathInfo":
+    case "FileHash":
+    case "Help":
       return "readonly";
     case "Write":
     case "Edit":
@@ -630,6 +634,12 @@ export function toolRiskLevel(toolName: string): ToolRiskLevel {
     case "AgentBusEnrol":
     case "SpecKeeper":
     case "SpecKeeperEnroll":
+    case "RunPackageScript":
+    case "TypeCheck":
+    case "GoToolchain":
+    case "FileOps":
+    case "RunScript":
+    case "RunNodeTest":
       return "mutating";
     default:
       return "unknown";
@@ -884,6 +894,13 @@ function classifyExecuteCommand(
   if (command === null || command.trim() === "") {
     return ambiguous("ExecuteCommand has no non-empty command; the tool itself will reject the call.");
   }
+  const cwd = stringValue(parameters.cwd);
+  if (cwd !== null && cwd.trim() !== "") {
+    if (cwd.includes("\0")) return unsafe("ExecuteCommand cwd must not contain NUL characters.");
+    if (hasPathTraversal(cwd) || resolvesOutsideAllTrustedRoots(cwd, roots)) {
+      return unsafe(`ExecuteCommand cwd '${cwd}' resolves outside the workspace.`);
+    }
+  }
   const positional: string[] = Array.isArray(parameters.parameters)
     ? parameters.parameters.filter((parameter): parameter is string => typeof parameter === "string")
     : [];
@@ -937,6 +954,9 @@ function classifyExecuteCommand(
   if (isHarmlessNoOp(command)) {
     return safe("ExecuteCommand is a harmless no-op that reads or writes nothing outside /dev/null.");
   }
+
+  const duplicateReason = duplicateToolRedirectReason(command);
+  if (duplicateReason) return unsafe(duplicateReason);
 
   if (isKnownSafeShell(command, roots)) {
     return safe("ExecuteCommand is a known-safe, read-only or standard verification command.");
@@ -1226,6 +1246,59 @@ function isKnownSafeCommand(command: string): boolean {
     || /^(node\s+test\/[\w./-]+|npm\s+(run\s+)?(test|build)(:[\w:-]*)?(\s|$)|npx\s+tsc\b|tsc\b)/.test(trimmed);
 }
 
+/**
+ * Return an actionable "use the dedicated tool" reason when an ExecuteCommand
+ * invocation duplicates an existing tool (ls, pwd, cat, find, grep/rg, mkdir,
+ * rmdir, or a single-file rm). Compound commands are checked segment by
+ * segment. Recursive/force `rm -rf` is intentionally left to the destructive
+ * command check above.
+ */
+function duplicateToolRedirectReason(command: string): string | null {
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) segments.push(command);
+  for (const segment of segments) {
+    const words = shellWords(segment);
+    const executable = (words[0] ?? "").toLowerCase();
+    if (executable === "ls") {
+      return 'ExecuteCommand refuses `ls` because it duplicates ListDirectory. Use ListDirectory({ directory }) instead.';
+    }
+    if (executable === "pwd") {
+      return 'ExecuteCommand refuses `pwd` because it duplicates GetWorkingDirectory/ListDirectory. Use GetWorkingDirectory() instead.';
+    }
+    if (executable === "cat") {
+      return 'ExecuteCommand refuses `cat <file>` because it duplicates Read. Use Read instead.';
+    }
+    if (executable === "find") {
+      return 'ExecuteCommand refuses `find` because it duplicates the Find tool. Use Find({ path, name, type, maxdepth }) instead.';
+    }
+    if (executable === "grep" || executable === "rg") {
+      return 'ExecuteCommand refuses `grep`/`rg` because it duplicates the Grep tool. Use Grep({ pattern, path }) instead.';
+    }
+    if (executable === "mkdir") {
+      return 'ExecuteCommand refuses `mkdir` because it duplicates the Mkdir tool. Use Mkdir({ path, recursive }) instead.';
+    }
+    if (executable === "rmdir") {
+      return 'ExecuteCommand refuses `rmdir` because it duplicates the Rmdir tool. Use Rmdir({ path, recursive }) instead.';
+    }
+    if (executable === "rm") {
+      let recursive = false;
+      let operands = 0;
+      for (const word of words.slice(1)) {
+        if (word === "--") continue;
+        if (word.startsWith("-")) {
+          if (/^-[A-Za-z]*[rR]/.test(word) || word === "--recursive") recursive = true;
+          continue;
+        }
+        operands += 1;
+      }
+      if (!recursive && operands === 1) {
+        return 'ExecuteCommand refuses single-file `rm` because it duplicates the Delete tool. Use Delete({ path, file_hash, file_size }) after Read/FileSize instead.';
+      }
+    }
+  }
+  return null;
+}
+
 /** Split a shell command on unquoted `&&`, `||`, and `;` operators. */
 function splitShellSegments(command: string): string[] {
   const tokens = shellCommandTokens(command);
@@ -1370,6 +1443,110 @@ function classifyGit(parameters: Record<string, unknown>, roots: readonly string
   if (action === "worktree") {
     return classifyGitWorktree(parameters, roots);
   }
+  if (action === "show") {
+    const revision = stringValue(parameters.revision);
+    if (revision !== null && revision.trim() !== "" && revision.startsWith("-")) {
+      return unsafe("Git show revision must not start with '-'.");
+    }
+    const paths = Array.isArray(parameters.paths) ? parameters.paths : [];
+    for (const path of paths) {
+      if (hasPathTraversal(String(path)) || resolvesOutsideAllTrustedRoots(String(path), roots)) {
+        return unsafe(`Git show path '${String(path)}' resolves outside the workspace.`);
+      }
+    }
+    return safe("Git show is a read-only operation.");
+  }
+  if (action === "rev-parse") {
+    const revision = stringValue(parameters.revision);
+    if (revision === null || revision.trim() === "" || revision.startsWith("-")) {
+      return unsafe("Git rev-parse requires a revision that does not start with '-'.");
+    }
+    return safe("Git rev-parse is a read-only operation.");
+  }
+  if (action === "check-ignore") {
+    const paths = Array.isArray(parameters.paths) ? parameters.paths : [];
+    if (paths.length === 0) return unsafe("Git check-ignore requires at least one path.");
+    for (const path of paths) {
+      if (hasPathTraversal(String(path)) || resolvesOutsideAllTrustedRoots(String(path), roots)) {
+        return unsafe(`Git check-ignore path '${String(path)}' resolves outside the workspace.`);
+      }
+    }
+    return safe("Git check-ignore is a read-only operation.");
+  }
+  if (action === "branch") {
+    return safe("Git branch list is a read-only operation.");
+  }
+  if (action === "remote") {
+    return safe("Git remote list is a read-only operation.");
+  }
+  if (action === "config") {
+    const key = stringValue(parameters.key);
+    if (key === null || key.trim() === "" || key.startsWith("-")) {
+      return unsafe("Git config requires a key that does not start with '-'.");
+    }
+    return safe("Git config get is a read-only operation.");
+  }
+  if (action === "cat-file") {
+    const object = stringValue(parameters.object);
+    if (object === null || object.trim() === "" || object.startsWith("-")) {
+      return unsafe("Git cat-file requires an object name that does not start with '-'.");
+    }
+    return safe("Git cat-file is a read-only operation.");
+  }
+  if (action === "clean") {
+    return safe("Git clean --dry-run is a read-only operation.");
+  }
+  if (action === "checkout") {
+    const target = stringValue(parameters.target);
+    if (target === null || target.trim() === "" || target.startsWith("-")) {
+      return unsafe("Git checkout requires a target that does not start with '-'.");
+    }
+    return ambiguous("Git checkout mutates the working tree and needs LLM safety review.");
+  }
+  if (action === "restore") {
+    const paths = Array.isArray(parameters.paths) ? parameters.paths : [];
+    if (paths.length === 0) return unsafe("Git restore requires at least one path.");
+    for (const path of paths) {
+      const value = stringValue(path);
+      if (value === null) return unsafe("Git restore contains a non-string path.");
+      if (hasPathTraversal(value) || resolvesOutsideAllTrustedRoots(value, roots)) {
+        return unsafe(`Git restore path '${value}' resolves outside the workspace.`);
+      }
+    }
+    return ambiguous("Git restore mutates the working tree and needs LLM safety review.");
+  }
+  if (action === "stash") {
+    const subcommand = stringValue(parameters.subcommand);
+    if (subcommand === null || !["push", "pop", "list"].includes(subcommand)) {
+      return unsafe("Git stash requires subcommand push, pop, or list.");
+    }
+    return ambiguous("Git stash mutates the working tree and needs LLM safety review.");
+  }
+  if (action === "branch-create") {
+    const name = stringValue(parameters.name);
+    if (name === null || name.trim() === "" || name.startsWith("-")) {
+      return unsafe("Git branch-create requires a branch name that does not start with '-'.");
+    }
+    return ambiguous("Git branch-create mutates the repository and needs LLM safety review.");
+  }
+  if (action === "branch-delete") {
+    const name = stringValue(parameters.name);
+    if (name === null || name.trim() === "" || name.startsWith("-")) {
+      return unsafe("Git branch-delete requires a branch name that does not start with '-'.");
+    }
+    return ambiguous("Git branch-delete mutates the repository and needs LLM safety review.");
+  }
+  if (action === "config-set") {
+    const key = stringValue(parameters.key);
+    const value = stringValue(parameters.value);
+    if (key === null || key.trim() === "" || key.startsWith("-")) {
+      return unsafe("Git config-set requires a key that does not start with '-'.");
+    }
+    if (value === null || value.length === 0) {
+      return unsafe("Git config-set requires a non-empty value.");
+    }
+    return ambiguous("Git config-set mutates workspace-local configuration and needs LLM safety review.");
+  }
   if (action === null) {
     return unsafe("Git call has neither a recognized action nor a recognized mode; the tool itself will reject the call.");
   }
@@ -1459,6 +1636,227 @@ function worktreePathViolation(
     }
   }
   return null;
+}
+
+function classifyGetWorkingDirectory(parameters: Record<string, unknown>): StaticToolSafetyVerdict {
+  if (parameters.resolve !== undefined && typeof parameters.resolve !== "boolean") {
+    return unsafe("GetWorkingDirectory resolve must be a boolean when provided; the tool itself will reject the call.");
+  }
+  return safe("GetWorkingDirectory reports the current working directory and its real path.");
+}
+
+function classifyHelp(parameters: Record<string, unknown>): StaticToolSafetyVerdict {
+  const subject = stringValue(parameters.subject);
+  if (subject === null || subject.trim() === "") {
+    return ambiguous("Help has no valid subject; the tool itself will reject the call.");
+  }
+  return safe("Help returns read-only usage documentation and never executes a CLI.");
+}
+
+function classifyFileOps(
+  parameters: Record<string, unknown>,
+  roots: readonly string[],
+  allowOutsideWorkspace: boolean,
+  config?: ToolSafetyConfig,
+  editRoots?: readonly string[],
+): StaticToolSafetyVerdict {
+  const action = stringValue(parameters.action);
+  const supported = new Set(["copy", "move", "touch", "chmod", "symlink"]);
+  if (action === null || !supported.has(action)) {
+    return unsafe(`FileOps action '${action ?? "undefined"}' is not supported; the tool itself will reject the call.`);
+  }
+
+  const pathFields: Array<{ readonly field: string; readonly value: string }> = [];
+  if (action === "copy" || action === "move" || action === "symlink") {
+    pathFields.push({ field: "source", value: stringValue(parameters.source) ?? "" });
+    pathFields.push({ field: "destination", value: stringValue(parameters.destination) ?? "" });
+  } else {
+    pathFields.push({ field: "path", value: stringValue(parameters.path) ?? "" });
+  }
+
+  for (const entry of pathFields) {
+    if (entry.value.trim() === "") {
+      return unsafe(`FileOps ${action} ${entry.field} is missing or empty; the tool itself will reject the call.`);
+    }
+    if (entry.value.includes("\0")) {
+      return unsafe(`FileOps ${entry.field} cannot contain NUL characters.`);
+    }
+    const dataJson = dataJsonTargetReason(entry.value);
+    if (dataJson) return unsafe(dataJson);
+    const canonical = canonicalAbsolutePath(entry.value);
+    const protectedReason = protectedPathReason(entry.value) ?? protectedPathReason(canonical) ?? dataJsonTargetReason(canonical);
+    if (protectedReason) return unsafe(protectedReason);
+    if (isPrivatePath(entry.value) || isPrivatePath(canonical)) {
+      return unsafe(`FileOps ${entry.field} targets a protected credential, configuration, or runtime-state path.`);
+    }
+    if (!allowOutsideWorkspace) {
+      if (hasPathTraversal(entry.value)) {
+        return unsafe(`FileOps ${entry.field} '${entry.value}' contains '..' path traversal.`);
+      }
+      if (resolvesOutsideAllTrustedRoots(entry.value, roots)) {
+        return unsafe(`FileOps ${entry.field} '${entry.value}' resolves outside the workspace.`);
+      }
+    }
+    if (config) {
+      const policyVerdict = fileEditPolicyVerdict("FileOps", entry.value, config, editRoots ?? editableRoots(config), allowOutsideWorkspace);
+      if (policyVerdict) return policyVerdict;
+    }
+  }
+
+  if (action === "chmod") {
+    const mode = stringValue(parameters.mode);
+    if (mode === null || mode.trim() === "") {
+      return unsafe("FileOps chmod mode is missing or empty; the tool itself will reject the call.");
+    }
+  }
+
+  return safe(`FileOps ${action} paths stay within the workspace and target no protected files.`);
+}
+
+function classifyProcessTool(
+  toolName: string,
+  parameters: Record<string, unknown>,
+  roots: readonly string[],
+  allowOutsideWorkspace: boolean,
+  config?: ToolSafetyConfig,
+  editRoots?: readonly string[],
+): StaticToolSafetyVerdict {
+  const cwd = stringValue(parameters.cwd);
+  if (cwd !== null && cwd.trim() !== "") {
+    if (cwd.includes("\0")) return unsafe(`${toolName} cwd must not contain NUL characters.`);
+    if (hasPathTraversal(cwd) || resolvesOutsideAllTrustedRoots(cwd, roots)) {
+      return unsafe(`${toolName} cwd '${cwd}' resolves outside the workspace.`);
+    }
+  }
+
+  const stringArray = (key: string, rejectLeadingDash: boolean): string[] => {
+    const value = parameters[key];
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) return [];
+    const result: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== "string") return [];
+      if (entry.includes("\0")) return [];
+      if (rejectLeadingDash && entry.startsWith("-")) return [];
+      result.push(entry);
+    }
+    return result;
+  };
+
+  if (toolName === "RunPackageScript") {
+    const script = stringValue(parameters.script);
+    if (script === null || script.trim() === "" || script.startsWith("-")) {
+      return unsafe("RunPackageScript requires a script name that is a non-empty string and does not start with '-'.");
+    }
+    const args = stringArray("args", false);
+    if (!Array.isArray(parameters.args) ? false : (parameters.args as unknown[]).some((entry) => typeof entry !== "string" || entry.includes("\0"))) {
+      return unsafe("RunPackageScript args must contain only strings without NUL characters.");
+    }
+    const env = stringArray("env", false);
+    if (Array.isArray(parameters.env)) {
+      for (const entry of parameters.env) {
+        if (typeof entry !== "string" || entry.includes("\0")) return unsafe("RunPackageScript env must contain only strings without NUL characters.");
+        const flagged = secretTextReason(entry);
+        if (flagged) return unsafe(`RunPackageScript env is unsafe: ${flagged}`);
+      }
+    }
+    return safe("RunPackageScript runs a declared package.json script with validated argv.");
+  }
+
+  if (toolName === "TypeCheck") {
+    const files = stringArray("files", true);
+    if (Array.isArray(parameters.files) && (parameters.files as unknown[]).some((entry) => typeof entry !== "string" || entry.includes("\0") || entry.startsWith("-"))) {
+      return unsafe("TypeCheck files must contain only strings without NUL characters and must not start with '-'.");
+    }
+    for (const file of files) {
+      if (hasPathTraversal(file) || resolvesOutsideAllTrustedRoots(file, roots)) {
+        return unsafe(`TypeCheck file '${file}' resolves outside the workspace.`);
+      }
+    }
+    for (const field of ["outDir", "tsconfig"]) {
+      const value = stringValue(parameters[field]);
+      if (value !== null && value.trim() !== "") {
+        if (hasPathTraversal(value) || resolvesOutsideAllTrustedRoots(value, roots)) {
+          return unsafe(`TypeCheck ${field} '${value}' resolves outside the workspace.`);
+        }
+        if (value.startsWith("-")) return unsafe(`TypeCheck ${field} must not start with '-'.`);
+      }
+    }
+    if (parameters.noEmit !== undefined && typeof parameters.noEmit !== "boolean") {
+      return unsafe("TypeCheck noEmit must be a boolean when provided.");
+    }
+    if (files.length > 0 && parameters.tsconfig !== undefined) {
+      return unsafe("TypeCheck cannot take both files and tsconfig; the tool itself will reject the call.");
+    }
+    if (config && parameters.noEmit === false) {
+      const emitTarget = stringValue(parameters.outDir) ?? cwd ?? roots[0];
+      if (emitTarget !== null && emitTarget.trim() !== "") {
+        const policyVerdict = fileEditPolicyVerdict("TypeCheck", emitTarget, config, editRoots ?? editableRoots(config), allowOutsideWorkspace);
+        if (policyVerdict) return policyVerdict;
+      }
+    }
+    return safe("TypeCheck runs the project's TypeScript compiler with fixed, repo-approved flags.");
+  }
+
+  if (toolName === "GoToolchain") {
+    const action = stringValue(parameters.action);
+    if (action === null || !["build", "test", "vet", "version", "fmt"].includes(action)) {
+      return unsafe("GoToolchain action must be one of build, test, vet, version, or fmt; the tool itself will reject the call.");
+    }
+    const packages = stringArray("packages", true);
+    if (Array.isArray(parameters.packages)) {
+      for (const entry of parameters.packages) {
+        if (typeof entry !== "string" || entry.includes("\0") || entry.startsWith("-") || entry.includes("|") || entry.includes(";")) {
+          return unsafe(`GoToolchain package pattern '${String(entry)}' is not a safe argv value.`);
+        }
+      }
+    }
+    if ((parameters.race === true || stringValue(parameters.run) !== null) && action !== "test") {
+      return unsafe("GoToolchain race and run are only valid with action 'test'.");
+    }
+    if (action === "version" && packages.length > 0) {
+      return unsafe("GoToolchain version takes no package patterns.");
+    }
+    if (config && action === "fmt") {
+      const policyVerdict = fileEditPolicyVerdict("GoToolchain", cwd ?? roots[0], config, editRoots ?? editableRoots(config), allowOutsideWorkspace);
+      if (policyVerdict) return policyVerdict;
+    }
+    return safe("GoToolchain runs a whitelisted go command with validated package patterns.");
+  }
+
+  if (toolName === "RunScript") {
+    const file = stringValue(parameters.file);
+    if (file === null || file.trim() === "" || file.startsWith("-")) {
+      return unsafe("RunScript requires a workspace script file that is a non-empty string and does not start with '-'.");
+    }
+    if (hasPathTraversal(file) || resolvesOutsideAllTrustedRoots(file, roots)) {
+      return unsafe(`RunScript file '${file}' resolves outside the workspace.`);
+    }
+    if (Array.isArray(parameters.args)) {
+      for (const entry of parameters.args) {
+        if (typeof entry !== "string" || entry.includes("\0")) return unsafe("RunScript args must contain only strings without NUL characters.");
+      }
+    }
+    return safe("RunScript runs an existing workspace script with literal argv.");
+  }
+
+  if (toolName === "RunNodeTest") {
+    const files = stringArray("files", true);
+    if (!Array.isArray(parameters.files) || (parameters.files as unknown[]).length === 0) {
+      return unsafe("RunNodeTest requires a non-empty files array.");
+    }
+    if ((parameters.files as unknown[]).some((entry) => typeof entry !== "string" || entry.includes("\0") || entry.startsWith("-"))) {
+      return unsafe("RunNodeTest files must contain only strings without NUL characters and must not start with '-'.");
+    }
+    for (const file of files) {
+      if (hasPathTraversal(file) || resolvesOutsideAllTrustedRoots(file, roots)) {
+        return unsafe(`RunNodeTest file '${file}' resolves outside the workspace.`);
+      }
+    }
+    return safe("RunNodeTest runs `node --test` for workspace test files.");
+  }
+
+  return unsafe(`Unknown process tool '${toolName}' cannot be safety-classified; refusing to execute.`);
 }
 
 function classifyIntegrationTool(toolName: string, parameters: Record<string, unknown>, roots: readonly string[]): StaticToolSafetyVerdict {
@@ -1693,6 +2091,8 @@ export function classifyToolCallStatically(
     case "ListDirectory":
     case "Find":
     case "Grep":
+    case "PathInfo":
+    case "FileHash":
       // Use the combined roots (workspace/trusted roots plus the config's
       // editable roots, which include any --safe-dir directories) so read-only
       // file tools can reach user-declared safe directories. In the production
@@ -1714,6 +2114,18 @@ export function classifyToolCallStatically(
     }
     case "ExecuteCommand":
       return classifyExecuteCommand(record, combinedRoots, allowOutsideWorkspace, config, policyRoots);
+    case "GetWorkingDirectory":
+      return classifyGetWorkingDirectory(record);
+    case "Help":
+      return classifyHelp(record);
+    case "FileOps":
+      return classifyFileOps(record, combinedRoots, allowOutsideWorkspace, config, policyRoots);
+    case "RunPackageScript":
+    case "TypeCheck":
+    case "GoToolchain":
+    case "RunScript":
+    case "RunNodeTest":
+      return classifyProcessTool(toolName, record, combinedRoots, allowOutsideWorkspace, config, policyRoots);
     case "Http":
       return classifyHttp(record);
     case "HttpRequest":
@@ -1919,18 +2331,26 @@ export function enforceExecutionPolicy(
     if (verdict.decision === "unsafe") throw new Error(`Execution policy denied ${toolName}: ${verdict.reason}`);
   };
   assertAllowed(args);
-  const key = toolName === "ListDirectory" ? "directory"
-    : ["Read", "Write", "Edit", "Delete", "FileSize", "Find", "Grep", "Mkdir", "Rmdir"].includes(toolName) ? "path" : undefined;
-  if (key) {
-    if (typeof args[key] !== "string" || !args[key].trim()) throw new Error(`Invalid filesystem ${key}.`);
-    args[key] = canonicalAbsolutePath(args[key]);
+  const singlePathKey = toolName === "ListDirectory" ? "directory"
+    : ["Read", "Write", "Edit", "Delete", "FileSize", "Find", "Grep", "Mkdir", "Rmdir", "FileHash"].includes(toolName) ? "path" : undefined;
+  if (singlePathKey) {
+    if (typeof args[singlePathKey] !== "string" || !args[singlePathKey].trim()) throw new Error(`Invalid filesystem ${singlePathKey}.`);
+    args[singlePathKey] = canonicalAbsolutePath(args[singlePathKey]);
     assertAllowed(args);
     try {
-      const stat = lstatSync(args[key] as string);
+      const stat = lstatSync(args[singlePathKey] as string);
       if (stat.isFile() && stat.nlink > 1) throw new Error("Hardlinked file targets require an unlinked workspace copy.");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+  }
+  if (toolName === "FileOps") {
+    for (const field of ["path", "source", "destination"]) {
+      if (typeof args[field] === "string" && args[field].trim() !== "") {
+        args[field] = canonicalAbsolutePath(args[field]);
+      }
+    }
+    assertAllowed(args);
   }
   return args;
 }

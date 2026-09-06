@@ -108,6 +108,18 @@ async function main(): Promise<void> {
       ["git ls-files --others --exclude-standard", "router", /Git\(\{ mode: "ls-files" \}\)/],
       ["git add README.md", "router", /Git\(\{ action: "stage"/],
       ["git commit -m \"hello\"", "router", /Git\(\{ action: "commit"/],
+      ["git show", "router", /Git\(\{ mode: "show"/],
+      ["git branch", "router", /Git\(\{ mode: "branch" \}\)/],
+      ["git worktree list", "router", /Git\(\{ mode: "worktree"/],
+      ["git config --get user.name", "router", /Git\(\{ mode: "config"/],
+      ["git checkout main", "router", /Git\(\{ action: "checkout"/],
+      ["git restore file.txt", "router", /Git\(\{ action: "restore"/],
+      ["git stash list", "router", /Git\(\{ action: "stash"/],
+      ["git cat-file -p HEAD", "router", /Git\(\{ mode: "cat-file"/],
+      ["git clean --dry-run", "router", /Git\(\{ mode: "clean" \}\)/],
+      ["git remote -v", "router", /Git\(\{ mode: "remote" \}\)/],
+      ["git check-ignore foo.txt", "router", /Git\(\{ mode: "check-ignore"/],
+      ["git rev-parse HEAD", "router", /Git\(\{ mode: "rev-parse"/],
     ];
     for (const [command, source, pattern] of clearCases) {
       const result = await routeGitExecuteCommand(command, { runtime: throwingRuntime, logger: silentLogger });
@@ -143,10 +155,10 @@ async function main(): Promise<void> {
     // ------------------------------------------------------------------
     // 4. Unclear git commands fail closed when no LLM is available.
     // ------------------------------------------------------------------
-    const noRuntime = await routeGitExecuteCommand("git show", { logger: silentLogger });
+    const noRuntime = await routeGitExecuteCommand("git tag", { logger: silentLogger });
     check(
       "unclear git command fails closed without an LLM runtime",
-      noRuntime.action === "refuse" && noRuntime.source === "fallback" && /git show/.test(noRuntime.reason),
+      noRuntime.action === "refuse" && noRuntime.source === "fallback" && /git tag/.test(noRuntime.reason),
     );
     const versionNoRuntime = await routeGitExecuteCommand("git --version", { logger: silentLogger });
     check(
@@ -158,7 +170,7 @@ async function main(): Promise<void> {
     // 5. The LLM router can allow or refuse unclear git commands.
     // ------------------------------------------------------------------
     const allowRuntime = mockRuntime(async () => '{"safe":true,"reason":"read-only and outside Git modes"}');
-    const allowed = await routeGitExecuteCommand("git show", {
+    const allowed = await routeGitExecuteCommand("git tag", {
       runtime: allowRuntime,
       promptPath: tempPrompt,
       logger: silentLogger,
@@ -169,7 +181,7 @@ async function main(): Promise<void> {
     );
 
     const refuseRuntime = mockRuntime(async () => '{"safe":false,"reason":"use Git({ mode: \\"log\\" })"}');
-    const refused = await routeGitExecuteCommand("git branch", {
+    const refused = await routeGitExecuteCommand("git reset", {
       runtime: refuseRuntime,
       promptPath: tempPrompt,
       logger: silentLogger,
@@ -200,12 +212,12 @@ async function main(): Promise<void> {
       return '{"safe":false,"reason":"do not configure credentials through ExecuteCommand"}';
     });
     await routeGitExecuteCommand(
-      `git config --global user.password "${secretValue}"`,
+      `git push https://user:${secretValue}@example.com/repo`,
       { runtime: captureRuntime, promptPath: tempPrompt, logger: silentLogger },
     );
     check(
       "router prompt contains the redacted git command",
-      /git config/.test(capturedPrompt) && /<redacted/.test(capturedPrompt),
+      /git push/.test(capturedPrompt) && /<redacted/.test(capturedPrompt),
     );
     check(
       "router prompt never contains the raw credential",
@@ -224,7 +236,7 @@ async function main(): Promise<void> {
       createCalls += 1;
       return "this is not json";
     });
-    const invalid = await routeGitExecuteCommand("git show", {
+    const invalid = await routeGitExecuteCommand("git tag", {
       runtime: invalidRuntime,
       promptPath: tempPrompt,
       logger: silentLogger,
@@ -241,7 +253,7 @@ async function main(): Promise<void> {
     const boomRuntime = mockRuntime(async () => {
       throw new Error("provider down");
     });
-    const threw = await routeGitExecuteCommand("git show", {
+    const threw = await routeGitExecuteCommand("git tag", {
       runtime: boomRuntime,
       promptPath: tempPrompt,
       logger: silentLogger,
@@ -251,7 +263,7 @@ async function main(): Promise<void> {
       threw.action === "refuse" && threw.source === "fallback",
     );
 
-    const missingPrompt = await routeGitExecuteCommand("git show", {
+    const missingPrompt = await routeGitExecuteCommand("git tag", {
       runtime: allowRuntime,
       promptPath: join(tmpDir, "does-not-exist.md"),
       logger: silentLogger,

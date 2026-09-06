@@ -38,11 +38,17 @@ function under(path: string, root: string): boolean {
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !rel.startsWith(sep));
 }
 
-/** Build a minimal Linux mount namespace. No host /home, /run, /proc or /tmp
- * is mounted. Workspace secrets and git/agent configuration are masked.
- * Mounts are operator-authorized roots, not paths selected by the model.
+/** Build the bwrap argument vector that runs `argv` — a validated program and
+ * its literal arguments, never a shell string — inside the configured mount
+ * namespace with `cwd` as the working directory. This is the shared sandbox
+ * entry point for ExecuteCommand and the dedicated process tools so every
+ * caller receives identical mount, environment, secret-masking, and chdir
+ * behavior.
  */
-export function sandboxArguments(policy: ShellPolicy, cwd: string, command: string, parameters: readonly string[]): string[] {
+export function sandboxExecArguments(policy: ShellPolicy, cwd: string, argv: readonly string[]): string[] {
+  if (!Array.isArray(argv) || argv.length === 0 || argv.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+    throw new TypeError("sandboxExecArguments requires a non-empty array of strings without NUL characters.");
+  }
   if (process.platform !== "linux") throw new Error("Shell sandbox requires Linux bubblewrap; no host fallback is performed.");
   const roots = [...new Set([...policy.readableRoots, ...policy.writableRoots].map((root) => realpathSync(root)))];
   const writes = policy.writableRoots.map((root) => realpathSync(root));
@@ -109,6 +115,14 @@ export function sandboxArguments(policy: ShellPolicy, cwd: string, command: stri
     hidden.add(entry.path);
   }
   for (const [name, value] of Object.entries(shellEnvironment())) args.push("--setenv", name, value!);
-  args.push("--chdir", actualCwd, "--", "/bin/bash", "--noprofile", "--norc", "-c", command, "--", ...parameters);
+  args.push("--chdir", actualCwd, "--", ...argv);
   return args;
+}
+
+/** Build a minimal Linux mount namespace for `bash -c command` with literal
+ * positional parameters. Retained for ExecuteCommand and existing callers;
+ * delegates to `sandboxExecArguments` with the bash argv.
+ */
+export function sandboxArguments(policy: ShellPolicy, cwd: string, command: string, parameters: readonly string[]): string[] {
+  return sandboxExecArguments(policy, cwd, ["/bin/bash", "--noprofile", "--norc", "-c", command, "--", ...parameters]);
 }

@@ -109,6 +109,16 @@ import Http from "./tools/Http.ts";
 import HttpRequest from "./tools/HttpRequest.ts";
 import Git, { GitParameters } from "./tools/Git.tsx";
 import { executeCommand as ExecuteCommand } from "./tools/ExecuteCommand.ts";
+import RunPackageScript from "./tools/RunPackageScript.ts";
+import TypeCheck from "./tools/TypeCheck.ts";
+import GoToolchain from "./tools/GoToolchain.ts";
+import GetWorkingDirectory from "./tools/GetWorkingDirectory.ts";
+import PathInfo from "./tools/PathInfo.ts";
+import FileHash from "./tools/FileHash.ts";
+import FileOps from "./tools/FileOps.ts";
+import Help from "./tools/Help.ts";
+import RunScript from "./tools/RunScript.ts";
+import RunNodeTest from "./tools/RunNodeTest.ts";
 import AgentBus from "./tools/AgentBus.ts";
 import AgentBusEnrol from "./tools/AgentBusEnrol.ts";
 import SpecKeeper from "./tools/SpecKeeper.ts";
@@ -935,6 +945,21 @@ function logWithHierarchy(message: string, level: ConsoleHierarchyLevel): void {
  */
 const toolChildIndent = hierarchyIndent("toolResult");
 
+/** Shared shell policy for ExecuteCommand and the dedicated process tools. */
+function processToolPolicy() {
+    return {
+        mode: shellMode,
+        writableRoots: [
+            ...(toolSafetyConfig.startDirConfigured || toolSafetyConfig.allowAgentSourceModifications ? [toolSafetyConfig.startDir] : []),
+            ...(toolSafetyConfig.safeDirs ?? []),
+        ],
+        readableRoots: [
+            process.cwd(),
+            ...(toolSafetyConfig.allowAgentSourceModifications ? [] : [toolSafetyConfig.agentSourceDir]),
+        ],
+    };
+}
+
 const tools = [
     {
         type: "function", name: "Write",
@@ -1070,25 +1095,188 @@ const tools = [
     {
         type: "function", name: "ExecuteCommand",
         usage_prompt: "tools/execute-command-usage.md",
-        description: "Run a Bash command and return its exit code, standard output, and standard error. Parameters are safely supplied as positional arguments. Refuses all agent-bus actions (agent-busctl/agentbus/agent-bus); use the AgentBus or AgentBusEnrol tool instead.",
+        description: "Run a Bash command and return its exit code, standard output, standard error, and durationMs. Prefer passing dynamic data as the parameters array ($1/$2) rather than interpolating it into the command. Accepts cwd (boundary-checked), maxOutputBytes, and maxOutputLines. Refuses all agent-bus actions (agent-busctl/agentbus/agent-bus); use the AgentBus or AgentBusEnrol tool instead. Dedicated tools replace ls/pwd/cat/find/grep/mkdir/rmdir/single-file rm.",
         parameters: {
             type: "object",
-            properties: { command: { type: "string" }, parameters: { type: "array", items: { type: "string" } } },
+            properties: {
+                command: { type: "string" },
+                parameters: { type: "array", items: { type: "string" } },
+                cwd: { type: "string", description: "Working directory for the spawned process; must resolve inside the workspace/safe-dir boundary." },
+                maxOutputBytes: { type: "number", description: "Combined stdout/stderr byte ceiling (default 1 MiB)." },
+                maxOutputLines: { type: "number", description: "Keep only the tail N lines of each captured stream." },
+            },
             required: ["command"],
         },
-        exec_handler: ({ command, parameters }) => ExecuteCommand(command, parameters, toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined, {
+        exec_handler: ({ command, parameters, cwd, maxOutputBytes, maxOutputLines }) => ExecuteCommand(command, parameters, cwd ?? (toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined), {
             signal: abortController.signal,
-            policy: {
-                mode: shellMode,
-                writableRoots: [...(toolSafetyConfig.startDirConfigured || toolSafetyConfig.allowAgentSourceModifications ? [toolSafetyConfig.startDir] : []), ...(toolSafetyConfig.safeDirs ?? [])],
-                readableRoots: [process.cwd(), ...(toolSafetyConfig.allowAgentSourceModifications ? [] : [toolSafetyConfig.agentSourceDir])],
-            },
+            maxOutputBytes,
+            maxOutputLines,
+            policy: processToolPolicy(),
         }),
+    },
+    {
+        type: "function", name: "RunPackageScript",
+        usage_prompt: "tools/run-package-script-usage.md",
+        description: "Run a script declared in package.json#scripts via `npm run <script>` without invoking a shell. Only run is allowed; install/publish/exec/update are never run.",
+        parameters: {
+            type: "object",
+            properties: {
+                script: { type: "string", description: "Name of a script declared in package.json#scripts; must match exactly." },
+                args: { type: "array", items: { type: "string" }, description: "Optional positional arguments appended after --." },
+                cwd: { type: "string", description: "Directory containing package.json; defaults to the workspace root." },
+                timeoutSeconds: { type: "number", description: "Process deadline in seconds (default 120)." },
+                maxOutputBytes: { type: "number", description: "Combined stdout/stderr byte ceiling (default 1 MiB)." },
+                maxOutputLines: { type: "number", description: "Keep only the tail N lines of each captured stream." },
+                env: { type: "array", items: { type: "string" }, description: "Optional KEY=value environment overrides." },
+            },
+            required: ["script"],
+        },
+        exec_handler: (options) => RunPackageScript({ ...options, signal: abortController.signal, policy: processToolPolicy() }),
+    },
+    {
+        type: "function", name: "TypeCheck",
+        usage_prompt: "tools/type-check-usage.md",
+        description: "Run the project's TypeScript compiler in check or emit mode with fixed repo-approved flags. Spawns tsc directly, never through a shell.",
+        parameters: {
+            type: "object",
+            properties: {
+                files: { type: "array", items: { type: "string" }, description: "Files to compile; each must resolve inside the workspace." },
+                noEmit: { type: "boolean", description: "Type-check only; defaults to true." },
+                outDir: { type: "string", description: "Optional output directory for emit mode." },
+                tsconfig: { type: "string", description: "Optional path to a tsconfig.json. Mutually exclusive with files." },
+                cwd: { type: "string", description: "Working directory; defaults to the workspace root." },
+                timeoutSeconds: { type: "number", description: "Process deadline in seconds (default 120)." },
+                maxOutputBytes: { type: "number", description: "Combined stdout/stderr byte ceiling (default 1 MiB)." },
+                maxOutputLines: { type: "number", description: "Keep only the tail N lines of each captured stream." },
+            },
+        },
+        exec_handler: (options) => TypeCheck({ ...options, signal: abortController.signal, policy: processToolPolicy() }),
+    },
+    {
+        type: "function", name: "GoToolchain",
+        usage_prompt: "tools/go-toolchain-usage.md",
+        description: "Run whitelisted Go toolchain commands for a Go module. Only build/test/vet/version/fmt are accepted; package patterns are validated argv.",
+        parameters: {
+            type: "object",
+            properties: {
+                action: { type: "string", enum: ["build", "test", "vet", "version", "fmt"], description: "Whitelisted go toolchain action." },
+                packages: { type: "array", items: { type: "string" }, description: "Package patterns such as ./internal/ids/...; no leading -, |, or ;." },
+                race: { type: "boolean", description: "Append -race (test only)." },
+                run: { type: "string", description: "Optional -run regex (test only)." },
+                cwd: { type: "string", description: "Boundary-checked module directory." },
+                timeoutSeconds: { type: "number", description: "Process deadline in seconds (default 120)." },
+                maxOutputBytes: { type: "number", description: "Combined stdout/stderr byte ceiling (default 1 MiB)." },
+                maxOutputLines: { type: "number", description: "Keep only the tail N lines of each captured stream." },
+            },
+            required: ["action"],
+        },
+        exec_handler: (options) => GoToolchain({ ...options, signal: abortController.signal, policy: processToolPolicy() }),
+    },
+    {
+        type: "function", name: "GetWorkingDirectory",
+        usage_prompt: "tools/get-working-directory-usage.md",
+        description: "Return the current working directory and its symlink-resolved real path (replaces pwd).",
+        parameters: {
+            type: "object",
+            properties: { resolve: { type: "boolean", description: "Resolve the symlink-free real path; defaults to true." } },
+        },
+        exec_handler: ({ resolve }) => GetWorkingDirectory({ resolve }),
+    },
+    {
+        type: "function", name: "PathInfo",
+        usage_prompt: "tools/path-info-usage.md",
+        description: "Inspect filesystem metadata and resolve paths. Replaces stat, readlink, realpath, file, which, and ls -ld.",
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string" },
+                action: { type: "string", enum: ["stat", "lstat", "realpath", "readlink", "which", "type"], description: "Defaults to stat." },
+            },
+            required: ["path"],
+        },
+        exec_handler: ({ path, action }) => PathInfo({ path, action }),
+    },
+    {
+        type: "function", name: "FileHash",
+        usage_prompt: "tools/file-hash-usage.md",
+        description: "Compute a file digest without a shell. Makes the read_hash precondition for Edit/Write/Delete self-service.",
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string" },
+                algorithm: { type: "string", description: "sha1, sha256, sha384, or sha512; defaults to sha256." },
+            },
+            required: ["path"],
+        },
+        exec_handler: ({ path, algorithm }) => FileHash({ path, algorithm }),
+    },
+    {
+        type: "function", name: "FileOps",
+        usage_prompt: "tools/file-ops-usage.md",
+        description: "Perform simple, validated file operations (copy, move, touch, chmod, symlink) without a shell. Mutating actions require --allow-agent-source-modifications or a declared --safe-dir.",
+        parameters: {
+            type: "object",
+            properties: {
+                action: { type: "string", enum: ["copy", "move", "touch", "chmod", "symlink"] },
+                source: { type: "string", description: "Source path for copy, move, and symlink (link target)." },
+                destination: { type: "string", description: "Destination path for copy, move, and symlink (link path)." },
+                path: { type: "string", description: "Target path for touch and chmod." },
+                mode: { type: "string", description: "Octal string (e.g. 755) or executable-bit symbolic mode (e.g. +x) for chmod." },
+            },
+            required: ["action"],
+        },
+        exec_handler: ({ action, source, destination, path, mode }) => FileOps({ action, source, destination, path, mode }),
+    },
+    {
+        type: "function", name: "Help",
+        usage_prompt: "tools/help-usage.md",
+        description: "Return the usage documentation for an available tool or a small built-in reference for agent-busctl. Read-only; never executes the CLI.",
+        parameters: {
+            type: "object",
+            properties: { subject: { type: "string", description: "A tool name (AgentBus, Git, ExecuteCommand, ...) or agent-busctl[:subcommand]." } },
+            required: ["subject"],
+        },
+        exec_handler: ({ subject }) => Help({ subject }),
+    },
+    {
+        type: "function", name: "RunScript",
+        usage_prompt: "tools/run-script-usage.md",
+        description: "Run an existing .js/.mjs/.cjs file in the workspace with node, never through a shell.",
+        parameters: {
+            type: "object",
+            properties: {
+                file: { type: "string", description: "Workspace script file ending in .js, .mjs, or .cjs." },
+                args: { type: "array", items: { type: "string" }, description: "Literal positional arguments for the script." },
+                cwd: { type: "string", description: "Working directory; defaults to the workspace root." },
+                timeoutSeconds: { type: "number", description: "Process deadline in seconds (default 120)." },
+                maxOutputBytes: { type: "number", description: "Combined stdout/stderr byte ceiling (default 1 MiB)." },
+                maxOutputLines: { type: "number", description: "Keep only the tail N lines of each captured stream." },
+            },
+            required: ["file"],
+        },
+        exec_handler: (options) => RunScript({ ...options, signal: abortController.signal, policy: processToolPolicy() }),
+    },
+    {
+        type: "function", name: "RunNodeTest",
+        usage_prompt: "tools/run-node-test-usage.md",
+        description: "Run `node --test <files...>` for workspace test files. The fixed --test flag and literal file argv prevent flag injection.",
+        parameters: {
+            type: "object",
+            properties: {
+                files: { type: "array", items: { type: "string" }, description: "Workspace test files passed to node --test." },
+                cwd: { type: "string", description: "Working directory; defaults to the workspace root." },
+                timeoutSeconds: { type: "number", description: "Process deadline in seconds (default 120)." },
+                maxOutputBytes: { type: "number", description: "Combined stdout/stderr byte ceiling (default 1 MiB)." },
+                maxOutputLines: { type: "number", description: "Keep only the tail N lines of each captured stream." },
+            },
+            required: ["files"],
+        },
+        exec_handler: (options) => RunNodeTest({ ...options, signal: abortController.signal, policy: processToolPolicy() }),
     },
     {
         type: "function", name: "Git",
         usage_prompt: "tools/git-usage.md",
-        description: "Inspect a Git repository (status, log, diff, ls-files), manage linked worktrees (worktree list/add/remove/move/prune), stage selected changes, or commit staged changes.",
+        description: "Inspect a Git repository (status, log, diff, ls-files, show, rev-parse, check-ignore, branch, remote, config, cat-file, clean --dry-run), manage linked worktrees (worktree list/add/remove/move/prune), stage selected changes, commit, checkout, restore, stash, create/delete branches, or set workspace-local config.",
         parameters: GitParameters,
         exec_handler: (options) => {
             // In review mode, execution steps stage changes in the worktree and
