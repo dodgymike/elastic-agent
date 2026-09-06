@@ -45,21 +45,33 @@ function runReviewSimulation(responses) {
 
 // Mirrors the changes/diff assembly in runReviewPhase() in main.ts:
 // best-effort reading of the staged diff, falling back to committed work when
-// the staged diff is empty, and to an explicit notice when no evidence is
-// available. The review phase must NOT fail because the diff is missing.
+// the staged diff is empty, and to an explicit UNKNOWN EVIDENCE section when
+// no evidence is available. The review phase must NOT fail because the diff is
+// missing; the reviewer must resolve unknown evidence or report
+// inconclusive/failing.
+function unknownChangesEvidence() {
+    return [
+        "UNKNOWN EVIDENCE",
+        "",
+        "No staged or committed change summary could be produced for this review. The reviewer MUST resolve this explicitly: inspect the repository state directly when tools permit, or report the review inconclusive/failing with a reason explaining why the change evidence could not be obtained. Do NOT infer success from missing evidence.",
+    ].join("\n");
+}
+
 function buildChangesForReview(executionWorktreePath, readStagedChanges, readCommittedChanges) {
-    let changes = "(no staged changes summary available)";
+    let changes = unknownChangesEvidence();
     if (!executionWorktreePath) return changes;
     try {
         changes = readStagedChanges(executionWorktreePath);
     } catch (error) {
-        return changes; // explicit notice is retained; review still proceeds
+        return changes; // explicit unknown-evidence section is retained; review still proceeds
     }
     if (changes.includes("(no staged changes against HEAD)")) {
         try {
             changes = `${changes}\n\n${readCommittedChanges(executionWorktreePath)}`;
         } catch (error) {
-            // Keep the staged summary; review still proceeds.
+            // Neither staged nor committed evidence is available: replace the
+            // empty staged block with the explicit unknown-evidence section.
+            changes = unknownChangesEvidence();
         }
     }
     return changes;
@@ -190,18 +202,18 @@ function check(name, cond) { if (cond) console.log(`PASS: ${name}`); else { cons
     check("failing review emits the stop error", r.error === "Review did not pass; the work was left uncommitted and the task was marked blocked.");
 }
 
-// 3. Missing diff evidence: the review request carries an explicit notice
-//    instead of failing the review phase.
+// 3. Missing diff evidence: the review request carries the explicit UNKNOWN
+//    EVIDENCE section instead of failing the review phase.
 {
     const missingWorktree = buildChangesForReview(null, () => "diff --git a/x b/x", () => "committed patch");
-    check("missing worktree path produces the explicit fallback notice", missingWorktree === "(no staged changes summary available)");
+    check("missing worktree path produces the explicit UNKNOWN EVIDENCE section", missingWorktree === unknownChangesEvidence());
 
     const unreadableDiff = buildChangesForReview(
         "/worktrees/review-worktree",
         () => { throw new Error("git diff failed"); },
         () => "committed patch",
     );
-    check("unreadable staged diff keeps the explicit fallback notice", unreadableDiff === "(no staged changes summary available)");
+    check("unreadable staged diff keeps the explicit UNKNOWN EVIDENCE section", unreadableDiff === unknownChangesEvidence());
 
     const emptyStagedFallsBackToCommitted = buildChangesForReview(
         "/worktrees/review-worktree",
@@ -209,6 +221,13 @@ function check(name, cond) { if (cond) console.log(`PASS: ${name}`); else { cons
         () => "committed patch: 1 file changed",
     );
     check("empty staged diff surfaces committed work as evidence", emptyStagedFallsBackToCommitted.includes("(no staged changes against HEAD)") && emptyStagedFallsBackToCommitted.includes("committed patch"));
+
+    const emptyStagedWithUnreadableCommitted = buildChangesForReview(
+        "/worktrees/review-worktree",
+        () => "(no staged changes against HEAD)",
+        () => { throw new Error("git show failed"); },
+    );
+    check("empty staged diff with unreadable committed work becomes UNKNOWN EVIDENCE", emptyStagedWithUnreadableCommitted === unknownChangesEvidence());
 }
 
 // 4. Review success is distinct from commit success: a passing review followed

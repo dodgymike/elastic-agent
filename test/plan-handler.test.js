@@ -20,6 +20,10 @@ const {
     reportExecutionFeedback,
     reportAppliedPlanChanges,
     formatExecutedSteps,
+    formatReviewPlanSteps,
+    formatEvidenceReferences,
+    planVersionSummary,
+    FIXED_REVIEW_CHECKLIST,
 } = require("./.plan-handler-build/plan-handler.js");
 const { snapshotStepFeedback } = require("./.plan-handler-build/step-outcome.js");
 
@@ -309,6 +313,76 @@ const indent = () => "      ";
         check("invalid JSON: external status is never done", invalid.reduced.specKeeperStatus !== "done");
         check("invalid JSON: spec keeper note carries the diagnostic", invalid.reduced.specKeeperNote.includes("outcome invalid"));
     }
+}
+
+// 19. PI-02 review-plan validation: a valid review-plan response contributes its
+//     rendered, numbered steps; an abort or invalid response falls back to the
+//     fixed four-criteria checklist with a reason.
+{
+    const validPlan = formatReviewPlanSteps('{"steps":[{"step_number":1,"tldr":"Check acceptance criteria"},{"step_number":2,"tldr":"Inspect the diff"}]}');
+    check("formatReviewPlanSteps accepts a valid review plan", validPlan.usedFallback === false && validPlan.reason === null);
+    check("formatReviewPlanSteps renders numbered steps", validPlan.steps === "1. Check acceptance criteria\n2. Inspect the diff");
+
+    const abort = formatReviewPlanSteps('{"abort":true,"reason":"Cannot review without the diff"}');
+    check("formatReviewPlanSteps falls back for an abort", abort.usedFallback === true);
+    check("formatReviewPlanSteps reports the abort reason", abort.reason === "review plan was an abort: Cannot review without the diff");
+    check("formatReviewPlanSteps abort falls back to the fixed checklist", abort.steps === FIXED_REVIEW_CHECKLIST);
+
+    const invalid = formatReviewPlanSteps('not json at all');
+    check("formatReviewPlanSteps falls back for invalid JSON", invalid.usedFallback === true && typeof invalid.reason === "string" && invalid.reason.length > 0);
+    check("formatReviewPlanSteps invalid falls back to the fixed checklist", invalid.steps === FIXED_REVIEW_CHECKLIST);
+
+    const empty = formatReviewPlanSteps("");
+    check("formatReviewPlanSteps falls back for an empty response", empty.usedFallback === true && empty.steps === FIXED_REVIEW_CHECKLIST);
+
+    check("FIXED_REVIEW_CHECKLIST carries all four canonical criteria",
+        ["(a)", "(b)", "(c)", "(d)"].every((marker) => FIXED_REVIEW_CHECKLIST.includes(marker)));
+}
+
+// 20. PI-02 evidence references: the review input renders secret-free evidence
+//     references (summary/findings + provider response id) per completed step.
+{
+    const ledger = [
+        {
+            step: 1,
+            text: "Run the checks",
+            feedbackResponseId: "resp-success-checks",
+            outcome: "succeeded",
+            evidence: { stepStatus: "completed", summary: "checks passed", findings: ["lint ok", "test ok"] },
+        },
+        {
+            step: 2,
+            text: "Write the report",
+            feedbackResponseId: null,
+            outcome: "invalid",
+            evidence: { validationError: "Feedback JSON could not be parsed" },
+        },
+        {
+            step: 3,
+            text: "Record learnings",
+            feedbackResponseId: "resp-no-evidence",
+            outcome: "succeeded",
+            evidence: { stepStatus: "completed", summary: "", findings: [] },
+        },
+    ];
+    const refs = formatEvidenceReferences(ledger);
+    check("formatEvidenceReferences renders empty as (none)", formatEvidenceReferences([]) === "(none)");
+    check("formatEvidenceReferences includes the provider response id", refs.includes("[response resp-success-checks]"));
+    check("formatEvidenceReferences includes findings", refs.includes("findings: lint ok; test ok"));
+    check("formatEvidenceReferences renders a validation diagnostic for invalid feedback", refs.includes("invalid feedback — Feedback JSON could not be parsed"));
+    check("formatEvidenceReferences notes a missing evidence payload", refs.includes("no evidence recorded."));
+    check("formatEvidenceReferences never renders file contents", !refs.includes("data.json"));
+}
+
+// 21. PI-02 plan version: prefer an explicit numeric planVersion, otherwise
+//     derive one plus the number of applied replans (phase appended when set).
+{
+    check("planVersionSummary prefers an explicit numeric version", planVersionSummary({ planVersion: 7, replanHistory: [{ applied: true }] }) === "7");
+    check("planVersionSummary ignores a non-positive explicit version", planVersionSummary({ planVersion: 0, replanHistory: [] }) === "1");
+    check("planVersionSummary derives 1 with no applied replans", planVersionSummary({ replanHistory: [] }) === "1");
+    check("planVersionSummary counts only applied replans", planVersionSummary({ replanHistory: [{ applied: true }, { applied: false }, { applied: true }] }) === "3");
+    check("planVersionSummary appends the phase when present", planVersionSummary({ planPhase: "design", replanHistory: [{ applied: true }] }) === "2 (phase design)");
+    check("planVersionSummary tolerates a missing config", planVersionSummary(null) === "1");
 }
 
 if (failures === 0) { console.log("\nAll plan-handler tests passed."); process.exit(0); }

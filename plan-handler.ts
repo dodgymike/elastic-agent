@@ -31,6 +31,7 @@
  */
 
 import { truncate, stringify } from "./tool-renderer.js";
+import { parsePlanOrAbort, planStepsFromObject } from "./prompt-parser.js";
 
 /** The default handler for a revised-plan step count (mirrors main.ts). */
 export const DEFAULT_MAX_REVISED_PLAN_STEPS = 50;
@@ -262,4 +263,95 @@ export function summarizeReview(review: { passed: boolean; reasons?: string[]; l
     const learnings = Array.isArray(review?.learnings) ? review.learnings.filter(Boolean) : [];
     if (learnings.length > 0) return truncate(learnings.join("; "), 160);
     return "completed work passed all four review criteria";
+}
+
+/**
+ * The fixed four-criteria review checklist used when the review-plan response
+ * is an abort or otherwise invalid. This is the same canonical checklist the
+ * reviewer must assess regardless of whether a model-generated review plan was
+ * produced; it is rendered into the review prompt as the fallback procedure.
+ */
+export const FIXED_REVIEW_CHECKLIST = [
+    "(a) Prompt request fulfillment — Has the original prompt request been fully fulfilled by the executed work?",
+    "(b) End-result quality — Is the end result of good quality?",
+    "(c) SDLC.md compliance — Has the process described in SDLC.md been followed/met?",
+    "(d) Noted learnings — Note any learnings (e.g. from execution, the plan, or earlier review attempts).",
+].join("\n");
+
+/**
+ * Parse a review-plan response and render its steps for the review prompt.
+ *
+ * The review-plan generation uses the same plan-or-abort JSON contract as
+ * ordinary planning, so its response is validated with `parsePlanOrAbort`. A
+ * valid plan contributes its rendered, numbered steps. An abort or invalid
+ * response falls back to `FIXED_REVIEW_CHECKLIST` so the review still has a
+ * concrete procedure without failing the review phase.
+ */
+export function formatReviewPlanSteps(reviewPlanText: unknown): { steps: string; usedFallback: boolean; reason: string | null } {
+    const parsed = parsePlanOrAbort(String(reviewPlanText ?? ""));
+    if (parsed.valid) {
+        if (parsed.result.kind === "abort") {
+            return {
+                steps: FIXED_REVIEW_CHECKLIST,
+                usedFallback: true,
+                reason: `review plan was an abort: ${parsed.result.reason}`,
+            };
+        }
+        const steps = planStepsFromObject(parsed.result.plan);
+        if (steps.length > 0) {
+            return { steps: formatPlan(steps), usedFallback: false, reason: null };
+        }
+        return { steps: FIXED_REVIEW_CHECKLIST, usedFallback: true, reason: "review plan had no usable steps" };
+    }
+    return { steps: FIXED_REVIEW_CHECKLIST, usedFallback: true, reason: parsed.reason };
+}
+
+/**
+ * Render the secret-free check-evidence references recorded on the completion
+ * ledger for the review prompt. Each completed step contributes its normalized
+ * evidence (the model-reported summary/findings, or the validation diagnostic
+ * for invalid feedback) plus its provider response id when present. This never
+ * includes file contents, data.json, or credentials.
+ */
+export function formatEvidenceReferences(completedSteps: any[]): string {
+    if (!Array.isArray(completedSteps) || completedSteps.length === 0) return "(none)";
+    return completedSteps
+        .map((entry) => {
+            const step = typeof entry?.step === "number" ? entry.step : "?";
+            const ref = typeof entry?.feedbackResponseId === "string" && entry.feedbackResponseId
+                ? ` [response ${entry.feedbackResponseId}]`
+                : "";
+            const evidence = entry?.evidence;
+            if (!evidence || typeof evidence !== "object") {
+                return `Step ${step}${ref}: no evidence recorded.`;
+            }
+            if (typeof evidence.validationError === "string") {
+                return `Step ${step}${ref}: invalid feedback — ${evidence.validationError}`;
+            }
+            const summary = typeof evidence.summary === "string" ? evidence.summary.trim() : "";
+            const findings = Array.isArray(evidence.findings) ? evidence.findings : [];
+            const parts: string[] = [];
+            if (summary) parts.push(`summary: ${summary}`);
+            if (findings.length > 0) parts.push(`findings: ${findings.map((finding: unknown) => String(finding)).join("; ")}`);
+            return `Step ${step}${ref}: ${parts.length > 0 ? parts.join("; ") : "no evidence recorded."}`;
+        })
+        .join("\n");
+}
+
+/**
+ * Derive a short, secret-free current plan version for the review request.
+ * Prefers an explicit numeric `planVersion` (the version the structured plan
+ * model will own) when present; otherwise derives "1 + applied replans" from
+ * the replan history so a step/phase-changing replan advances the version. The
+ * optional phase is appended for very-high-complexity plans.
+ */
+export function planVersionSummary(configData: any): string {
+    if (configData && Number.isInteger(configData.planVersion) && configData.planVersion > 0) {
+        return String(configData.planVersion);
+    }
+    const appliedReplans = (Array.isArray(configData?.replanHistory) ? configData.replanHistory : [])
+        .filter((entry: any) => entry && entry.applied === true).length;
+    const revision = appliedReplans + 1;
+    const phase = configData?.planPhase === undefined ? "" : String(configData.planPhase).trim();
+    return phase.length > 0 ? `${revision} (phase ${phase})` : String(revision);
 }

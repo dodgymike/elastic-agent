@@ -12,5 +12,5 @@ ${plan}
 You are executing step ${stepNumber} of ${stepCount}: ${step}
 Carry out only this step. Use tools when needed, report the result, and do not begin another plan step.
 
-Execution context (review feedback and learnings from earlier attempts; "(none)" when this is the first execution):
+Execution context (run-level context passed into this execution phase; "(none)" when there is nothing to pass):
 ${executionContext}

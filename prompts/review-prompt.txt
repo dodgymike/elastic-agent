@@ -2,21 +2,40 @@ ${claudeInstructions}
 
 REVIEW PHASE
 
-A plan has been created and executed. Review the completed work now. A separate plan step was carried out at the start of this review phase to plan how to conduct the review; that review plan is provided below for context.
+A plan has been created and executed. Review the completed work now. A separate
+review-plan step was carried out at the start of this review phase to plan how
+to conduct the review; its steps are provided below. When no valid review plan
+could be produced, the runtime falls back to the fixed four-criteria checklist
+shown in the REVIEW CRITERIA section.
 
 Original prompt request:
 ${originalPrompt}
 
+Acceptance criteria (the plan's expected outcome; "(none)" when not recorded):
+${acceptanceCriteria}
+
+Current plan version:
+${planVersion}
+
 Execution plan:
 ${plan}
 
-Executed steps:
-${executedSteps}
+Executed steps with normalized step outcomes:
+${stepOutcomes}
 
-ACTUAL CHANGES (the concrete work produced by the executed steps — staged in the execution worktree against HEAD, or committed work when the staged diff is empty — review THIS, not just the prose above):
+Check evidence references (secret-free summaries/findings recorded per completed
+step; never file contents, data.json, or credentials):
+${evidenceReferences}
+
+ACTUAL CHANGES (the concrete work produced by the executed steps — staged in the
+execution worktree against HEAD, or committed work when the staged diff is empty —
+review THIS, not just the prose above. When this section reports UNKNOWN EVIDENCE,
+resolve it by inspecting the repository state directly, or report the review
+inconclusive/failing with a reason; do NOT infer success from missing evidence):
 ${changes}
 
-Review plan (created at the start of the review phase):
+Review plan (steps to follow for this review; the fixed four-criteria checklist
+is used when no valid review plan was produced):
 ${reviewPlan}
 
 Accumulated learnings (empty if none):

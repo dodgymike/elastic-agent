@@ -62,10 +62,14 @@ import {
     applyExecutionFeedback,
     buildToolsAvailablePrompt,
     fightingDenialCount,
+    FIXED_REVIEW_CHECKLIST,
+    formatEvidenceReferences,
     formatExecutedSteps,
     formatLearnings,
     formatPlan,
+    formatReviewPlanSteps,
     getCachedTokens,
+    planVersionSummary,
     reportAppliedPlanChanges,
     reportExecutionFeedback,
     summarizeReview,
@@ -552,6 +556,14 @@ const selfModificationSection = readFileSync("prompts/self-modification-section.
 const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.txt", "utf-8");
 const replanPromptTemplate = readFileSync("prompts/replan-prompt.txt", "utf-8");
 const reviewPromptTemplate = readFileSync("prompts/review-prompt.txt", "utf-8");
+// Explicit fallback for the review request when no staged/committed change
+// summary can be produced. The reviewer must resolve this section or report
+// inconclusive/failing; success must never be inferred from missing evidence.
+const unknownChangesEvidence = [
+    "UNKNOWN EVIDENCE",
+    "",
+    "No staged or committed change summary could be produced for this review. The reviewer MUST resolve this explicitly: inspect the repository state directly when tools permit, or report the review inconclusive/failing with a reason explaining why the change evidence could not be obtained. Do NOT infer success from missing evidence.",
+].join("\n");
 
 // ---------------------------------------------------------------------------
 // Loop mode (`--agent-bus-loop`) between-step Agent Bus polling.
@@ -2716,19 +2728,36 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, orig
     new CompatibleResponseWrapper(reviewPlanResponse).print();
     recordUsage(configData, reviewPlanResponse);
     throwIfProviderCancelled(reviewPlanResponse, "review-plan");
-    const reviewPlan = responseText(reviewPlanResponse);
+    const reviewPlanText = responseText(reviewPlanResponse);
     saveData(configData);
+
+    // Validate the review-plan response with the same plan-or-abort parser used
+    // for ordinary planning. A valid plan contributes its rendered steps to the
+    // review prompt; an abort or invalid response falls back to the fixed
+    // four-criteria checklist so the review still has a concrete procedure
+    // without failing the review phase.
+    const reviewPlanParsed = formatReviewPlanSteps(reviewPlanText);
+    if (reviewPlanParsed.usedFallback) {
+        status.warning(`Review-plan response was not a valid plan (${reviewPlanParsed.reason}); falling back to the fixed four-criteria checklist.`);
+    }
 
     throwIfAborted(abortController.signal, "review");
     status.planning(`Reviewing the completed work (attempt ${reviewAttempt}/${maxReviewAttempts})...`);
-    const executedSteps = formatExecutedSteps(configData.completedSteps);
+    const completedSteps = configData.completedSteps ?? [];
+    const stepOutcomes = formatExecutedSteps(completedSteps);
+    const evidenceReferences = formatEvidenceReferences(completedSteps);
     const learnings = formatLearnings(configData.reviewLearnings ?? []);
+    const acceptanceCriteria = typeof configData.planExpectedOutcome === "string" && configData.planExpectedOutcome.trim()
+        ? configData.planExpectedOutcome
+        : (typeof configData.planTldr === "string" && configData.planTldr.trim() ? configData.planTldr : "(none)");
+    const planVersion = planVersionSummary(configData);
     // Surface the actual staged execution work (changed files + diff against
     // HEAD) to the reviewer so it reviews concrete changes rather than only the
     // prose describing executed steps, which previously left it reporting "no
-    // changes detected". Best-effort: if the diff cannot be read, fall back to
-    // an explicit notice rather than failing the review phase.
-    let changes = "(no staged changes summary available)";
+    // changes detected". Best-effort: if no staged/committed diff can be read,
+    // fall back to an explicit UNKNOWN EVIDENCE section the reviewer must
+    // resolve or report inconclusive/failing — never a blank block.
+    let changes = unknownChangesEvidence;
     if (executionWorktreePath) {
         try {
             changes = stagedChangesSummary(executionWorktreePath);
@@ -2743,12 +2772,17 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, orig
                 changes = `${changes}\n\n${committedChangesSummary(executionWorktreePath)}`;
             } catch (error) {
                 status.warning(`Could not read committed changes for review: ${error instanceof Error ? error.message : String(error)}`);
+                // Neither staged nor committed evidence is available: replace
+                // the empty staged block with the explicit unknown-evidence
+                // section rather than leaving a misleading blank diff.
+                changes = unknownChangesEvidence;
             }
         }
     }
     const reviewRequest = renderPrompt(reviewPromptTemplate, {
-        claudeInstructions, originalPrompt, plan: formatPlan(activeSteps),
-        executedSteps, changes, reviewPlan, learnings, reviewAttempt, maxReviewAttempts,
+        claudeInstructions, originalPrompt, acceptanceCriteria, planVersion,
+        plan: formatPlan(activeSteps), stepOutcomes, evidenceReferences,
+        changes, reviewPlan: reviewPlanParsed.steps, learnings, reviewAttempt, maxReviewAttempts,
     });
     return runReview(client, configData, reviewRequest, null);
 }
@@ -3143,6 +3177,11 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     // plan) so the end-of-run implementation tldr can recap the plan. The tldr
     // may be an object, so it is normalized to a plain single-line string.
     configData.planTldr = planTldrSummary(parsedPlanningResponse.result.plan.tldr);
+    // Persist the plan's `expected_outcome` (the original acceptance criteria)
+    // so the review request can be explicit about what a successful end result
+    // must satisfy. Like planTldr it is normalized to a plain single-line
+    // string and is never a file payload or credential.
+    configData.planExpectedOutcome = planTldrSummary(parsedPlanningResponse.result.plan.expected_outcome);
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
     configData.consecutiveNoProgressReplans = 0;
@@ -3217,14 +3256,17 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
         }
     }
 
-    // Review loop: execute the plan, then review the result. The execution
-    // phase stages changes in the execution worktree and NEVER commits. The
-    // review step commits ONLY when it is happy (review.passed === true): it
-    // stages, commits the staged work in the worktree, and merges the worktree
-    // branch into the main branch, then finishes. On a failing review the loop
-    // restarts from the execution phase (with the same retained worktree) and
-    // does NOT commit. After maxReviewAttempts failures, an explicit error is
-    // thrown and the work is left uncommitted.
+    // Review (options.review): execute the plan once, then review the result.
+    // The execution phase stages changes in the execution worktree and NEVER
+    // commits. The review step commits ONLY when it is happy
+    // (review.passed === true): it stages once more, commits the staged work
+    // in the worktree, and merges the worktree branch into the main branch,
+    // then finishes. A failing review stops the run immediately: NO commit is
+    // made, the worktree work is left uncommitted, the Spec Keeper run
+    // task/epic are marked blocked, and { success: false } is returned. There
+    // is no automatic re-execution of the plan; the only retries are the
+    // review-JSON parse retries inside runReview() before the run aborts as
+    // blocked.
     let reviewAttempt = 0;
     let reviewOutcome: "passed" | "failed" | null = null;
     let executionContext = "(none)";
