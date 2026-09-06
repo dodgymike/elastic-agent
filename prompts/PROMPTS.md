@@ -105,12 +105,12 @@ verbatim.
 
 ### `planning-prefix.txt`
 
-The stable prefix placed before the dynamic content of a planning request so the model
+The stable planning instructions placed after `CLAUDE.md` and before the dynamic content of a planning request so the model
 returns a concrete, later-executable plan rather than just answering. Used in
 the planning stage and the review-phase plan step of `main()`:
 
 ```ts
-const planningResponse = await client.create({ input: `${planningPrefix}\n\n${prompt}` });
+const planningResponse = await client.create({ input: buildPlanningPrompt(prompt, planningPrefix, claudeInstructions) });
 ```
 
 Plain text; no interpolation.
@@ -342,8 +342,8 @@ Per-prompt target order:
 | Prompt | Current | Target |
 |---|---|---|
 | Planning-necessity | `planning-necessity.prompt` → user request → memory | `planning-necessity.prompt` → user request → memory |
-| Opening planning | `planning-prefix.txt` → `CLAUDE.md` → history → current prompt → memory | `planning-prefix.txt` → `CLAUDE.md` → history → current prompt → memory |
-| Review-plan | `planning-prefix.txt` → `reviewPlanGoal` → memory | `planning-prefix.txt` → `reviewPlanGoal` → memory |
+| Opening planning | `CLAUDE.md` → `planning-prefix.txt` → history → current prompt → memory | `CLAUDE.md` → `planning-prefix.txt` → history → current prompt → memory |
+| Review-plan | `CLAUDE.md` → `planning-prefix.txt` → `reviewPlanGoal` → memory | `CLAUDE.md` → `planning-prefix.txt` → `reviewPlanGoal` → memory |
 | Step execution | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context |
 | Replan | `CLAUDE.md` → completed work/feedback/findings/remaining steps | unchanged (already stable-first) |
 | Review | `CLAUDE.md` → original prompt/plan/executed steps/changes/learnings | unchanged (already stable-first) |

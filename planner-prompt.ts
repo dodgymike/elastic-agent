@@ -31,12 +31,18 @@ export interface ReplanPromptInputs {
 }
 
 /**
- * Build the initial planning prompt: the user-facing prompt preceded by the
+ * Build the initial planning prompt: CLAUDE.md first, then the user-facing prompt preceded by the
  * phase-aware planning prefix from prompts/planning-prefix.txt, which instructs
  * the model to return JSON (plan, optional top-level "phase", or abort).
  */
-export function buildPlanningPrompt(prompt: string, planningPrefix: string): string {
-    return `${planningPrefix}\n\n${prompt}`;
+export function buildPlanningPrompt(prompt: string, planningPrefix: string, claudeInstructions: string): string {
+    // Ordinary prompts preserve the file verbatim; task work orders trim it.
+    // Remove only a leading instruction section, never matching task text later.
+    const leading = [claudeInstructions, claudeInstructions.trim()].find(
+        (text) => text.length > 0 && (prompt === text || prompt.startsWith(`${text}\n\n`)),
+    );
+    const content = leading ? prompt.slice(leading.length).replace(/^\n\n/, "") : prompt;
+    return `${claudeInstructions}\n\n${planningPrefix}\n\n${content}`;
 }
 
 /**
@@ -52,12 +58,12 @@ export function buildPlanningRetryPrompt(
 }
 
 /**
- * Build the review-plan prompt: the same phase-aware planning
+ * Build the review-plan prompt: CLAUDE.md, then the same phase-aware planning
  * prefix followed by a goal, so the model plans how to conduct the review using the same JSON
  * contract as ordinary planning.
  */
-export function buildReviewPlanPrompt(reviewPlanGoal: string, planningPrefix: string): string {
-    return `${planningPrefix}\n\n${reviewPlanGoal}`;
+export function buildReviewPlanPrompt(reviewPlanGoal: string, planningPrefix: string, claudeInstructions: string): string {
+    return `${claudeInstructions}\n\n${planningPrefix}\n\n${reviewPlanGoal}`;
 }
 
 /**

@@ -2512,7 +2512,7 @@ async function runReviewPhase(activeSteps, plan, configData, reviewAttempt, orig
     const reviewPlanGoal =
         "Plan how to conduct a review of the just-executed work. Assess the original prompt request, " +
         "the end-result quality, SDLC.md compliance, and record any learnings. Return a concise step-by-step plan.";
-    const reviewPlanPrompt = buildReviewPlanPrompt(reviewPlanGoal, planningPrefix);
+    const reviewPlanPrompt = buildReviewPlanPrompt(reviewPlanGoal, planningPrefix, claudeInstructions);
     const reviewPlanResponse = await client.create({ input: reviewPlanPrompt, abortPhase: "review-plan" });
     new CompatibleResponseWrapper(reviewPlanResponse).print();
     recordUsage(configData, reviewPlanResponse);
@@ -2898,7 +2898,7 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     throwIfAborted(abortController.signal, "planning");
     status.planning("Creating an execution plan...");
 
-    const planningPrompt = buildPlanningPrompt(prompt, planningPrefix);
+    const planningPrompt = buildPlanningPrompt(prompt, planningPrefix, claudeInstructions);
 
     let planParseFailure: string | null = null;
     let parsedPlanningResponse: ReturnType<typeof parsePlanOrAbort> = { valid: false, reason: "Planning did not produce a response." };

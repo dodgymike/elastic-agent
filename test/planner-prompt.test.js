@@ -42,10 +42,21 @@ const formatPlan = (steps) => steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
 
 // 1. buildPlanningPrompt prepends the phase-aware planning prefix to the prompt.
 {
-    const out = buildPlanningPrompt("Review the codebase", PLANNING_PREFIX);
+    const out = buildPlanningPrompt("Review the codebase", PLANNING_PREFIX, "Agent instructions");
     check("buildPlanningPrompt keeps the prompt text", out.endsWith("Review the codebase"));
-    check("buildPlanningPrompt prepends the planning prefix", out.startsWith(PLANNING_PREFIX));
-    check("buildPlanningPrompt separates sections with a blank line", out === `${PLANNING_PREFIX}\n\nReview the codebase`);
+    check("buildPlanningPrompt prepends the planning prefix", out.startsWith(`Agent instructions\n\n${PLANNING_PREFIX}`));
+    check("buildPlanningPrompt separates sections with a blank line", out === `Agent instructions\n\n${PLANNING_PREFIX}\n\nReview the codebase`);
+}
+
+// Preserve instruction order for both ordinary and trimmed task work orders.
+{
+    const instructions = "Agent instructions\n";
+    for (const leading of [instructions, instructions.trim()]) {
+        const out = buildPlanningPrompt(`${leading}\n\nTask with literal ${"phaseHint"}`, PLANNING_PREFIX, instructions);
+        check("CLAUDE.md appears exactly once before prefix and task",
+            out === `${instructions}\n\n${PLANNING_PREFIX}\n\nTask with literal ${"phaseHint"}`);
+        check("retry preserves CLAUDE.md first", buildPlanningRetryPrompt(out, "bad JSON").startsWith(out));
+    }
 }
 
 // 2. buildPlanningRetryPrompt surfaces the parse failure on the prompt.
@@ -59,10 +70,10 @@ const formatPlan = (steps) => steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
 // 3. buildReviewPlanPrompt carries the review goal plus the same phase-aware
 //    planning prefix so the review uses the identical JSON contract.
 {
-    const out = buildReviewPlanPrompt("Conduct a review", PLANNING_PREFIX);
+    const out = buildReviewPlanPrompt("Conduct a review", PLANNING_PREFIX, "Agent instructions");
     check("buildReviewPlanPrompt keeps the review goal", out.endsWith("Conduct a review"));
-    check("buildReviewPlanPrompt prepends the planning prefix", out.startsWith(PLANNING_PREFIX));
-    check("buildReviewPlanPrompt separates sections with a blank line", out === `${PLANNING_PREFIX}\n\nConduct a review`);
+    check("buildReviewPlanPrompt prepends the planning prefix", out.startsWith(`Agent instructions\n\n${PLANNING_PREFIX}`));
+    check("buildReviewPlanPrompt separates sections with a blank line", out === `Agent instructions\n\n${PLANNING_PREFIX}\n\nConduct a review`);
 }
 
 // 4. buildReplanPrompt interpolates every replanner input (phase-aware). The
