@@ -161,13 +161,33 @@ async function testEmptyQueryStillReturnsConstraintsAndOpenWork(): Promise<void>
   }
 }
 
+async function testVerifiedEvidenceBeatsNewerUnverifiedClaims(): Promise<void> {
+  const events = [
+    makeEvent("evt-verified", "fact", 1, {
+      structured: { recordKind: "fact", subject: "alpha state", tags: ["alpha"] },
+    }, { asserted: "completed", verification: "verified" }),
+    makeEvent("evt-unverified", "fact", 2, {
+      structured: { recordKind: "fact", subject: "alpha state", tags: ["alpha"] },
+    }, { asserted: "completed", verification: "unverified" }),
+  ];
+  const projection = buildStructuredProjection(scope, events);
+  const result = retrieveRelevant(projection, { scope, queryText: "alpha", limit: 10 });
+  assert.equal(result.status, "ok");
+  if (result.status === "ok") {
+    const alphaItems = result.items.filter((item) => item.record.subject === "alpha state");
+    assert.equal(alphaItems.length, 1, "conflicting same-subject facts deduplicate deterministically");
+    assert.equal(alphaItems[0].record.evidence, "verified", "verified evidence ranks above newer unverified claims");
+  }
+}
+
 async function main(): Promise<void> {
   await testFileRelevanceExcludesDistractors();
   await testIdenticalProjectionsDeduplicate();
   await testSupersededAndUnauthorizedAreFiltered();
   await testDeterministicTiesAndLimits();
   await testEmptyQueryStillReturnsConstraintsAndOpenWork();
-  console.log("memory-retrieval.test.ts: OK (relevance, dedup, filtering, ordering, limits, empty query)");
+  await testVerifiedEvidenceBeatsNewerUnverifiedClaims();
+  console.log("memory-retrieval.test.ts: OK (relevance, dedup, filtering, ordering, limits, empty query, evidence ranking)");
 }
 
 main().catch((error: unknown) => {

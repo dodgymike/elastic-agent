@@ -55,6 +55,13 @@ function sameScope(a: MemoryScopeV2, b: MemoryScopeV2): boolean {
   return a.workspaceId === b.workspaceId && a.principalId === b.principalId && a.sessionId === b.sessionId;
 }
 
+/** Stronger evidence survives deduplication against weaker same-subject records. */
+function evidenceRank(evidence: StructuredRecordV2["evidence"]): number {
+  if (evidence === "verified") return 2;
+  if (evidence === "refuted") return 0;
+  return 1; // unverified
+}
+
 /** Deduplicate and rank structured records for a retrieval request. */
 export function retrieveRelevantRecords(
   scope: MemoryScopeV2,
@@ -74,13 +81,10 @@ export function retrieveRelevantRecords(
     const maxUpdated = records.reduce((max, record) => Math.max(max, record.updatedAtSequence), 0) || 1;
 
     const candidates: RetrievedItemV2[] = [];
-    const seen = new Set<string>();
+    const seen = new Map<string, number>();
     for (const record of records.filter((record) => sameScope(scope, record.scope)).sort((a, b) => b.updatedAtSequence - a.updatedAtSequence).slice(0, MAX_CANDIDATES)) {
       if (!sameScope(scope, record.scope)) continue;
       if (!request.includeHistory && record.status !== "current") continue;
-
-      const dedupeKeys = [record.id, `${record.kind}:${record.subject.toLowerCase()}`];
-      if (dedupeKeys.some((key) => seen.has(key))) continue;
 
       const reasons: string[] = [];
       let score = 0;
@@ -128,8 +132,26 @@ export function retrieveRelevantRecords(
       }
       score += (record.updatedAtSequence / maxUpdated) * 5;
 
-      candidates.push({ record, score, reasons });
-      for (const key of dedupeKeys) seen.add(key);
+      const candidate: RetrievedItemV2 = { record, score, reasons };
+      const dedupeKeys = [record.id, `${record.kind}:${record.subject.toLowerCase()}`];
+      const collidingKey = dedupeKeys.find((key) => seen.has(key));
+      if (collidingKey !== undefined) {
+        const index = seen.get(collidingKey);
+        const existing = index === undefined ? undefined : candidates[index];
+        // Conflicting same-subject records keep the strongest evidence; on an
+        // evidence tie the newest-first iteration order keeps the newest one.
+        if (existing === undefined || evidenceRank(record.evidence) > evidenceRank(existing.record.evidence)) {
+          if (index !== undefined) {
+            candidates[index] = candidate;
+            for (const key of dedupeKeys) seen.set(key, index);
+          }
+        }
+        continue;
+      }
+
+      const index = candidates.length;
+      candidates.push(candidate);
+      for (const key of dedupeKeys) seen.set(key, index);
     }
 
     const ordered = candidates
