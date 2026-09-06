@@ -1,10 +1,10 @@
 # Memory improvements — implementation plan
 
 Prepared 2026-09-06 from the root checkout at `c0d5f09`. This directory contains
-16 focused implementation tasks. MI-01 through MI-15 are **DONE** — each
+16 focused implementation tasks. MI-01 through MI-16 are **DONE** — each
 numbered task file carries its own completion record with validation evidence
-and implementation commits. MI-16 (rollout and operator documentation) is the
-adoption step; see
+and implementation commits. MI-16 (rollout and operator documentation) is
+complete and documents adoption, migration, and rollback; see
 [16-rollout-and-operator-documentation.md](16-rollout-and-operator-documentation.md).
 No memory code or runtime state was changed to produce the original plan; the
 per-task completion records list the implementation commits and checks actually
@@ -75,7 +75,8 @@ Implementation defaults for this plan:
   or deletion of data already sent to a provider.
 - Stage runtime adoption through `ELAGENT_MEMORY_TYPE=persistent-v2`; preserve old
   selection behavior until the final rollout task deliberately migrates defaults.
-  This is a proposed value to implement, not a currently available option.
+  As of MI-16, `persistent-v2` is available as an opt-in backend while the legacy
+  default remains unchanged.
 - Memory errors may degrade recall while user work continues, but durability
   failure cannot be reported as success. Never replay a tool mutation merely
   because its memory append failed.
