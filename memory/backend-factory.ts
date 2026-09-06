@@ -63,6 +63,7 @@ export class MemoryBackendSelectionError extends Error {
 
 /** Options accepted by createMemoryBackend. */
 export interface MemoryBackendFactoryOptions {
+  readonly semanticExpander?: import("./semantic-query.js").SemanticQueryExpander;
   /** Raw `ELAGENT_MEMORY_TYPE` value; unset/empty selects the default. */
   readonly type?: string;
   /** Legacy persistent output directory. */
@@ -165,6 +166,7 @@ export function createMemoryBackend(options: MemoryBackendFactoryOptions = {}): 
     case "persistent-v2":
       module = createPersistentV2MemoryModule({
         eventStorePath: options.eventStorePath,
+        semanticExpander: options.semanticExpander,
         workspacePath: options.workspacePath,
         delegate: options.delegate,
       });

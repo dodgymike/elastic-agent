@@ -1,3 +1,6 @@
+import { buildStructuredProjection, type StructuredRecordV2 } from "./structured-records.js";
+import { retrieveRelevantRecords } from "./retrieval.js";
+import type { SemanticQueryExpander } from "./semantic-query.js";
 /**
  * Opt-in `persistent-v2` memory backend (MI-11).
  *
@@ -70,6 +73,7 @@ export interface PersistentV2FailureReport {
 
 /** Options accepted by createPersistentV2MemoryModule / PersistentV2MemoryModule. */
 export interface PersistentV2MemoryOptions extends MemoryModuleFactoryOptions {
+  readonly semanticExpander?: SemanticQueryExpander;
   /** Injected v2 event store; defaults to a SQLite store at `eventStorePath`. */
   readonly store?: MemoryEventStore;
   /** Path to the dedicated SQLite event-store database file. */
@@ -94,6 +98,7 @@ export class PersistentV2MemoryModule implements MemoryModule {
 
   private readonly store: MemoryEventStore;
   private readonly workspaceId: string;
+  private readonly semanticExpander?: SemanticQueryExpander;
   private readonly runId: string;
   private readonly maxChars: number;
   private readonly delegate?: MemoryModule;
@@ -112,6 +117,7 @@ export class PersistentV2MemoryModule implements MemoryModule {
     this.runId = `run-${randomUUID()}`;
     this.maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
     this.delegate = options.delegate;
+    this.semanticExpander = options.semanticExpander;
     this.health = new MemoryHealthMetrics("persistent-v2", {
       durability: "durable",
       storageSchemaVersion: EVENT_STORE_DB_VERSION,
@@ -197,10 +203,42 @@ export class PersistentV2MemoryModule implements MemoryModule {
       const result = await this.store.retrieve({
         scope,
         purpose: "prompt-context",
-        maxChars: request.maxChars ?? this.maxChars,
+        maxChars: request.queryText ? undefined : (request.maxChars ?? this.maxChars),
         limit: DEFAULT_RETRIEVE_LIMIT,
       });
       const events = result.events;
+      if (result.degraded) throw new Error(result.degradedReason ?? "Memory recall degraded");
+      if (request.queryText?.trim()) {
+        let semanticTerms: readonly string[] = [];
+        let semanticStatus: "disabled" | "expanded" | "fallback" = "disabled";
+        if (this.semanticExpander && events.length > 0) {
+          try { semanticTerms = await this.semanticExpander(request.queryText); semanticStatus = "expanded"; }
+          catch { semanticStatus = "fallback"; }
+        }
+        const projection = buildStructuredProjection(scope, events);
+        const covered = new Set(projection.records.flatMap((record) => [...record.sourceEventIds]));
+        const records: StructuredRecordV2[] = [...projection.records];
+        // Legacy outcome events have no structured hint: retain their useful
+        // reasoning and findings as unverified narrative, never a user constraint.
+        for (const event of events) {
+          if (covered.has(event.eventId)) continue;
+          const payload = event.payload as Record<string, unknown> | undefined;
+          const subject = [payload?.reasoning, JSON.stringify(payload?.outcomeDetail ?? ""), ...(Array.isArray(payload?.actions) ? payload.actions : [])].filter(Boolean).join(" ");
+          records.push({ id: event.eventId, kind: "fact", scope, subject: subject || event.kind, sourceEventIds: [event.eventId], evidence: event.outcome?.verification ?? "unverified", authoritative: false, createdAtSequence: event.sequence, updatedAtSequence: event.sequence, tags: [], status: "current", payload: event.payload });
+        }
+        const ranked = retrieveRelevantRecords(scope, records, { scope, queryText: request.queryText, semanticTerms, referencedFiles: request.queryText.split(/\s+/).map((term) => term.replace(/^[`"']|[`"',;:]$/g, "")).filter((term) => /[\/]|\.[a-z0-9]{1,8}$/i.test(term)) });
+        if (ranked.status !== "ok") throw new Error(ranked.reason);
+        let remaining = Math.max(0, request.maxChars ?? this.maxChars);
+        const selected = ranked.items.filter((item) => {
+          const size = renderRetrieved(item.record).length + 1;
+          if (size > remaining) return false;
+          remaining -= size; return true;
+        });
+        const selectedIds = new Set(selected.flatMap((item) => [...item.record.sourceEventIds]));
+        this.health.recordRetrieval({ success: true, sessionId: scope.sessionId, cacheHit: false, candidates: events.length, selected: selected.length, omitted: ranked.items.length - selected.length, hasMemory: selected.length > 0 });
+        return { text: selected.map((item) => renderRetrieved(item.record)).join("\n"), matchedContexts: events.filter((event) => selectedIds.has(event.eventId)).map(toMemoryContext), hasMemory: selected.length > 0, retrieval: { ...ranked, items: selected, semanticTerms, semanticStatus, omittedCount: ranked.items.length - selected.length } };
+      }
+
       this.health.recordRetrieval({
         success: true,
         sessionId: scope.sessionId,
@@ -369,4 +407,8 @@ function describeError(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+function renderRetrieved(record: StructuredRecordV2): string {
+  return `[${record.kind}/${record.authoritative ? "user-constraint" : record.evidence}] ${record.subject} (source ${record.sourceEventIds.join(", ")})`;
 }

@@ -25,6 +25,7 @@ export function planningCallAllowed(call: CompatibleFunctionCallOutput): boolean
 /** Research is bounded across JSON repairs; only a validated final plan leaves this loop. */
 export async function runPlanningLoop(options: {
     prompt: string;
+    queryText?: string;
     tools: readonly ToolDefinition[];
     create: (request: CompatibleCreateRequest) => Promise<CompatibleResponse>;
     dispatch: (call: CompatibleFunctionCallOutput) => Promise<CompatibleToolResult>;
@@ -45,7 +46,7 @@ export async function runPlanningLoop(options: {
     let request: CompatibleCreateRequest = { input: options.prompt };
     while (true) {
         throwIfAborted(options.signal, "planning");
-        const response = await options.create({ ...request, tools: planningTools(options.tools), signal: options.signal, abortPhase: "planning" });
+        const response = await options.create({ ...request, memory_query: options.queryText, tools: planningTools(options.tools), signal: options.signal, abortPhase: "planning" });
         options.onResponse(response);
         throwIfAborted(options.signal, "planning");
         const calls = response.output.filter((item): item is CompatibleFunctionCallOutput => item.type === "function_call");

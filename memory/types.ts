@@ -105,6 +105,8 @@ export interface RememberInput {
  * prompt builder) wants for the current turn.
  */
 export interface ContextRequest {
+  /** Current user query used for relevant recall. */
+  readonly queryText?: string;
   /** The conversation whose context is requested. */
   readonly session_id: string;
   /** Optional user filter for scoping the request. */
@@ -125,6 +127,8 @@ export interface ContextRequest {
  * summaries that were consolidated (for chaining and audit).
  */
 export interface MemoryContextResult {
+  /** Selected record diagnostics when the backend supports relevance retrieval. */
+  readonly retrieval?: import("./retrieval.js").RetrievalResultV2;
   /** The consolidated, LLM-ready summary text for the requested session. */
   readonly text: string;
   /** Structured provenance/source entries used to build `text`. */

@@ -1,3 +1,5 @@
+import { prepareMemoryPrompt } from "./memory-prompt.js";
+export { memoryContextSuffix } from "./memory-prompt.js";
 import {
   type AssistantMessage,
   type ConversationMessage,
@@ -62,6 +64,8 @@ export interface CompatibleUsage {
   readonly input_tokens_details?: { readonly cached_tokens?: number };
 }
 export interface CompatibleCreateRequest {
+  /** Raw task query for recall; avoids searching boilerplate instructions. */
+  readonly memory_query?: string;
   readonly input: string | readonly CompatibleToolResult[];
   readonly tools?: readonly ToolDefinition[];
   readonly previous_response_id?: string;
@@ -301,7 +305,7 @@ export class MultiTurnLlmRuntime {
         const sessionId = request.session_id ?? this.sessionId;
         if (sessionId) {
           const revisionBefore = this.memorySnapshotRevision;
-          initialInput = await this.appendMemoryContext(initialInput, sessionId);
+          initialInput = await this.appendMemoryContext(initialInput, sessionId, request.memory_query);
           if (this.memorySnapshotRevision > revisionBefore) memorySnapshotRevision = this.memorySnapshotRevision;
         }
       }
@@ -451,21 +455,15 @@ export class MultiTurnLlmRuntime {
    * loop can continue. Each successful injection advances the runtime's memory
    * snapshot revision used by conversation handles.
    */
-  private async appendMemoryContext(input: string, sessionId: string): Promise<string> {
-    if (!this.memory) return input;
-    let result: MemoryContextResult;
+  private async appendMemoryContext(input: string, sessionId: string, queryText = input): Promise<string> {
     try {
-      result = await this.memory.getContext({ session_id: sessionId });
+      const prepared = await prepareMemoryPrompt(input, sessionId, this.memory, queryText);
+      if (prepared.memory.hasMemory) this.memorySnapshotRevision += 1;
+      return prepared.prompt;
     } catch (error) {
       console.error(`[MEMORY] getContext failed (non-fatal): ${redactMemoryText(describeError(error))}`);
       return input;
     }
-    const suffix = memoryContextSuffix(result);
-    if (suffix.length > 0) {
-      this.memorySnapshotRevision += 1;
-      return `${input}${redactMemoryText(suffix)}`;
-    }
-    return input;
   }
 
   private beginConversationInternal(scope: string, purpose: string): ConversationRecord {
@@ -639,12 +637,6 @@ export class MultiTurnLlmRuntime {
  * The leading blank line separates it from the user input it is appended to, so
  * it can never shift the stable prefix of an initial request.
  */
-export function memoryContextSuffix(result: MemoryContextResult): string {
-  if (!result.hasMemory || !result.text) return "";
-  const text = result.text.trim();
-  if (text.length === 0) return "";
-  return `\n\n[SESSION MEMORY — additional context remembered from earlier in this session]\n${text}`;
-}
 
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;

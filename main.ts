@@ -1,3 +1,4 @@
+import { createSemanticQueryExpander } from "./memory/semantic-query.js";
 import { appendAgentLog, type AgentLogEvent } from "./agent-log.js";
 import { assertExecutionComplete, stepOutcomeMessage } from "./execution-completion.js";
 import { runPlanningLoop } from "./llm/planning-loop.js";
@@ -180,6 +181,7 @@ program
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>");
 addLoopOptions(program);
 addShellOptions(program);
+program.option("--interrogate-memory", "Show relevant memories and full initial planning prompt without executing the task", false);
 program
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--planner-model <model-id>", "Optional planner model override; when omitted, uses the selected provider's default planner model")
@@ -245,6 +247,21 @@ Tool-call scheduling:
 const cliArgs = translateCliArgs(process.argv);
 program.parse(cliArgs);
 const options = program.opts();
+if (options.interrogateMemory) {
+    void (async () => {
+    try {
+        if (options.taskId || options.loop || options.agentBusLoop) throw new Error("Memory interrogation cannot be combined with task or loop mode.");
+        const { interrogateMemory } = await import("./memory/interrogate.js");
+        const result = await interrogateMemory({ ...options, prompt: program.args[0] ?? "" });
+        console.log(JSON.stringify(result, null, 2));
+        process.exit(0);
+    } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+    })();
+} else {
+
 const {
     outputVerbose,
     stepVerbose,
@@ -443,6 +460,7 @@ let agentSessionId: string;
                 outputDir: process.env.ELAGENT_MEMORY_OUTPUT_DIR,
                 filePath: process.env.ELAGENT_MEMORY_OUTPUT_PATH,
                 eventStorePath: process.env.ELAGENT_MEMORY_EVENT_STORE_PATH,
+                semanticExpander: process.env.ELAGENT_MEMORY_SEMANTIC === "0" ? undefined : createSemanticQueryExpander(() => createRuntimeLlmAdapter({ configuration: plannerProviderConfiguration }), plannerRuntimeModel),
             });
             agentMemory = agentMemoryBackend.module;
         } catch (error) {
@@ -3162,6 +3180,7 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
 
     const parsedPlanningResponse = await runPlanningLoop({
         prompt: planningPrompt,
+        queryText: originalPrompt,
         tools: tools as unknown as readonly import("./llm/adapter-contract.js").ToolDefinition[],
         signal: abortController.signal,
         maxParseRetries: maxPlanParseRetries,
@@ -3740,3 +3759,5 @@ entrypointOutcome
         }
         process.exitCode = 1;
     });
+
+} // Normal execution is bypassed in memory-interrogation mode.

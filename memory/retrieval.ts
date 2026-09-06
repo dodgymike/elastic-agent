@@ -25,6 +25,8 @@ export interface RelevantRetrievalRequest {
   readonly scope: MemoryScopeV2;
   /** Optional turn query text. */
   readonly queryText?: string;
+  /** Semantic expansions are ranking hints, never authority or scope changes. */
+  readonly semanticTerms?: readonly string[];
   /** Optional current task/plan reference. */
   readonly currentTask?: string;
   /** Optional referenced files/symbols for exact matching. */
@@ -42,7 +44,7 @@ export interface RetrievedItemV2 {
 }
 
 export type RetrievalResultV2 =
-  | { readonly status: "ok"; readonly items: readonly RetrievedItemV2[] }
+  | { readonly status: "ok"; readonly items: readonly RetrievedItemV2[]; readonly semanticTerms?: readonly string[]; readonly semanticStatus?: "expanded" | "disabled" | "fallback"; readonly omittedCount?: number }
   | { readonly status: "degraded"; readonly reason: string };
 
 function tokenize(text: string): string[] {
@@ -66,12 +68,14 @@ export function retrieveRelevantRecords(
       ...tokenize(request.currentTask ?? ""),
       ...(request.referencedFiles ?? []).flatMap((file) => tokenize(file)),
     ]);
+    if (!sameScope(scope, request.scope)) return { status: "degraded", reason: "Retrieval scope mismatch" };
     const queryTermsArray = [...queryTerms];
+    const semanticTerms = new Set((request.semanticTerms ?? []).flatMap(tokenize));
     const maxUpdated = records.reduce((max, record) => Math.max(max, record.updatedAtSequence), 0) || 1;
 
     const candidates: RetrievedItemV2[] = [];
     const seen = new Set<string>();
-    for (const record of records.slice(0, MAX_CANDIDATES)) {
+    for (const record of records.filter((record) => sameScope(scope, record.scope)).sort((a, b) => b.updatedAtSequence - a.updatedAtSequence).slice(0, MAX_CANDIDATES)) {
       if (!sameScope(scope, record.scope)) continue;
       if (!request.includeHistory && record.status !== "current") continue;
 
@@ -94,7 +98,7 @@ export function retrieveRelevantRecords(
       const tagTokens = new Set(tokenize(tagText));
       const exactFileMatch = (request.referencedFiles ?? []).some((file) => {
         const normalized = file.toLowerCase();
-        return record.subject.toLowerCase() === normalized || tagText.toLowerCase().includes(normalized);
+        return subjectTokens.has(normalized) || record.subject.toLowerCase() === normalized || tagText.toLowerCase().includes(normalized);
       });
       if (exactFileMatch) {
         score += 12;
@@ -106,6 +110,14 @@ export function retrieveRelevantRecords(
           reasons.push(`matched terms: ${matchedTerms.slice(0, 3).join(", ")}`);
         }
       }
+
+      const semanticMatches = [...semanticTerms].filter((term) => subjectTokens.has(term) || tagTokens.has(term));
+      if (semanticMatches.length) {
+        score += Math.min(4, semanticMatches.length);
+        reasons.push(`semantic expansion: ${semanticMatches.slice(0, 3).join(", ")}`);
+      }
+      // Recency and confidence alone must not make an unrelated fact relevant.
+      if (queryTerms.size && !reasons.length) continue;
 
       if (record.evidence === "verified") {
         score += 5;
