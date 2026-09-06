@@ -239,7 +239,12 @@ export function buildToolsAvailablePrompt(tools: any[]): string {
 /** Render the completed-steps recap used by the review prompt ("(none)" when empty). */
 export function formatExecutedSteps(completedSteps: any[]): string {
     if (!Array.isArray(completedSteps) || completedSteps.length === 0) return "(none)";
-    return completedSteps.map((entry) => `${entry.step}. ${entry.text}`).join("\n");
+    return completedSteps
+        .map((entry) => {
+            const outcome = typeof entry?.outcome === "string" ? ` [${entry.outcome}]` : "";
+            return `${entry.step}. ${entry.text}${outcome}`;
+        })
+        .join("\n");
 }
 
 /** Render the review learnings recap used by the review prompt ("(none)" when empty). */

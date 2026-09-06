@@ -73,6 +73,11 @@ import {
     totalUsage,
     usageSummary,
 } from "./plan-handler.js";
+import {
+    attemptFromFeedback,
+    hasEvidence,
+    isTerminalOutcome,
+} from "./step-outcome.js";
 import { indent, printPlan } from "./plan-printer.js";
 import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
 import {
@@ -1724,7 +1729,12 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
     configData.replanAttemptCount += 1;
     const attempt = configData.replanAttemptCount;
     status.replan(`Requesting focused revised plan (attempt ${attempt}/${maxReplanAttempts}): ${truncate(feedback.replanReason)}`, hierarchyIndent("contentInStep"));
-    const completedWork = (configData.completedSteps ?? []).map((entry) => `${entry.step}. ${entry.text}`).join("\n") || "(none)";
+    const completedWork = (configData.completedSteps ?? [])
+        .map((entry) => {
+            const outcome = typeof entry?.outcome === "string" ? ` [${entry.outcome}]` : "";
+            return `${entry.step}. ${entry.text}${outcome}`;
+        })
+        .join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
     const currentPhase = configData.planPhase === undefined ? "(none)" : String(configData.planPhase);
     const request = buildReplanPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps, currentPhase });
@@ -1825,6 +1835,29 @@ function planTldrSummary(value: unknown): string {
 }
 
 /**
+ * Derive a compact, secret-free display result for one completion-ledger
+ * entry. The ledger stores a normalized `outcome` plus the `evidence` that
+ * produced it (the model's summary/findings, or a validation diagnostic for
+ * invalid feedback). Returns null when the entry has neither, so the tldr can
+ * print its no-feedback fallback rather than fabricating a result.
+ */
+function stepDisplayResult(entry: any): { stepStatus: string; summary: string; findings: string[] } | null {
+    const outcome = typeof entry?.outcome === "string" ? entry.outcome : null;
+    const evidence = entry && typeof entry.evidence === "object" && entry.evidence !== null ? entry.evidence : null;
+    if (!outcome && !evidence) return null;
+    const findings = Array.isArray(evidence?.findings)
+        ? evidence.findings
+        : (typeof evidence?.validationError === "string" ? [evidence.validationError] : []);
+    return {
+        stepStatus: typeof evidence?.stepStatus === "string" && evidence.stepStatus
+            ? evidence.stepStatus
+            : (outcome ?? "completed"),
+        summary: typeof evidence?.summary === "string" ? evidence.summary : "",
+        findings,
+    };
+}
+
+/**
  * Build and print a concise end-of-plan summary (the implementation tldr) of
  * what actually happened during execution, just before the terminal "Plan
  * complete." line. It surfaces the information the operator most wants from a
@@ -1851,6 +1884,7 @@ function reportImplementationTldr(
 ): void {
     const prefix = hierarchyIndent("plan");
     const completedSteps = Array.isArray(configData?.completedSteps) ? configData.completedSteps : [];
+    const executionAttempts = Array.isArray(configData?.executionAttempts) ? configData.executionAttempts : [];
     const replans = Array.isArray(configData?.replanHistory) ? configData.replanHistory : [];
     const appliedReplans = replans.filter((entry) => entry && entry.applied === true);
     const failedReplans = replans.filter((entry) => entry && entry.applied === false);
@@ -1870,16 +1904,20 @@ function reportImplementationTldr(
         summaryLines.push(`Final plan: ${activePlanSteps.length} step${activePlanSteps.length === 1 ? "" : "s"}.`);
     }
     summaryLines.push(`Steps completed: ${completedSteps.length}.`);
+    if (executionAttempts.length > 0) {
+        summaryLines.push(`Steps attempted: ${executionAttempts.length}.`);
+    }
 
-    // Per-step results/comments. Each completed step may carry a `result`
-    // derived from the model's execution feedback (stepStatus/summary/findings)
-    // or a validation error; it never includes file contents, data.json, or
-    // secrets. When a step has no recorded result we note that it ran without
-    // captured feedback rather than fabricating one.
+    // Per-step results/comments. Each completed ledger entry carries a
+    // normalized `outcome` plus the `evidence` that produced it
+    // (stepStatus/summary/findings, or a validation diagnostic for invalid
+    // feedback); it never includes file contents, data.json, or secrets. When
+    // a step has no recorded evidence we note that it ran without captured
+    // feedback rather than fabricating one.
     const stepResultLines: string[] = [];
     for (const entry of completedSteps) {
         const stepLabel = `Step ${entry.step}: ${truncate(String(entry.text ?? "").replace(/\s+/g, " ").trim(), 200)}`;
-        const result = entry && typeof entry.result === "object" && entry.result !== null ? entry.result : null;
+        const result = stepDisplayResult(entry);
         if (!result) {
             stepResultLines.push(stepLabel);
             stepResultLines.push("  Result: no per-step feedback recorded.");
@@ -2323,6 +2361,42 @@ function memoryOutcomeFromFeedback(stepStatus: string): MemoryOutcomeStatus {
     }
 }
 
+/**
+ * Build the secret-free evidence object considered when normalizing one
+ * step's execution feedback. Valid feedback contributes only the model's
+ * reported stepStatus/summary/findings; invalid or missing feedback
+ * contributes only the validation diagnostic. Nothing here reads file
+ * contents, data.json, or credentials.
+ */
+function buildStepEvidence(feedbackEntry: any): unknown {
+    if (feedbackEntry?.valid && feedbackEntry.feedback) {
+        const feedback = feedbackEntry.feedback;
+        return {
+            stepStatus: typeof feedback.stepStatus === "string" ? feedback.stepStatus : null,
+            summary: typeof feedback.summary === "string" ? feedback.summary : "",
+            findings: Array.isArray(feedback.findings) ? feedback.findings.slice() : [],
+        };
+    }
+    return {
+        validationError: typeof feedbackEntry?.validationError === "string"
+            ? feedbackEntry.validationError
+            : "execution feedback was missing or malformed",
+    };
+}
+
+/**
+ * Evidence-presence criterion used to promote a `completed` status to
+ * `succeeded`. A step only succeeds when the model supplied at least one
+ * non-empty finding or a non-empty summary; a bare `completed` claim with no
+ * evidence degrades to `needs-verification` instead of being trusted.
+ */
+function stepEvidenceSatisfied(evidence: unknown): boolean {
+    if (Array.isArray(evidence)) return evidence.length > 0;
+    if (!evidence || typeof evidence !== "object") return hasEvidence(evidence);
+    const value = evidence as { findings?: unknown; summary?: unknown };
+    return hasEvidence(value.findings) || hasEvidence(value.summary);
+}
+
 // Emits one non-fatal warning per degradation episode (resets once healthy) so
 // a durable append failure stays visible at the runtime boundary without
 // spamming a warning on every subsequent step.
@@ -2529,6 +2603,7 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
 
 async function runExecutionPhase(activeSteps, plan, configData, executionContext = "(none)", useReviewWorktree = false, specKeeperState: any = null, taskLifecycle: any = null) {
     configData.completedSteps = [];
+    configData.executionAttempts = [];
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
     configData.consecutiveNoProgressReplans = 0;
@@ -2574,25 +2649,43 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                 );
             }
             const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
-            // Record each step's result/comment alongside the step text so later
-            // consumers (final tldr, replan, review) can surface what actually
-            // happened per step. The result is derived only from the model's
-            // execution feedback (stepStatus/summary/findings) or the validation
-            // error; it never carries file contents, data.json, or secrets.
-            const stepResult = feedbackEntry?.valid
-                ? {
-                      stepStatus: feedbackEntry.feedback.stepStatus ?? "completed",
-                      summary: feedbackEntry.feedback.summary ?? "",
-                      findings: Array.isArray(feedbackEntry.feedback.findings) ? feedbackEntry.feedback.findings : [],
-                  }
-                : {
-                      stepStatus: "failed",
-                      summary: "",
-                      findings: feedbackEntry?.validationError ? [`invalid response: ${feedbackEntry.validationError}`] : [],
-                  };
-            configData.completedSteps.push({ step: index + 1, text: executedStep, feedbackResponseId: feedbackEntry?.response_id ?? null, result: stepResult });
-            // Memory integration (step 5): record this completed plan step into
-            // the swappable MemoryModule. The outcome/status is derived from the
+            // Append one normalized attempt record for every executePlanStep
+            // result, regardless of outcome. executionAttempts is append-only:
+            // replans and phase restarts may clear the completion ledger below,
+            // but they never erase this history. The normalized outcome is
+            // derived from the raw stepStatus plus the secret-free evidence in
+            // buildStepEvidence, so a bare `completed` claim without evidence
+            // degrades to needs-verification rather than being trusted.
+            const attemptRecord = attemptFromFeedback({
+                responseId: feedbackEntry?.response_id ?? null,
+                rawStatus: feedbackEntry?.valid ? feedbackEntry.feedback.stepStatus : undefined,
+                evidence: buildStepEvidence(feedbackEntry),
+                evidenceSatisfied: stepEvidenceSatisfied,
+            });
+            configData.executionAttempts.push({
+                step: index + 1,
+                feedbackResponseId: attemptRecord.responseId,
+                rawStatus: attemptRecord.rawStatus,
+                outcome: attemptRecord.outcome,
+                evidence: attemptRecord.evidence,
+                timestamp: attemptRecord.timestamp,
+            });
+            // The completion ledger records only steps with a terminal
+            // normalized outcome plus the evidence that produced it. A
+            // needs-verification attempt stays in executionAttempts for the
+            // next replan/review cycle but is never reported as completed work.
+            if (isTerminalOutcome(attemptRecord.outcome)) {
+                configData.completedSteps.push({
+                    step: index + 1,
+                    text: executedStep,
+                    feedbackResponseId: attemptRecord.responseId,
+                    outcome: attemptRecord.outcome,
+                    evidence: attemptRecord.evidence,
+                    timestamp: attemptRecord.timestamp,
+                });
+            }
+            // Memory integration (step 5): record this plan step into the
+            // swappable MemoryModule. The outcome/status is derived from the
             // step's execution feedback when it parsed; otherwise it is a plain
             // completed step. Fail-safe: rememberAgentStep never throws, so the
             // plan loop continues even if memory is disabled or fails.
@@ -2602,6 +2695,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                 plan,
                 planState: {
                     completedSteps: configData.completedSteps?.length ?? 0,
+                    attemptedSteps: configData.executionAttempts?.length ?? 0,
                     activePlanSteps: configData.activePlanSteps ?? [],
                 },
                 outcome: feedbackEntry?.valid ? memoryOutcomeFromFeedback(feedbackEntry.feedback.stepStatus) : "completed",
@@ -2842,7 +2936,7 @@ async function runSingleStep(
                     index: 0,
                     step: stepText,
                     plan: stepText,
-                    planState: { completedSteps: 1, activePlanSteps: [stepText] },
+                    planState: { completedSteps: 1, attemptedSteps: 1, activePlanSteps: [stepText] },
                     outcome: "completed",
                     reasoning: "Direct single-step execution completed.",
                 });
@@ -2896,6 +2990,8 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     if (!Array.isArray(configData.tokenUsage)) configData.tokenUsage = [];
     if (!Array.isArray(configData.commandLinePrompts)) configData.commandLinePrompts = [];
     if (!Array.isArray(configData.toolCallTldrs)) configData.toolCallTldrs = [];
+    if (!Array.isArray(configData.completedSteps)) configData.completedSteps = [];
+    if (!Array.isArray(configData.executionAttempts)) configData.executionAttempts = [];
     if (!Array.isArray(configData.replanHistory)) configData.replanHistory = [];
     if (!Number.isInteger(configData.replanAttemptCount) || configData.replanAttemptCount < 0) configData.replanAttemptCount = 0;
     if (!Number.isInteger(configData.consecutiveNoProgressReplans) || configData.consecutiveNoProgressReplans < 0) configData.consecutiveNoProgressReplans = 0;
