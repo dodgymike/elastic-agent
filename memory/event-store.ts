@@ -16,6 +16,12 @@
  *    write lock instead of both reading the same next sequence.
  *  - Event payload schema version is stored per event, independent of the
  *    database `user_version` schema version.
+ *
+ * MI-13 extends schema version 1 with a schema version 2 migration that adds
+ * durable deletion tombstones plus a single-row monotonic deletion generation.
+ * Forget operations commit tombstones and advance the generation before any
+ * authoritative event row is removed; retention, export, and restore build on
+ * those primitives in `memory/retention.ts`.
  */
 
 import { mkdirSync } from "node:fs";
@@ -29,6 +35,8 @@ import {
   MEMORY_EVENT_SCHEMA_VERSION,
   scopeFromIdentity,
   validateEventAppend,
+  validateEventEnvelope,
+  validateForgetSelection,
   validateRetrievalPurpose,
   validateScope,
   type MemoryAppendResultV2,
@@ -38,21 +46,27 @@ import {
   type MemoryEventEnvelopeV2,
   type MemoryEventKindV2,
   type MemoryFlushResultV2,
+  type MemoryForgetResultV2,
+  type MemoryForgetSelectionV2,
   type MemoryIdentityV2,
   type MemoryInitResultV2,
   type MemoryModuleV2,
+  type MemoryRestoreResultV2,
   type MemoryRetrieveRequestV2,
   type MemoryRetrieveResultV2,
+  type MemoryScopeSummaryV2,
   type MemoryScopeV2,
+  type MemoryTombstoneV2,
 } from "./contracts-v2.js";
 import { assertSafeMemoryStatePath } from "./privacy.js";
 
 /** Database schema version managed via SQLite `PRAGMA user_version`. */
-export const EVENT_STORE_DB_VERSION = 1 as const;
+export const EVENT_STORE_DB_VERSION = 2 as const;
 
 const DEFAULT_BUSY_TIMEOUT_MS = 2000;
 const DEFAULT_PAGE_LIMIT = 100;
 const MAX_PAGE_LIMIT = 500;
+const MAX_RETENTION_PAGE_LIMIT = 10_000;
 const DEFAULT_DB_PATH = "memory-event-store/events.sqlite";
 
 /** Base error type for explicit event-store failures. */
@@ -116,12 +130,32 @@ interface ScopeRow {
   event_count: number;
 }
 
+interface TombstoneRow {
+  id: number;
+  workspace_id: string;
+  principal_id: string;
+  session_id: string | null;
+  event_id: string | null;
+  kind: string;
+  generation: number;
+  created_at: string;
+}
+
+interface ScopeSummaryRow {
+  workspace_id: string;
+  principal_id: string;
+  session_id: string;
+  event_count: number;
+  oldest_timestamp: string;
+  newest_timestamp: string;
+}
+
 const CAPABILITIES: MemoryCapabilitiesV2 = {
   durable: true,
   retrievalPurposes: ["prompt-context", "replay", "audit", "export"],
   supportsCompaction: false,
-  supportsForget: false,
-  supportsExport: false,
+  supportsForget: true,
+  supportsExport: true,
 };
 
 /**
@@ -345,6 +379,452 @@ export class MemoryEventStore implements MemoryModuleV2 {
     };
   }
 
+  /**
+   * Apply an exact forget selection. Tombstones and the deletion generation are
+   * committed in the same transaction as the authoritative row deletions, so an
+   * interrupted operation either fully commits or fully rolls back. Repeated
+   * selections are idempotent: already-removed records are reported via
+   * `notFound` rather than being resurrected or silently double-deleted.
+   */
+  async forget(selection: MemoryForgetSelectionV2): Promise<MemoryForgetResultV2> {
+    try {
+      const sel = validateForgetSelection(selection);
+      await this.ensureOpen();
+      const db = this.db as Database;
+      await db.exec("BEGIN IMMEDIATE");
+      try {
+        const generation = await this.bumpDeletionGeneration(db);
+        let deleted = 0;
+        let notFound = 0;
+        if (sel.kind === "record") {
+          for (const eventId of sel.eventIds) {
+            const existing = await db.get<{ id: number }>(
+              `SELECT id FROM events
+               WHERE workspace_id = ? AND principal_id = ? AND session_id = ? AND event_id = ?`,
+              sel.scope.workspaceId,
+              sel.scope.principalId,
+              sel.scope.sessionId,
+              eventId,
+            );
+            if (!existing) {
+              notFound += 1;
+              continue;
+            }
+            await db.run(
+              `DELETE FROM events
+               WHERE workspace_id = ? AND principal_id = ? AND session_id = ? AND event_id = ?`,
+              sel.scope.workspaceId,
+              sel.scope.principalId,
+              sel.scope.sessionId,
+              eventId,
+            );
+            deleted += 1;
+            await this.insertRecordTombstone(db, sel.scope, eventId, "record", generation);
+          }
+          await this.refreshScopeRow(sel.scope);
+        } else if (sel.kind === "session") {
+          await this.insertScopeTombstone(db, sel.scope, "session", generation);
+          const result = await db.run(
+            `DELETE FROM events
+             WHERE workspace_id = ? AND principal_id = ? AND session_id = ?`,
+            sel.scope.workspaceId,
+            sel.scope.principalId,
+            sel.scope.sessionId,
+          );
+          deleted = result.changes ?? 0;
+          await db.run(
+            `DELETE FROM event_scopes
+             WHERE workspace_id = ? AND principal_id = ? AND session_id = ?`,
+            sel.scope.workspaceId,
+            sel.scope.principalId,
+            sel.scope.sessionId,
+          );
+        } else {
+          await this.insertPrincipalTombstone(db, sel.workspaceId, sel.principalId, generation);
+          const result = await db.run(
+            `DELETE FROM events WHERE workspace_id = ? AND principal_id = ?`,
+            sel.workspaceId,
+            sel.principalId,
+          );
+          deleted = result.changes ?? 0;
+          await db.run(
+            `DELETE FROM event_scopes WHERE workspace_id = ? AND principal_id = ?`,
+            sel.workspaceId,
+            sel.principalId,
+          );
+        }
+        await db.exec("COMMIT");
+        return { status: "forgotten", kind: sel.kind, generation, deleted, notFound };
+      } catch (error) {
+        await safeRollback(db);
+        return { status: "failure", reason: describeError(error) };
+      }
+    } catch (error) {
+      return { status: "failure", reason: describeError(error) };
+    }
+  }
+
+  /** The current monotonic deletion generation. */
+  async deletionGeneration(): Promise<number> {
+    await this.ensureOpen();
+    const row = await (this.db as Database).get<{ generation: number }>(
+      "SELECT generation FROM deletion_state WHERE id = 1",
+    );
+    return row?.generation ?? 0;
+  }
+
+  /** True when an event row currently exists for the exact scope + event ID. */
+  async eventExists(scope: MemoryScopeV2, eventId: string): Promise<boolean> {
+    validateScope(scope);
+    if (typeof eventId !== "string" || eventId.length === 0) return false;
+    await this.ensureOpen();
+    const row = await (this.db as Database).get<{ id: number }>(
+      `SELECT id FROM events
+       WHERE workspace_id = ? AND principal_id = ? AND session_id = ? AND event_id = ?`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+      eventId,
+    );
+    return row !== undefined;
+  }
+
+  /**
+   * Return the tombstones for a scope (workspace/principal-wide, session-wide,
+   * and record-level) or, when no scope is supplied, all tombstones.
+   */
+  async tombstones(scope?: MemoryScopeV2): Promise<readonly MemoryTombstoneV2[]> {
+    await this.ensureOpen();
+    const db = this.db as Database;
+    let rows: TombstoneRow[];
+    if (scope) {
+      validateScope(scope);
+      rows = await db.all<TombstoneRow[]>(
+        `SELECT id, workspace_id, principal_id, session_id, event_id, kind, generation, created_at
+         FROM tombstones
+         WHERE workspace_id = ? AND principal_id = ?
+           AND (session_id IS NULL OR session_id = ?)
+         ORDER BY id ASC`,
+        scope.workspaceId,
+        scope.principalId,
+        scope.sessionId,
+      );
+    } else {
+      rows = await db.all<TombstoneRow[]>(
+        `SELECT id, workspace_id, principal_id, session_id, event_id, kind, generation, created_at
+         FROM tombstones
+         ORDER BY id ASC`,
+      );
+    }
+    return rows.map(rowToTombstone);
+  }
+
+  /**
+   * Return the coarsest tombstone that blocks all future imports for a scope:
+   * a workspace/principal tombstone wins, then a session tombstone. Record-level
+   * tombstones are checked separately via `tombstonedEventIds`.
+   */
+  async blockingTombstone(scope: MemoryScopeV2): Promise<MemoryTombstoneV2 | null> {
+    validateScope(scope);
+    await this.ensureOpen();
+    const row = await (this.db as Database).get<TombstoneRow>(
+      `SELECT id, workspace_id, principal_id, session_id, event_id, kind, generation, created_at
+       FROM tombstones
+       WHERE workspace_id = ? AND principal_id = ?
+         AND (session_id IS NULL OR (session_id = ? AND event_id IS NULL))
+       ORDER BY CASE WHEN session_id IS NULL THEN 0 ELSE 1 END, id ASC
+       LIMIT 1`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+    );
+    return row ? rowToTombstone(row) : null;
+  }
+
+  /** Return the subset of event IDs that have record-level tombstones in `scope`. */
+  async tombstonedEventIds(scope: MemoryScopeV2, eventIds: readonly string[]): Promise<string[]> {
+    validateScope(scope);
+    if (eventIds.length === 0) return [];
+    await this.ensureOpen();
+    const placeholders = eventIds.map(() => "?").join(", ");
+    const rows = await (this.db as Database).all<{ event_id: string }[]>(
+      `SELECT event_id FROM tombstones
+       WHERE workspace_id = ? AND principal_id = ? AND session_id = ?
+         AND event_id IN (${placeholders})`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+      ...eventIds,
+    );
+    return rows.map((row) => row.event_id);
+  }
+
+  /** Per-scope event counts plus oldest/newest timestamps for retention. */
+  async scopeSummaries(): Promise<readonly MemoryScopeSummaryV2[]> {
+    await this.ensureOpen();
+    const rows = await (this.db as Database).all<ScopeSummaryRow[]>(
+      `SELECT workspace_id, principal_id, session_id,
+              COUNT(id) AS event_count,
+              MIN(timestamp) AS oldest_timestamp,
+              MAX(timestamp) AS newest_timestamp
+       FROM events
+       GROUP BY workspace_id, principal_id, session_id
+       ORDER BY newest_timestamp ASC`,
+    );
+    return rows.map((row) => ({
+      scope: {
+        workspaceId: row.workspace_id,
+        principalId: row.principal_id,
+        sessionId: row.session_id,
+      },
+      eventCount: row.event_count,
+      oldestTimestamp: row.oldest_timestamp,
+      newestTimestamp: row.newest_timestamp,
+    }));
+  }
+
+  /** The `count` oldest events in a scope, in ascending sequence order. */
+  async oldestEvents(scope: MemoryScopeV2, count: number): Promise<readonly MemoryEventEnvelopeV2[]> {
+    validateScope(scope);
+    await this.ensureOpen();
+    const limit = Math.max(0, Math.min(Math.trunc(count), MAX_RETENTION_PAGE_LIMIT));
+    if (limit === 0) return [];
+    const rows = await (this.db as Database).all<EventRow[]>(
+      `SELECT id, workspace_id, principal_id, session_id, event_id, sequence,
+              schema_version, digest, run_id, task_id, run_ref, step_ref,
+              timestamp, kind, outcome_json, payload_json, evidence_refs_json
+       FROM events
+       WHERE workspace_id = ? AND principal_id = ? AND session_id = ?
+       ORDER BY sequence ASC
+       LIMIT ?`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+      limit,
+    );
+    return rows.map(rowToEnvelope);
+  }
+
+  /** Events in a scope whose timestamp is strictly before the given timestamp. */
+  async eventsBefore(scope: MemoryScopeV2, timestamp: string): Promise<readonly MemoryEventEnvelopeV2[]> {
+    validateScope(scope);
+    if (typeof timestamp !== "string" || timestamp.length === 0) return [];
+    await this.ensureOpen();
+    const rows = await (this.db as Database).all<EventRow[]>(
+      `SELECT id, workspace_id, principal_id, session_id, event_id, sequence,
+              schema_version, digest, run_id, task_id, run_ref, step_ref,
+              timestamp, kind, outcome_json, payload_json, evidence_refs_json
+       FROM events
+       WHERE workspace_id = ? AND principal_id = ? AND session_id = ?
+         AND timestamp < ?
+       ORDER BY sequence ASC
+       LIMIT ?`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+      timestamp,
+      MAX_RETENTION_PAGE_LIMIT,
+    );
+    return rows.map(rowToEnvelope);
+  }
+
+  /**
+   * Explicitly restore previously forgotten events from a validated export.
+   * This is the only path that re-adds tombstoned content; ordinary imports
+   * still refuse it. Record- and session-level tombstones for the restored
+   * scope are cleared, while workspace/principal-wide tombstones intentionally
+   * remain because a single session restore cannot reauthorize a broader
+   * deletion.
+   */
+  async restoreScope(scope: MemoryScopeV2, events: readonly MemoryEventEnvelopeV2[]): Promise<MemoryRestoreResultV2> {
+    try {
+      validateScope(scope);
+      if (!Array.isArray(events)) throw new Error("restore events must be an array");
+      const envelopes = events.map((event) => {
+        const envelope = validateEventEnvelope(event);
+        assertScopeMatches(scope, scopeFromIdentity(envelope.identity), "restore scope");
+        return envelope;
+      });
+      await this.ensureOpen();
+      const db = this.db as Database;
+      await db.exec("BEGIN IMMEDIATE");
+      try {
+        await this.ensureScope(scope);
+        const generation = await this.bumpDeletionGeneration(db);
+        let inserted = 0;
+        for (const envelope of envelopes) {
+          const existing = await db.get<{ id: number }>(
+            `SELECT id FROM events
+             WHERE workspace_id = ? AND principal_id = ? AND session_id = ? AND event_id = ?`,
+            scope.workspaceId,
+            scope.principalId,
+            scope.sessionId,
+            envelope.eventId,
+          );
+          if (existing) continue;
+          await db.run(
+            `INSERT INTO events (
+               workspace_id, principal_id, session_id, event_id, sequence,
+               schema_version, digest, run_id, task_id, run_ref, step_ref,
+               timestamp, kind, outcome_json, payload_json, evidence_refs_json
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            scope.workspaceId,
+            scope.principalId,
+            scope.sessionId,
+            envelope.eventId,
+            envelope.sequence,
+            envelope.schemaVersion,
+            computeEventDigest(envelope),
+            envelope.identity.runId,
+            envelope.identity.taskId ?? null,
+            envelope.runRef,
+            envelope.stepRef ?? null,
+            envelope.timestamp,
+            envelope.kind,
+            envelope.outcome === undefined ? null : JSON.stringify(envelope.outcome),
+            envelope.payload === undefined ? null : JSON.stringify(envelope.payload),
+            JSON.stringify(envelope.evidenceRefs ?? []),
+          );
+          inserted += 1;
+          await db.run(
+            `DELETE FROM tombstones
+             WHERE workspace_id = ? AND principal_id = ? AND session_id = ? AND event_id = ?`,
+            scope.workspaceId,
+            scope.principalId,
+            scope.sessionId,
+            envelope.eventId,
+          );
+        }
+        await db.run(
+          `DELETE FROM tombstones
+           WHERE workspace_id = ? AND principal_id = ? AND session_id = ?
+             AND event_id IS NULL AND kind = 'session'`,
+          scope.workspaceId,
+          scope.principalId,
+          scope.sessionId,
+        );
+        await this.refreshScopeRow(scope);
+        await db.exec("COMMIT");
+        return { status: "restored", scope, eventCount: inserted, generation };
+      } catch (error) {
+        await safeRollback(db);
+        return { status: "failure", reason: describeError(error) };
+      }
+    } catch (error) {
+      return { status: "failure", reason: describeError(error) };
+    }
+  }
+
+  private async insertRecordTombstone(
+    db: Database,
+    scope: MemoryScopeV2,
+    eventId: string,
+    kind: "record" | "session" | "workspace-principal",
+    generation: number,
+  ): Promise<void> {
+    await db.run(
+      `INSERT OR IGNORE INTO tombstones (
+         workspace_id, principal_id, session_id, event_id, kind, generation, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+      eventId,
+      kind,
+      generation,
+      new Date().toISOString(),
+    );
+  }
+
+  private async insertScopeTombstone(
+    db: Database,
+    scope: MemoryScopeV2,
+    kind: "session",
+    generation: number,
+  ): Promise<void> {
+    await db.run(
+      `INSERT INTO tombstones (
+         workspace_id, principal_id, session_id, event_id, kind, generation, created_at
+       )
+       SELECT ?, ?, ?, NULL, ?, ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM tombstones
+         WHERE workspace_id = ? AND principal_id = ? AND session_id = ? AND event_id IS NULL
+       )`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+      kind,
+      generation,
+      new Date().toISOString(),
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+    );
+  }
+
+  private async insertPrincipalTombstone(
+    db: Database,
+    workspaceId: string,
+    principalId: string,
+    generation: number,
+  ): Promise<void> {
+    await db.run(
+      `INSERT INTO tombstones (
+         workspace_id, principal_id, session_id, event_id, kind, generation, created_at
+       )
+       SELECT ?, ?, NULL, NULL, 'workspace-principal', ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM tombstones
+         WHERE workspace_id = ? AND principal_id = ? AND session_id IS NULL AND event_id IS NULL
+       )`,
+      workspaceId,
+      principalId,
+      generation,
+      new Date().toISOString(),
+      workspaceId,
+      principalId,
+    );
+  }
+
+  private async refreshScopeRow(scope: MemoryScopeV2): Promise<void> {
+    const db = this.db as Database;
+    const remaining = await db.get<{ count: number; max_seq: number }>(
+      `SELECT COUNT(id) AS count, COALESCE(MAX(sequence), 0) AS max_seq
+       FROM events
+       WHERE workspace_id = ? AND principal_id = ? AND session_id = ?`,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+    );
+    if (!remaining || remaining.count === 0) {
+      await db.run(
+        `DELETE FROM event_scopes
+         WHERE workspace_id = ? AND principal_id = ? AND session_id = ?`,
+        scope.workspaceId,
+        scope.principalId,
+        scope.sessionId,
+      );
+      return;
+    }
+    await db.run(
+      `UPDATE event_scopes SET last_sequence = ?
+       WHERE workspace_id = ? AND principal_id = ? AND session_id = ?`,
+      remaining.max_seq,
+      scope.workspaceId,
+      scope.principalId,
+      scope.sessionId,
+    );
+  }
+
+  private async bumpDeletionGeneration(db: Database): Promise<number> {
+    await db.run("UPDATE deletion_state SET generation = generation + 1 WHERE id = 1");
+    const row = await db.get<{ generation: number }>(
+      "SELECT generation FROM deletion_state WHERE id = 1",
+    );
+    return row?.generation ?? 1;
+  }
+
   private async ensureOpen(): Promise<void> {
     if (this.db) return;
     assertSafeMemoryStatePath(this.filePath);
@@ -420,6 +900,38 @@ export class MemoryEventStore implements MemoryModuleV2 {
         throw error;
       }
     }
+    if (version < 2) {
+      await db.exec("BEGIN IMMEDIATE");
+      try {
+        await db.exec(`
+          CREATE TABLE IF NOT EXISTS tombstones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            session_id TEXT,
+            event_id TEXT,
+            kind TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (workspace_id, principal_id, session_id, event_id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_tombstones_scope
+            ON tombstones (workspace_id, principal_id, session_id);
+          CREATE INDEX IF NOT EXISTS idx_tombstones_principal
+            ON tombstones (workspace_id, principal_id);
+          CREATE TABLE IF NOT EXISTS deletion_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            generation INTEGER NOT NULL DEFAULT 0
+          );
+          INSERT OR IGNORE INTO deletion_state (id, generation) VALUES (1, 0);
+        `);
+        await db.exec(`PRAGMA user_version = ${EVENT_STORE_DB_VERSION}`);
+        await db.exec("COMMIT");
+      } catch (error) {
+        await safeRollback(db);
+        throw error;
+      }
+    }
   }
 
   private async ensureScope(scope: MemoryScopeV2): Promise<void> {
@@ -469,6 +981,19 @@ function rowToEnvelope(row: EventRow): MemoryEventEnvelopeV2 {
     ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}),
   };
   return buildEventEnvelope(append, row.sequence, row.timestamp);
+}
+
+function rowToTombstone(row: TombstoneRow): MemoryTombstoneV2 {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    principalId: row.principal_id,
+    sessionId: row.session_id,
+    eventId: row.event_id,
+    kind: row.kind as MemoryTombstoneV2["kind"],
+    generation: row.generation,
+    createdAt: row.created_at,
+  };
 }
 
 async function safeRollback(db: Database): Promise<void> {

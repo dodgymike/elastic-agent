@@ -216,6 +216,86 @@ export interface MemoryRetrieveResultV2 {
   readonly text?: string;
 }
 
+/**
+ * The exact granularity of a forget operation. Record and session selections
+ * carry a full `MemoryScopeV2`; workspace/principal is intentionally coarser
+ * and must be authorized at the boundary before it is applied.
+ */
+export type MemoryForgetKindV2 = "record" | "session" | "workspace-principal";
+
+/**
+ * An exact forget selection. Every variant carries the complete selection
+ * fields; callers may never omit a scope field and expect a fuzzy or
+ * natural-language match to fill it in.
+ */
+export type MemoryForgetSelectionV2 =
+  | {
+      readonly kind: "record";
+      readonly scope: MemoryScopeV2;
+      readonly eventIds: readonly string[];
+    }
+  | {
+      readonly kind: "session";
+      readonly scope: MemoryScopeV2;
+    }
+  | {
+      readonly kind: "workspace-principal";
+      readonly workspaceId: string;
+      readonly principalId: string;
+    };
+
+/** Result of applying a forget selection. */
+export type MemoryForgetResultV2 =
+  | {
+      readonly status: "forgotten";
+      readonly kind: MemoryForgetKindV2;
+      /** Monotonic deletion generation after this applied forget. */
+      readonly generation: number;
+      /** Number of authoritative event rows removed by this call. */
+      readonly deleted: number;
+      /** Requested record IDs that had no current event row. */
+      readonly notFound: number;
+    }
+  | { readonly status: "failure"; readonly reason: string };
+
+/**
+ * A durable deletion marker. It is committed before authoritative payloads are
+ * removed and is checked by imports so forgotten content cannot reappear.
+ */
+export interface MemoryTombstoneV2 {
+  readonly id: number;
+  readonly workspaceId: string;
+  readonly principalId: string;
+  /** Null for workspace/principal-wide tombstones. */
+  readonly sessionId: string | null;
+  /** Null for session- and workspace/principal-wide tombstones. */
+  readonly eventId: string | null;
+  readonly kind: MemoryForgetKindV2;
+  readonly generation: number;
+  readonly createdAt: string;
+}
+
+/** Result of restoring previously forgotten events from an explicit export. */
+export type MemoryRestoreResultV2 =
+  | {
+      readonly status: "restored";
+      readonly scope: MemoryScopeV2;
+      readonly eventCount: number;
+      readonly generation: number;
+    }
+  | { readonly status: "failure"; readonly reason: string };
+
+/**
+ * A scope summary used by retention. Timestamps are stored as ISO-8601 strings
+ * and compared lexicographically by the retention controller.
+ */
+export interface MemoryScopeSummaryV2 {
+  readonly scope: MemoryScopeV2;
+  readonly eventCount: number;
+  readonly oldestTimestamp: string;
+  readonly newestTimestamp: string;
+}
+
 /** Advertised backend capabilities used by later tasks (MI-11). */
 export interface MemoryCapabilitiesV2 {
   /** True when appends are durably persisted. */
@@ -469,6 +549,42 @@ export function validateRetrievalPurpose(value: unknown): MemoryRetrievalPurpose
     reject(`retrieval purpose must be one of: ${[...RETRIEVAL_PURPOSES].join(", ")}`);
   }
   return value as MemoryRetrievalPurposeV2;
+}
+
+/**
+ * Validate an unknown value as an exact forget selection. Record selections
+ * require at least one non-empty event ID; session selections require a full
+ * scope; workspace/principal selections require both fields and may never fall
+ * back to a partial match.
+ */
+export function validateForgetSelection(value: unknown): MemoryForgetSelectionV2 {
+  const record = asRecord(value);
+  if (!record) reject("forget selection must be an object");
+  if (record.kind === "record") {
+    const scope = validateScope(record.scope);
+    const eventIds = record.eventIds;
+    if (!Array.isArray(eventIds) || eventIds.length === 0 || eventIds.some((id) => !isNonEmptyString(id))) {
+      reject("record forget selection requires a non-empty eventIds array of non-empty strings");
+    }
+    return { kind: "record", scope, eventIds: eventIds as readonly string[] };
+  }
+  if (record.kind === "session") {
+    return { kind: "session", scope: validateScope(record.scope) };
+  }
+  if (record.kind === "workspace-principal") {
+    if (!isNonEmptyString(record.workspaceId)) {
+      reject("workspace-principal forget selection requires a non-empty workspaceId");
+    }
+    if (!isNonEmptyString(record.principalId)) {
+      reject("workspace-principal forget selection requires a non-empty principalId");
+    }
+    return {
+      kind: "workspace-principal",
+      workspaceId: record.workspaceId as string,
+      principalId: record.principalId as string,
+    };
+  }
+  reject(`forget selection kind must be one of: record, session, workspace-principal`);
 }
 
 /** Serialize a validated envelope to JSON. */

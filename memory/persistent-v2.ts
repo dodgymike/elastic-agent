@@ -32,11 +32,23 @@ import {
   type MemoryEventAppendV2,
   type MemoryEventEnvelopeV2,
   type MemoryFlushResultV2,
+  type MemoryForgetResultV2,
+  type MemoryForgetSelectionV2,
   type MemoryInitResultV2,
   type MemoryOutcomeAssertionV2,
   type MemoryScopeV2,
 } from "./contracts-v2.js";
 import { createMemoryEventStore, type MemoryEventStore } from "./event-store.js";
+import {
+  MemoryRetentionController,
+  type MemoryExportDocumentV1,
+  type MemoryExportOptions,
+  type MemoryExportResult,
+  type MemoryRestoreResult,
+  type RetentionApplyResult,
+  type RetentionPolicy,
+  type RetentionPreview,
+} from "./retention.js";
 import type {
   ContextRequest,
   MemoryContext,
@@ -85,6 +97,7 @@ export class PersistentV2MemoryModule implements MemoryModule {
   private readonly maxChars: number;
   private readonly delegate?: MemoryModule;
   private readonly sequenceBySession = new Map<string, number>();
+  private retention: MemoryRetentionController | null = null;
 
   /** The most recent non-fatal failure reported by this module, if any. */
   lastFailure: PersistentV2FailureReport | null = null;
@@ -190,6 +203,43 @@ export class PersistentV2MemoryModule implements MemoryModule {
       return `persistent-v2:${sessionId}:revision-${result.revision}`;
     }
     throw new Error(`persistent-v2 flush failed for session ${sessionId}: ${result.reason}`);
+  }
+
+  /** MI-13: apply an exact forget selection through the authoritative store. */
+  async forget(selection: MemoryForgetSelectionV2): Promise<MemoryForgetResultV2> {
+    return this.retentionController().forget(selection);
+  }
+
+  /** MI-13: the current monotonic deletion generation. */
+  async deletionGeneration(): Promise<number> {
+    return this.store.deletionGeneration();
+  }
+
+  /** MI-13: build a redacted, versioned export for an exact scope. */
+  async exportScope(scope: MemoryScopeV2, options?: MemoryExportOptions): Promise<MemoryExportResult> {
+    return this.retentionController().exportScope(scope, options);
+  }
+
+  /** MI-13: explicitly restore forgotten records from a validated export. */
+  async restoreExport(input: MemoryExportDocumentV1 | string, targetScope?: MemoryScopeV2): Promise<MemoryRestoreResult> {
+    return this.retentionController().restoreExport(input, targetScope);
+  }
+
+  /** MI-13: preview retention candidates without mutating. */
+  async previewRetention(policy: RetentionPolicy): Promise<RetentionPreview> {
+    return this.retentionController().previewRetention(policy);
+  }
+
+  /** MI-13: apply a previously computed retention preview. */
+  async applyRetention(preview: RetentionPreview): Promise<RetentionApplyResult> {
+    return this.retentionController().applyRetention(preview);
+  }
+
+  private retentionController(): MemoryRetentionController {
+    if (!this.retention) {
+      this.retention = new MemoryRetentionController(this.store);
+    }
+    return this.retention;
   }
 
   private scopeFor(sessionId: string, userId?: string): MemoryScopeV2 {

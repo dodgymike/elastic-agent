@@ -186,7 +186,9 @@ async function testCapabilityInspection(): Promise<void> {
 
   const persistentV2 = createMemoryBackend({ type: "persistent-v2" });
   assert.equal(persistentV2.capabilities.durable, true);
-  assert.equal(persistentV2.capabilities.supportsForget, false, "forget is a later task (MI-13)");
+  assert.equal(persistentV2.capabilities.supportsForget, true, "MI-13 adds exact forget");
+  assert.equal(persistentV2.capabilities.supportsExport, true, "MI-13 adds safe export");
+  assert.equal(persistentV2.capabilities.supportsCompaction, false, "compaction remains a later capability");
 
   // Unknown modules fall back to a conservative non-durable surface.
   assert.equal(capabilitiesOf({}).durable, false);

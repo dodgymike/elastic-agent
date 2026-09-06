@@ -88,6 +88,7 @@ export {
   stableEventId,
   validateEventAppend,
   validateEventEnvelope,
+  validateForgetSelection,
   validateIdentity,
   validateOutcome,
   validateRetrievalPurpose,
@@ -101,15 +102,21 @@ export type {
   MemoryEventEnvelopeV2,
   MemoryEventKindV2,
   MemoryFlushResultV2,
+  MemoryForgetKindV2,
+  MemoryForgetResultV2,
+  MemoryForgetSelectionV2,
   MemoryIdentityV2,
   MemoryInitResultV2,
   MemoryModuleV2,
   MemoryOutcomeAssertionV2,
   MemoryOutcomeV2,
+  MemoryRestoreResultV2,
   MemoryRetrieveRequestV2,
   MemoryRetrieveResultV2,
   MemoryRetrievalPurposeV2,
+  MemoryScopeSummaryV2,
   MemoryScopeV2,
+  MemoryTombstoneV2,
   MemoryVerificationLevelV2,
 } from "./contracts-v2.js";
 
@@ -241,6 +248,24 @@ export {
   hasExplicitCapabilities,
 } from "./backend-capabilities.js";
 export type { MemoryBackendCapabilityProvider } from "./backend-capabilities.js";
+
+export {
+  DEFAULT_MAX_EXPORT_FILE_BYTES,
+  MEMORY_EXPORT_SCHEMA_VERSION,
+  MemoryRetentionController,
+} from "./retention.js";
+export type {
+  MemoryExportDocumentV1,
+  MemoryExportOptions,
+  MemoryExportResult,
+  MemoryForgetPreview,
+  MemoryRestoreResult,
+  RetentionApplyResult,
+  RetentionApplyStatusV2,
+  RetentionCandidate,
+  RetentionPolicy,
+  RetentionPreview,
+} from "./retention.js";
 
 export {
   PersistentV2MemoryModule,

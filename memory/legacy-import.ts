@@ -109,6 +109,29 @@ export async function importLegacyMemoryDocument(
     }
 
     const events = buildImportEvents(document, scope, sourceDigest);
+
+    // MI-13: imports must respect tombstones. A workspace/principal- or
+    // session-level deletion blocks the whole import; record-level tombstones
+    // block the specific records. Resurrection is only possible through the
+    // explicit restore operation, never through a silent re-import.
+    const blocking = await options.store.blockingTombstone(scope);
+    if (blocking) {
+      return {
+        status: "failure",
+        reason: `scope is tombstoned by a ${blocking.kind} deletion; use an explicit restore operation instead of import`,
+      };
+    }
+    const tombstoned = await options.store.tombstonedEventIds(
+      scope,
+      events.map((event) => event.eventId),
+    );
+    if (tombstoned.length > 0) {
+      return {
+        status: "failure",
+        reason: `import would resurrect forgotten records (${tombstoned.join(", ")}); use an explicit restore operation`,
+      };
+    }
+
     let durable = 0;
     let duplicate = 0;
     for (const event of events) {

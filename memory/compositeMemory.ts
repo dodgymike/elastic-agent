@@ -23,17 +23,29 @@
 
 import {
   capabilitiesOf,
+  describeCapabilityGap,
   hasExplicitCapabilities,
 } from "./backend-capabilities.js";
 import type {
   MemoryCapabilitiesV2,
   MemoryCloseResultV2,
   MemoryFlushResultV2,
+  MemoryForgetResultV2,
+  MemoryForgetSelectionV2,
   MemoryInitResultV2,
   MemoryModuleV2,
   MemoryScopeV2,
 } from "./contracts-v2.js";
 import type { CompactionSummaryStore } from "./memoryCompaction.js";
+import type {
+  MemoryExportDocumentV1,
+  MemoryExportOptions,
+  MemoryExportResult,
+  MemoryRestoreResult,
+  RetentionApplyResult,
+  RetentionPolicy,
+  RetentionPreview,
+} from "./retention.js";
 import type {
   ContextRequest,
   MemoryContext,
@@ -253,6 +265,85 @@ export class CompositeMemoryModule implements MemoryModule {
     const owner = this.owner as Partial<Pick<MemoryModuleV2, "close">>;
     if (typeof owner.close === "function") return owner.close(scope);
     return { status: "closed" };
+  }
+
+  /** MI-13: route an exact forget selection to the authoritative owner. */
+  async forget(selection: MemoryForgetSelectionV2): Promise<MemoryForgetResultV2> {
+    if (!capabilitiesOf(this.owner).supportsForget) {
+      return { status: "failure", reason: describeCapabilityGap(capabilitiesOf(this.owner), "forget") };
+    }
+    const owner = this.owner as Partial<{ forget(selection: MemoryForgetSelectionV2): Promise<MemoryForgetResultV2> }>;
+    if (typeof owner.forget !== "function") {
+      return { status: "failure", reason: "composite owner does not implement forget" };
+    }
+    try {
+      return await owner.forget(selection);
+    } catch (error) {
+      return { status: "failure", reason: summarizeError(error) };
+    }
+  }
+
+  /** MI-13: route safe export to the authoritative owner. */
+  async exportScope(scope: MemoryScopeV2, options?: MemoryExportOptions): Promise<MemoryExportResult> {
+    if (!capabilitiesOf(this.owner).supportsExport) {
+      return { status: "failure", reason: describeCapabilityGap(capabilitiesOf(this.owner), "export") };
+    }
+    const owner = this.owner as Partial<{
+      exportScope(scope: MemoryScopeV2, options?: MemoryExportOptions): Promise<MemoryExportResult>;
+    }>;
+    if (typeof owner.exportScope !== "function") {
+      return { status: "failure", reason: "composite owner does not implement exportScope" };
+    }
+    try {
+      return await owner.exportScope(scope, options);
+    } catch (error) {
+      return { status: "failure", reason: summarizeError(error) };
+    }
+  }
+
+  /** MI-13: route explicit restore to the authoritative owner. */
+  async restoreExport(input: MemoryExportDocumentV1 | string, targetScope?: MemoryScopeV2): Promise<MemoryRestoreResult> {
+    const owner = this.owner as Partial<{
+      restoreExport(input: MemoryExportDocumentV1 | string, targetScope?: MemoryScopeV2): Promise<MemoryRestoreResult>;
+    }>;
+    if (typeof owner.restoreExport !== "function") {
+      return { status: "failure", reason: "composite owner does not implement restoreExport" };
+    }
+    try {
+      return await owner.restoreExport(input, targetScope);
+    } catch (error) {
+      return { status: "failure", reason: summarizeError(error) };
+    }
+  }
+
+  /** MI-13: route retention preview to the authoritative owner. */
+  async previewRetention(policy: RetentionPolicy): Promise<RetentionPreview> {
+    const owner = this.owner as Partial<{
+      previewRetention(policy: RetentionPolicy): Promise<RetentionPreview>;
+    }>;
+    if (typeof owner.previewRetention !== "function") {
+      return { status: "failure", reason: "composite owner does not implement previewRetention", policy, candidates: [], skippedProtected: 0 };
+    }
+    try {
+      return await owner.previewRetention(policy);
+    } catch (error) {
+      return { status: "failure", reason: summarizeError(error), policy, candidates: [], skippedProtected: 0 };
+    }
+  }
+
+  /** MI-13: route retention apply to the authoritative owner. */
+  async applyRetention(preview: RetentionPreview): Promise<RetentionApplyResult> {
+    const owner = this.owner as Partial<{
+      applyRetention(preview: RetentionPreview): Promise<RetentionApplyResult>;
+    }>;
+    if (typeof owner.applyRetention !== "function") {
+      return { status: "failure", applied: 0, failed: 1, errors: ["composite owner does not implement applyRetention"] };
+    }
+    try {
+      return await owner.applyRetention(preview);
+    } catch (error) {
+      return { status: "failure", applied: 0, failed: 1, errors: [summarizeError(error)] };
+    }
   }
 
   /** Compaction read surface routed to the authoritative owner. */

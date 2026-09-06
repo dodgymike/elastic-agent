@@ -1,6 +1,6 @@
 # MI-13 — Implement retention, forgetting, and safe export
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-04](04-reload-and-legacy-import.md), [MI-06](06-structured-facts-and-provenance.md), [MI-07](07-incremental-summaries.md), [MI-08](08-relevant-retrieval.md), [MI-11](11-backend-capabilities-and-composite.md), [MI-12](12-conversation-lifecycle.md)
 
@@ -42,10 +42,10 @@ choose equivalent locations if current architecture makes them more appropriate.
 
 ## Acceptance criteria
 
-- [ ] Forgotten facts disappear from retrieval, summaries, projections, and future prompts, including after restart.
-- [ ] An in-flight summarizer completing after deletion cannot resurrect the content.
-- [ ] Same-ID sessions in other scopes remain intact; interrupted deletion resumes or reports pending work accurately.
-- [ ] Exports contain no sentinel secrets and round-trip valid non-deleted records with original provenance.
+- [x] Forgotten facts disappear from retrieval, summaries, projections, and future prompts, including after restart.
+- [x] An in-flight summarizer completing after deletion cannot resurrect the content.
+- [x] Same-ID sessions in other scopes remain intact; interrupted deletion resumes or reports pending work accurately.
+- [x] Exports contain no sentinel secrets and round-trip valid non-deleted records with original provenance.
 
 ## Validation
 
@@ -64,14 +64,14 @@ Deletion is not ordinarily reversible; distinguish preview, apply, and explicit 
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
-Changed files and behavior:
-Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+Status: DONE
+Baseline revision: 2850313 (MI-12 completion)
+Prerequisite evidence: MI-04 DONE (reload/import), MI-06 DONE (structured records), MI-07 DONE (incremental summaries), MI-08 DONE (retrieval), MI-11 DONE (capabilities/composite), MI-12 DONE (conversation lifecycle).
+Reproduction / old behavior: MemoryEventStore had no deletion path; legacy import would re-append previously imported records without any tombstone check; IncrementalSummaryManager had no way to reject an in-flight summarizer completion after a deletion; persistent-v2 advertised supportsForget/supportsExport=false.
+Changed files and behavior: memory/contracts-v2.ts (forget/tombstone/restore/scope-summary types + validateForgetSelection), memory/event-store.ts (schema v2 additive migration: tombstones + deletion_state; forget/restore/retention query methods; capabilities flip), memory/retention.ts (new MemoryRetentionController: previewForget/forget/previewRetention/applyRetention/exportScope/restoreExport), memory/incremental-summary.ts (deletion-generation stale rejection), memory/legacy-import.ts (tombstone-respecting import), memory/backend-capabilities.ts + memory/persistent-v2.ts + memory/compositeMemory.ts + memory/index.ts (capabilities/routing/exports), test/memory-retention.test.ts (new), test/memory-backend-capabilities.test.ts (updated capability assertion), package.json (test:memory-retention script), docs/MEMORY_EVENT_STORE.md + docs/MEMORY_RETENTION.md (new).
+Validation commands and actual results: npm run test:memory-retention (exit 0); test:memory-event-store, test:memory-reload, test:memory-import, test:memory-incremental-summary, test:memory-selection, test:memory-backend-capabilities, test:memory-contract-v2, test:memory-runtime-checkpoint, test:memory-facts, test:memory-retrieval, test:memory-context-budget, test:memory-safe-compaction, test:memory-privacy, test:memory, test:persistent-memory, test:graph-memory, test:composite-memory (all exit 0); npm run build (exit 0); git diff --check (clean).
+Schema / configuration / compatibility changes: event-store DB user_version 1 -> 2 (additive migration creating tombstones + deletion_state; existing v1 databases migrate in place and newer versions are still rejected). PERSISTENT_V2_CAPABILITIES supportsForget/supportsExport are now true. New package.json script test:memory-retention.
+Residual limitations and follow-up IDs: workspace/principal-wide tombstones are intentionally not cleared by a single-session restore (reauthorizing a broader deletion is a separate operation); local deletion is logical only — SQLite pages/WAL/shm files, backups, previously written prompt logs, and already-sent provider requests have separate lifecycles; no standalone CLI binary was added — the programmatic controller is the narrow local API boundary (MI-16 can integrate further).
+Rollback notes: revert the schema v2 migration and the new retention module/wiring. The migration is additive and does not delete v1 data, so reverting the code before writing tombstones is safe; do not downgrade a database that has already written tombstones without an explicit migration path.
+Implementation commit(s): <recorded after commit>
 ```

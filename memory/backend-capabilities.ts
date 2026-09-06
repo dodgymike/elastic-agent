@@ -68,16 +68,16 @@ export const GRAPH_PROJECTION_CAPABILITIES: MemoryCapabilitiesV2 = {
 
 /**
  * Capabilities of the opt-in `persistent-v2` event-store backend. Appends are
- * durably persisted and every structured retrieval purpose is available.
- * Compaction/forget/export are handled by later tasks (MI-13/MI-14) and are
- * deliberately not advertised yet.
+ * durably persisted, every structured retrieval purpose is available, and the
+ * MI-13 retention surface adds forgetting plus safe export. Compaction remains
+ * unsupported and is deliberately not advertised yet.
  */
 export const PERSISTENT_V2_CAPABILITIES: MemoryCapabilitiesV2 = {
   durable: true,
   retrievalPurposes: ["prompt-context", "replay", "audit", "export"],
   supportsCompaction: false,
-  supportsForget: false,
-  supportsExport: false,
+  supportsForget: true,
+  supportsExport: true,
 };
 
 /**

@@ -96,6 +96,7 @@ export class IncrementalSummaryManager {
   private current: SummaryCheckpointV2;
   private projection: StructuredProjection;
   private readonly options: IncrementalSummaryOptions;
+  private deletionGeneration = 0;
 
   constructor(scope: MemoryScopeV2, options: IncrementalSummaryOptions, initial?: SummaryCheckpointV2) {
     validateScope(scope);
@@ -120,12 +121,29 @@ export class IncrementalSummaryManager {
     return this.current;
   }
 
+  /** The deletion generation this manager last observed. */
+  deletionGenerationNow(): number {
+    return this.deletionGeneration;
+  }
+
+  /**
+   * Notify the manager that the authoritative store advanced its deletion
+   * generation. An in-flight `advance()` that started before this notification
+   * is treated as stale and never overwrites the current checkpoint.
+   */
+  setDeletionGeneration(generation: number): void {
+    if (typeof generation === "number" && Number.isInteger(generation) && generation >= 0) {
+      this.deletionGeneration = generation;
+    }
+  }
+
   /**
    * Advance the summary over the supplied ordered events. Only events after
    * the current cursor are summarized; empty batches make no summarizer call.
    */
   async advance(events: readonly MemoryEventEnvelopeV2[]): Promise<SummaryAdvanceResult> {
     const base = this.current;
+    const generationAtStart = this.deletionGeneration;
     const batch = events
       .filter((event) => event.sequence > base.coveredThroughSequence)
       .sort((a, b) => a.sequence - b.sequence)
@@ -164,6 +182,13 @@ export class IncrementalSummaryManager {
       }
     } catch (error) {
       return { status: "failure", checkpoint: base, reason: describeError(error) };
+    }
+
+    // A deletion that advanced the generation while the summarizer was in
+    // flight invalidates this completion: accepting it could resurrect content
+    // that has already been forgotten.
+    if (this.deletionGeneration !== generationAtStart) {
+      return { status: "stale", checkpoint: this.current };
     }
 
     // Stale completions never overwrite a newer checkpoint.
