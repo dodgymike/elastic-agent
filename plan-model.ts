@@ -281,7 +281,7 @@ function normalizeDependencies(value: unknown, stepId: number): number[] {
     return value.map((dependency, index) => requiredPositiveInteger(dependency, `plan step ${stepId} 'dependencies' item ${index + 1}`));
 }
 
-function assertDependencyReferencesAndCycles(steps: PlanStepModel[]): void {
+function assertDependencyReferencesAndCycles(steps: readonly PlanStepModel[]): void {
     const ids = new Set(steps.map((step) => step.id));
     for (const step of steps) {
         for (const dependency of step.dependencies) {
@@ -308,6 +308,24 @@ function assertDependencyReferencesAndCycles(steps: PlanStepModel[]): void {
         state.set(id, 2);
     };
     for (const step of steps) visit(step.id);
+}
+
+/**
+ * Validate that a step list has unique IDs, every dependency references a
+ * present step, no step depends on itself, and the dependency graph is
+ * acyclic. Shared by `normalizePlanModel`/`legacyPlanToModel` and the plan
+ * patch application logic so replan patches are held to the same invariants
+ * as initial plans. Throws a descriptive `Error` on the first violation.
+ */
+export function validatePlanModelDependencies(steps: readonly PlanStepModel[]): void {
+    const ids = new Set<number>();
+    for (const step of steps) {
+        if (ids.has(step.id)) {
+            throw new Error(`Plan step ids must be unique; duplicate id ${step.id}.`);
+        }
+        ids.add(step.id);
+    }
+    assertDependencyReferencesAndCycles(steps);
 }
 
 /**
