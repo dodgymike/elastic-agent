@@ -65,9 +65,15 @@ import {
     planModelStepById,
     planModelStepIdByIndex,
     planModelCriteriaById,
-    replacePlanModelRemainingSteps,
-    rebuildPlanModelSteps,
+    planStepsFromModel,
 } from "./plan-model.js";
+import { tryApplyPlanPatch } from "./plan-patch.js";
+import {
+    computeReplanProgress,
+    parseReplanDecision,
+    patchFromRevisedSteps,
+    succeededStepIdsFromLedger,
+} from "./llm/replan-apply.js";
 import {
     applyExecutionFeedback,
     buildToolsAvailablePrompt,
@@ -95,8 +101,6 @@ import { indent, printPlan } from "./plan-printer.js";
 import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
 import {
     nextConsecutiveNoProgressReplans,
-    parseReplanResponse,
-    phaseRestartRequired,
     recordReplanElapsedAndAssertBudget,
     replanRemainingKey,
     throwIfConsecutiveNoProgressReplansReached,
@@ -1765,10 +1769,18 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         ? (currentStep.completionCriteria.map((criterion) => `- ${criterion}`).join("\n") || "(none)")
         : "(none)";
     throwIfAborted(abortController.signal, "replan", step);
-    const remainingStart = completedStepCount + 1;
-    const remainingSteps = activeSteps.slice(remainingStart);
     const feedback = feedbackEntry?.feedback;
     if (!feedbackEntry?.valid || !feedback?.replanRequired) return { attempted: false, applied: false };
+    // The verified (succeeded) prefix is what a replan must preserve verbatim.
+    // Failed, blocked, invalid, and needs-verification steps stop the prefix so
+    // the replan can revise or retry them instead of leaving them permanently
+    // unresolved. Without a stored model the legacy boundary (one past the
+    // current step) is used unchanged.
+    const preservedStepIds = planModel
+        ? succeededStepIdsFromLedger(planModel, configData.completedSteps ?? [])
+        : new Set<number>();
+    const remainingStart = planModel ? preservedStepIds.size : completedStepCount + 1;
+    const remainingSteps = activeSteps.slice(remainingStart);
     if (remainingSteps.length === 0) {
         status.warning("Replan request skipped because there are no remaining steps to replace.", hierarchyIndent("contentInStep"));
         return { attempted: false, applied: false, reason: "No remaining plan steps." };
@@ -1777,7 +1789,6 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
     throwIfReplanAttemptLimitReached(configData, step, maxReplanAttempts);
     throwIfReplanTimeBudgetExceeded(configData, step, maxReplanDurationMs);
 
-    const beforeKey = replanRemainingKey(activeSteps, completedStepCount);
     const attemptStart = Date.now();
     configData.replanAttemptCount += 1;
     const attempt = configData.replanAttemptCount;
@@ -1802,26 +1813,36 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
             new CompatibleResponseWrapper(response).print(hierarchyIndent("contentInStep"));
             recordUsage(configData, response);
             throwIfProviderCancelled(response, "replan", step);
-            const validation = parseReplanResponse(responseText(response));
-            if (validation.valid && validation.abort) {
-                throw new RunAbortError("unable-to-complete", "replan", validation.reason, { step });
+            const decision = parseReplanDecision(responseText(response));
+            if (decision.valid && decision.kind === "abort") {
+                throw new RunAbortError("unable-to-complete", "replan", decision.reason, { step });
             }
-            if (validation.valid) {
-                const revisedSteps: string[] = validation.steps as string[];
-                const nextPhase = validation.phase;
-                // A replan that moves the plan into a different top-level phase is
-                // a phase-level change: it abandons executed progress and restarts
-                // the whole plan. Edits that keep the same phase (or omit phase)
-                // only replace the remaining steps and continue in place.
-                const restart = phaseRestartRequired(configData.planPhase, nextPhase);
-                if (restart) {
-                    activeSteps.splice(0, activeSteps.length, ...revisedSteps);
-                    configData.completedSteps = [];
-                    configData.planPhase = nextPhase;
-                    if (planModel) {
-                        configData.planModel = rebuildPlanModelSteps(planModel, revisedSteps, nextPhase);
+            if (decision.valid) {
+                // Without a stored model there is nothing to patch against, so
+                // keep the historical rendered-step splice for legacy runs. This
+                // path is only reachable when configData.planModel was never
+                // stored; it never clears the completion ledger on a phase
+                // change.
+                if (!planModel) {
+                    const revisedSteps = decision.kind === "steps" ? decision.steps : [];
+                    const nextPhase = decision.kind === "steps" ? decision.phase : undefined;
+                    if (revisedSteps.length === 0) {
+                        lastFailure = "Replan returned a structured patch but no plan model is available to apply it.";
+                        configData.replanHistory.push({ attempt, response_id: response.id, reason: feedback.replanReason, applied: false, failure: lastFailure });
+                        if (parseAttempt < maxReplanParseRetries) {
+                            status.warning(`Replan response was not usable; sending a retry request with the validation error appended: ${lastFailure}`, hierarchyIndent("contentInStep"));
+                        }
+                        continue;
                     }
-                    configData.consecutiveNoProgressReplans = 0;
+                    const beforeKey = replanRemainingKey(activeSteps, remainingStart - 1);
+                    activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
+                    if (nextPhase !== undefined) configData.planPhase = nextPhase;
+                    const afterKey = replanRemainingKey(activeSteps, remainingStart - 1);
+                    const progressed = afterKey !== beforeKey;
+                    configData.consecutiveNoProgressReplans = nextConsecutiveNoProgressReplans(
+                        progressed,
+                        configData.consecutiveNoProgressReplans ?? 0,
+                    );
                     configData.replanHistory.push({
                         attempt,
                         stepId,
@@ -1829,22 +1850,40 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                         reason: feedback.replanReason,
                         applied: true,
                         replacementStepCount: revisedSteps.length,
-                        phaseChange: true,
-                        noProgress: false,
+                        noProgress: !progressed,
                     });
                     recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
-                    status.change(`Accepted phase-changing replan: moved into phase \`${String(nextPhase)}\` and restarted the entire plan with ${revisedSteps.length} step${revisedSteps.length === 1 ? "" : "s"}.`, hierarchyIndent("contentInStep"));
-                    logAgentEvent({ event: "plan", status: "restarted", tldr: feedback.replanReason || "Phase-changing replan", steps: activeSteps });
-                    return { attempted: true, applied: true, steps: revisedSteps, restart: true, phase: nextPhase };
+                    throwIfConsecutiveNoProgressReplansReached(configData.consecutiveNoProgressReplans ?? 0, maxConsecutiveNoProgressReplans, step);
+                    status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
+                    logAgentEvent({ event: "plan", status: "revised", tldr: feedback.replanReason || "Revised remaining work", steps: activeSteps });
+                    return { attempted: true, applied: true, steps: revisedSteps, resumeIndex: remainingStart };
                 }
-                activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
-                if (planModel) {
-                    configData.planModel = replacePlanModelRemainingSteps(planModel, remainingStart, revisedSteps);
+                const patch = decision.kind === "patch"
+                    ? decision.patch
+                    : patchFromRevisedSteps(planModel, preservedStepIds, decision.steps, decision.phase);
+                const application = tryApplyPlanPatch(planModel, patch, preservedStepIds);
+                if (!application.valid) {
+                    lastFailure = application.reason;
+                    configData.replanHistory.push({ attempt, response_id: response.id, reason: feedback.replanReason, applied: false, failure: lastFailure });
+                    if (parseAttempt < maxReplanParseRetries) {
+                        status.warning(`Replan patch was not valid; sending a retry request with the validation error appended: ${lastFailure}`, hierarchyIndent("contentInStep"));
+                    }
+                    continue;
                 }
-                const afterKey = replanRemainingKey(activeSteps, completedStepCount);
-                const progressed = afterKey !== beforeKey;
+                const nextModel = application.model;
+                const progress = computeReplanProgress(planModel, nextModel, preservedStepIds, patch);
+                const phaseChanged = nextModel.phase !== configData.planPhase;
+                // The structured model is authoritative: rebuild the rendered
+                // projection from it so execution indices and stable step IDs
+                // stay aligned, then resume from the first pending step. Verified
+                // work is preserved verbatim and never re-executed.
+                const renderedSteps = planStepsFromModel(nextModel);
+                activeSteps.splice(0, activeSteps.length, ...renderedSteps);
+                configData.planModel = nextModel;
+                configData.planPhase = nextModel.phase;
+                const resumeIndex = preservedStepIds.size;
                 configData.consecutiveNoProgressReplans = nextConsecutiveNoProgressReplans(
-                    progressed,
+                    progress.progressed,
                     configData.consecutiveNoProgressReplans ?? 0,
                 );
                 configData.replanHistory.push({
@@ -1853,16 +1892,19 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                     response_id: response.id,
                     reason: feedback.replanReason,
                     applied: true,
-                    replacementStepCount: revisedSteps.length,
-                    noProgress: !progressed,
+                    replacementStepCount: patch.operations.length,
+                    phaseChange: phaseChanged,
+                    noProgress: !progress.progressed,
+                    progressReason: progress.reason,
                 });
                 recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
                 throwIfConsecutiveNoProgressReplansReached(configData.consecutiveNoProgressReplans ?? 0, maxConsecutiveNoProgressReplans, step);
-                status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
+                const phaseNote = phaseChanged ? ` and moved into phase \`${String(nextModel.phase ?? "(none)")}\`` : "";
+                status.change(`Accepted focused replan: applied ${patch.operations.length} patch operation${patch.operations.length === 1 ? "" : "s"}${phaseNote}.`, hierarchyIndent("contentInStep"));
                 logAgentEvent({ event: "plan", status: "revised", tldr: feedback.replanReason || "Revised remaining work", steps: activeSteps });
-                return { attempted: true, applied: true, steps: revisedSteps };
+                return { attempted: true, applied: true, steps: renderedSteps, phaseChange: phaseChanged, phase: nextModel.phase, resumeIndex };
             }
-            lastFailure = validation.reason;
+            lastFailure = decision.reason;
             configData.replanHistory.push({ attempt, response_id: response.id, reason: feedback.replanReason, applied: false, failure: lastFailure });
             if (parseAttempt < maxReplanParseRetries) {
                 status.warning(`Replan response was not valid JSON; sending a retry request with the parsing error appended: ${lastFailure}`, hierarchyIndent("contentInStep"));
@@ -2676,9 +2718,8 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             // snapshot derives every consumer value from one normalized outcome
             // so no consumer re-derives success/failure from the raw stepStatus
             // — and invalid feedback is never remembered or marked as completed
-            // work. executionAttempts is append-only: replans and phase
-            // restarts may clear the completion ledger, but they never erase
-            // this history.
+            // work. executionAttempts is append-only for this execution phase:
+            // replans never clear the completion ledger or this attempt history.
             const snapshot = snapshotStepFeedback({ feedbackEntry, step: index + 1, stepId, stepText: executedStep });
             configData.executionAttempts.push(snapshot.attempt);
             // The completion ledger records only steps with a terminal
@@ -2761,12 +2802,13 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             }
             saveData(configData);
             if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
-            if (replanResult?.restart) {
-                executionOutcomes.clear();
-                // A replan moved the plan into a new phase: executed progress was
-                // already cleared inside attemptReplan and the whole plan was
-                // replaced, so restart execution from the very first step.
-                index = -1; // the for-loop's index += 1 makes this step 0
+            if (replanResult?.applied && Number.isInteger(replanResult.resumeIndex) && replanResult.resumeIndex >= 0) {
+                // A replan rebuilt activeSteps from the preserved plan model.
+                // Resume from the first pending step so verified (succeeded)
+                // work is never re-executed and revised/failed work is attempted
+                // exactly once. A phase/label change no longer restarts
+                // execution or clears the ledgers.
+                index = replanResult.resumeIndex - 1; // the for-loop's index += 1 makes this the first pending step
                 continue;
             }
         }
