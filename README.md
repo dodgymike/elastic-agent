@@ -551,6 +551,16 @@ synthetic fixture and is **not** real runtime data — the real runtime output
 lives under the gitignored `memory-output/` directory. The same session id is
 exercised in `test/memory-compaction.test.ts`.
 
+### Generated artifacts
+
+Runtime memory, log, and state artifacts are kept out of the repository:
+`memory-output/`, the runtime SQLite database (`database.sqlite` and its
+`database.sqlite-*` sidecars), and runtime LLM logs (`llm.log`, `llm2.log`,
+`prompt.log`) are excluded by [`.gitignore`](../.gitignore). Tracked runtime
+artifacts that predate this policy (`database.sqlite`, `llm2.log`) are being
+untracked; see [`docs/ARTIFACT_POLICY.md`](ARTIFACT_POLICY.md) for the full
+metadata-only inventory, the fixture list, and the exact cleanup commands.
+
 ## Tests
 
 ```sh

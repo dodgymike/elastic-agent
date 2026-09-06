@@ -19,6 +19,13 @@ node_modules/
 .env
 dist/
 
+# Generated persistent-memory documents; keep out of the repository.
+memory-output/
+
+# Generated runtime SQLite database and sidecars; keep out of the repository.
+database.sqlite
+database.sqlite-*
+
 # Transient TypeScript test build output.
 test/.ab-enrol-check/
 test/.agent-bus-build/
@@ -44,6 +51,7 @@ test/.plan-handler-build/
 test/.spec-keeper-migration-build/
 test/.spec-keeper-migrate-build/
 test/.tool-call-scheduling-build/
+test/.artifact-policy-build/
 
 # Agent execution worktrees; keep the staging copies out of the repository.
 .worktrees/
@@ -66,8 +74,9 @@ bus-cursor.json.tmp
 data/
 spec-server-setup.md
 
-# Generated runtime LLM prompt/response log; keep out of the repository.
+# Generated runtime LLM prompt/response logs; keep out of the repository.
 llm.log
+llm2.log
 
 # Generated runtime prompt-only log (--log-prompts); may contain sensitive
 # session-memory content; keep out of the repository.
