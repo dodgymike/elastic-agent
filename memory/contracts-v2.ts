@@ -190,6 +190,10 @@ export interface MemoryRetrieveRequestV2 {
   readonly hints?: MemoryJsonObject;
   /** Optional cancellation signal honored between await points. */
   readonly signal?: AbortSignal;
+  /** Optional exclusive lower bound: only events with a greater sequence. */
+  readonly afterSequence?: number;
+  /** Optional page size; stores clamp this to a safe maximum. */
+  readonly limit?: number;
 }
 
 /** Retrieval result. Reports its scope, revision, evidence, and degraded state. */

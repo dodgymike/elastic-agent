@@ -133,3 +133,13 @@ export type {
   MemoryRecordTrust,
   MemoryTrustCategory,
 } from "./privacy.js";
+
+export {
+  EVENT_STORE_DB_VERSION,
+  MemoryEventStore,
+  MemoryEventStoreError,
+  UnsupportedEventStoreSchemaError,
+  UnsupportedEventStoreStorageError,
+  createMemoryEventStore,
+} from "./event-store.js";
+export type { MemoryEventStoreOptions } from "./event-store.js";
