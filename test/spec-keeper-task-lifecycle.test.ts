@@ -4,6 +4,7 @@ import {
   postSpecKeeperTaskNote,
   updateSpecKeeperTaskStatus,
 } from "../specKeeperTaskLifecycle.js";
+import { snapshotStepFeedback } from "../step-outcome.js";
 
 type Call = { path: string; method?: string; body?: unknown };
 
@@ -268,6 +269,74 @@ const record = (calls: Call[]) =>
     assert.equal(malformed.attached, false);
     assert.equal(malformed.method, "none");
     assert.match(malformed.error ?? "", /malformed/);
+  }
+
+  // PI-01 behavioral coverage: the normalized step-outcome reducer's Spec
+  // Keeper statuses are all accepted by the real lifecycle PATCH, and only a
+  // succeeded outcome emits `done`. invalid JSON / failed checks / blocked
+  // tools never become `done`; successful checks and successful non-code
+  // deliverables both become `done`.
+  {
+    const scenarios = [
+      {
+        name: "invalid JSON",
+        feedbackEntry: { valid: false, response_id: "resp-invalid-json", validationError: "Feedback JSON could not be parsed" },
+        expectedStatus: "failed",
+      },
+      {
+        name: "failed checks",
+        feedbackEntry: { valid: true, response_id: "resp-failed-checks", feedback: { stepStatus: "failed", summary: "checks failed", findings: ["lint failed"] } },
+        expectedStatus: "failed",
+      },
+      {
+        name: "blocked tools",
+        feedbackEntry: { valid: true, response_id: "resp-blocked-tool", feedback: { stepStatus: "blocked", summary: "tool unavailable", findings: [] } },
+        expectedStatus: "blocked",
+      },
+      {
+        name: "successful checks",
+        feedbackEntry: { valid: true, response_id: "resp-success-checks", feedback: { stepStatus: "completed", summary: "checks passed", findings: ["lint ok", "test ok"] } },
+        expectedStatus: "done",
+      },
+      {
+        name: "successful non-code deliverables",
+        feedbackEntry: { valid: true, response_id: "resp-success-report", feedback: { stepStatus: "completed", summary: "wrote report", findings: ["deliverable: docs/REPORT.md created"] } },
+        expectedStatus: "done",
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const snapshot = snapshotStepFeedback({
+        feedbackEntry: scenario.feedbackEntry,
+        step: 1,
+        stepText: "Executed step",
+      });
+      assert.equal(
+        snapshot.reduced.specKeeperStatus,
+        scenario.expectedStatus,
+        `${scenario.name}: reducer status must be ${scenario.expectedStatus}`,
+      );
+      // A non-success outcome must never reach the external done status.
+      if (scenario.expectedStatus !== "done") {
+        assert.notEqual(snapshot.reduced.specKeeperStatus, "done", `${scenario.name}: must not emit done`);
+      }
+
+      const calls: Call[] = [];
+      await updateSpecKeeperTaskStatus(
+        "TASK-PI01",
+        snapshot.reduced.specKeeperStatus,
+        snapshot.reduced.specKeeperNote,
+        {},
+        record(calls) as never,
+      );
+      assert.deepEqual(calls, [
+        {
+          path: "/tasks/TASK-PI01",
+          method: "PATCH",
+          body: { status: scenario.expectedStatus, status_note: snapshot.reduced.specKeeperNote },
+        },
+      ]);
+    }
   }
 
   console.log("Spec Keeper task lifecycle fixtures passed");

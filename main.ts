@@ -1,3 +1,4 @@
+import { assertExecutionComplete, stepOutcomeMessage } from "./execution-completion.js";
 import { runPlanningLoop } from "./llm/planning-loop.js";
 import { resolveShellMode } from "./tools/shell-policy.js";
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
@@ -74,10 +75,7 @@ import {
     usageSummary,
 } from "./plan-handler.js";
 import {
-    attemptFromFeedback,
-    hasEvidence,
-    isTerminalOutcome,
-    reduceStepOutcome,
+    snapshotStepFeedback,
 } from "./step-outcome.js";
 import { indent, printPlan } from "./plan-printer.js";
 import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
@@ -2341,42 +2339,6 @@ async function dispatchToolCallsBatch(functionCalls, configData, goalKey): Promi
     return dispatched;
 }
 
-/**
- * Build the secret-free evidence object considered when normalizing one
- * step's execution feedback. Valid feedback contributes only the model's
- * reported stepStatus/summary/findings; invalid or missing feedback
- * contributes only the validation diagnostic. Nothing here reads file
- * contents, data.json, or credentials.
- */
-function buildStepEvidence(feedbackEntry: any): unknown {
-    if (feedbackEntry?.valid && feedbackEntry.feedback) {
-        const feedback = feedbackEntry.feedback;
-        return {
-            stepStatus: typeof feedback.stepStatus === "string" ? feedback.stepStatus : null,
-            summary: typeof feedback.summary === "string" ? feedback.summary : "",
-            findings: Array.isArray(feedback.findings) ? feedback.findings.slice() : [],
-        };
-    }
-    return {
-        validationError: typeof feedbackEntry?.validationError === "string"
-            ? feedbackEntry.validationError
-            : "execution feedback was missing or malformed",
-    };
-}
-
-/**
- * Evidence-presence criterion used to promote a `completed` status to
- * `succeeded`. A step only succeeds when the model supplied at least one
- * non-empty finding or a non-empty summary; a bare `completed` claim with no
- * evidence degrades to `needs-verification` instead of being trusted.
- */
-function stepEvidenceSatisfied(evidence: unknown): boolean {
-    if (Array.isArray(evidence)) return evidence.length > 0;
-    if (!evidence || typeof evidence !== "object") return hasEvidence(evidence);
-    const value = evidence as { findings?: unknown; summary?: unknown };
-    return hasEvidence(value.findings) || hasEvidence(value.summary);
-}
-
 // Emits one non-fatal warning per degradation episode (resets once healthy) so
 // a durable append failure stays visible at the runtime boundary without
 // spamming a warning on every subsequent step.
@@ -2575,13 +2537,13 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
                 feedbackEntry = retryEntry;
                 saveData(configData);
             }
-            status.success(`Step ${index + 1}/${steps.length} completed.`, hierarchyIndent("contentInStep"));
             return feedbackEntry;
         }
     }
 }
 
 async function runExecutionPhase(activeSteps, plan, configData, executionContext = "(none)", useReviewWorktree = false, specKeeperState: any = null, taskLifecycle: any = null) {
+    const executionOutcomes = new Map<number, import("./step-outcome.js").StepOutcome>();
     configData.completedSteps = [];
     configData.executionAttempts = [];
     configData.replanAttemptCount = 0;
@@ -2629,55 +2591,29 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                 );
             }
             const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
-            // Append one normalized attempt record for every executePlanStep
-            // result, regardless of outcome. executionAttempts is append-only:
-            // replans and phase restarts may clear the completion ledger below,
-            // but they never erase this history. The normalized outcome is
-            // derived from the raw stepStatus plus the secret-free evidence in
-            // buildStepEvidence, so a bare `completed` claim without evidence
-            // degrades to needs-verification rather than being trusted.
-            const attemptRecord = attemptFromFeedback({
-                responseId: feedbackEntry?.response_id ?? null,
-                rawStatus: feedbackEntry?.valid ? feedbackEntry.feedback.stepStatus : undefined,
-                evidence: buildStepEvidence(feedbackEntry),
-                evidenceSatisfied: stepEvidenceSatisfied,
-            });
-            configData.executionAttempts.push({
-                step: index + 1,
-                feedbackResponseId: attemptRecord.responseId,
-                rawStatus: attemptRecord.rawStatus,
-                outcome: attemptRecord.outcome,
-                evidence: attemptRecord.evidence,
-                timestamp: attemptRecord.timestamp,
-            });
+            // Reduce one piece of execution feedback into the SAME normalized
+            // outcome used by the local ledgers, memory, Spec Keeper step tasks,
+            // the task-lifecycle progress log, and the review input. The
+            // snapshot derives every consumer value from one normalized outcome
+            // so no consumer re-derives success/failure from the raw stepStatus
+            // — and invalid feedback is never remembered or marked as completed
+            // work. executionAttempts is append-only: replans and phase
+            // restarts may clear the completion ledger, but they never erase
+            // this history.
+            const snapshot = snapshotStepFeedback({ feedbackEntry, step: index + 1, stepText: executedStep });
+            configData.executionAttempts.push(snapshot.attempt);
             // The completion ledger records only steps with a terminal
             // normalized outcome plus the evidence that produced it. A
             // needs-verification attempt stays in executionAttempts for the
             // next replan/review cycle but is never reported as completed work.
-            if (isTerminalOutcome(attemptRecord.outcome)) {
-                configData.completedSteps.push({
-                    step: index + 1,
-                    text: executedStep,
-                    feedbackResponseId: attemptRecord.responseId,
-                    outcome: attemptRecord.outcome,
-                    evidence: attemptRecord.evidence,
-                    timestamp: attemptRecord.timestamp,
-                });
+            if (snapshot.ledgerEntry) {
+                configData.completedSteps.push(snapshot.ledgerEntry);
             }
-            // Memory, Spec Keeper step tasks, and the task-lifecycle progress
-            // log all consume the SAME normalized outcome. The reducer derives
-            // every consumer value from `attemptRecord.outcome` so no consumer
-            // re-derives success/failure from the raw stepStatus — and invalid
-            // feedback is never remembered or marked as completed work.
-            const reduction = reduceStepOutcome(attemptRecord.outcome, {
-                stepNumber: index + 1,
-                summary: feedbackEntry?.valid && feedbackEntry.feedback?.summary
-                    ? feedbackEntry.feedback.summary
-                    : undefined,
-                validationError: feedbackEntry?.valid
-                    ? undefined
-                    : (feedbackEntry?.validationError ?? "execution feedback was missing or malformed"),
-            });
+            const reduction = snapshot.reduced;
+            executionOutcomes.set(index + 1, reduction.outcome);
+            const outcomeMessage = stepOutcomeMessage(index + 1, activeSteps.length, reduction.outcome);
+            if (reduction.terminalSuccess) status.success(outcomeMessage, hierarchyIndent("contentInStep"));
+            else status.warning(outcomeMessage, hierarchyIndent("contentInStep"));
 
             // Memory integration (step 5): record this plan step into the
             // swappable MemoryModule. Fail-safe: rememberAgentStep never
@@ -2741,6 +2677,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             saveData(configData);
             if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
             if (replanResult?.restart) {
+                executionOutcomes.clear();
                 // A replan moved the plan into a new phase: executed progress was
                 // already cleared inside attemptReplan and the whole plan was
                 // replaced, so restart execution from the very first step.
@@ -2748,6 +2685,9 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                 continue;
             }
         }
+        // Stop before review/commit and run-level success updates if any current
+        // step is unresolved. The persisted attempts retain the diagnostic.
+        assertExecutionComplete(activeSteps.length, executionOutcomes);
         if (taskLifecycle) {
             await specKeeperTaskNote(
                 taskLifecycle,

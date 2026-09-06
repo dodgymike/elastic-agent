@@ -19,7 +19,9 @@ const {
     fightingDenialCount,
     reportExecutionFeedback,
     reportAppliedPlanChanges,
+    formatExecutedSteps,
 } = require("./.plan-handler-build/plan-handler.js");
+const { snapshotStepFeedback } = require("./.plan-handler-build/step-outcome.js");
 
 let failures = 0;
 function check(name, cond) {
@@ -224,6 +226,89 @@ const indent = () => "      ";
     const { status, calls } = makeReporter();
     reportAppliedPlanChanges({ localUpdate: null, planUpdates: [], rejectedPlanUpdates: [] }, status, indent);
     check("reportAppliedPlanChanges emits nothing when there are no changes", calls.length === 0);
+}
+
+// 18. PI-01 behavioral coverage: the same five fake feedback entries reduce to
+//     ONE normalized outcome that the local ledgers (attempt + completion
+//     entry), memory, the external Spec Keeper status, and the review input all
+//     agree on. This exercises the real production code path
+//     (snapshotStepFeedback + formatExecutedSteps), not a hand-rolled mirror.
+{
+    const fixtures = [
+        {
+            name: "invalid JSON",
+            feedbackEntry: { valid: false, response_id: "resp-invalid-json", validationError: "Feedback JSON could not be parsed" },
+            stepText: "Run the checks",
+            outcome: "invalid",
+            memory: "unknown",
+            specKeeper: "failed",
+        },
+        {
+            name: "failed checks",
+            feedbackEntry: { valid: true, response_id: "resp-failed-checks", feedback: { stepStatus: "failed", summary: "checks failed", findings: ["lint failed"] } },
+            stepText: "Run the checks",
+            outcome: "failed",
+            memory: "failed",
+            specKeeper: "failed",
+        },
+        {
+            name: "blocked tools",
+            feedbackEntry: { valid: true, response_id: "resp-blocked-tool", feedback: { stepStatus: "blocked", summary: "tool unavailable", findings: [] } },
+            stepText: "Use the sandbox tool",
+            outcome: "blocked",
+            memory: "aborted",
+            specKeeper: "blocked",
+        },
+        {
+            name: "successful checks",
+            feedbackEntry: { valid: true, response_id: "resp-success-checks", feedback: { stepStatus: "completed", summary: "checks passed", findings: ["lint ok", "test ok"] } },
+            stepText: "Run the checks",
+            outcome: "succeeded",
+            memory: "completed",
+            specKeeper: "done",
+        },
+        {
+            name: "successful non-code deliverables",
+            feedbackEntry: { valid: true, response_id: "resp-success-report", feedback: { stepStatus: "completed", summary: "wrote report", findings: ["deliverable: docs/REPORT.md created"] } },
+            stepText: "Write the summary report",
+            outcome: "succeeded",
+            memory: "completed",
+            specKeeper: "done",
+        },
+    ];
+
+    for (const fixture of fixtures) {
+        const snapshot = snapshotStepFeedback({ feedbackEntry: fixture.feedbackEntry, step: 1, stepText: fixture.stepText });
+        check(`${fixture.name}: local attempt outcome is ${fixture.outcome}`, snapshot.attempt.outcome === fixture.outcome);
+        check(`${fixture.name}: completion ledger records the terminal outcome`, snapshot.ledgerEntry !== null && snapshot.ledgerEntry.outcome === fixture.outcome);
+        check(`${fixture.name}: completion ledger carries the executed step text`, snapshot.ledgerEntry !== null && snapshot.ledgerEntry.text === fixture.stepText);
+        check(
+            `${fixture.name}: ledger evidence is secret-free (no data.json/file contents)`,
+            snapshot.ledgerEntry !== null && !JSON.stringify(snapshot.ledgerEntry.evidence).includes("data.json"),
+        );
+        check(`${fixture.name}: memory outcome agrees (${fixture.memory})`, snapshot.reduced.memoryOutcome === fixture.memory);
+        check(`${fixture.name}: external Spec Keeper status agrees (${fixture.specKeeper})`, snapshot.reduced.specKeeperStatus === fixture.specKeeper);
+        check(
+            `${fixture.name}: review input renders the step with the normalized outcome`,
+            formatExecutedSteps([snapshot.ledgerEntry]) === `1. ${fixture.stepText} [${fixture.outcome}]`,
+        );
+        // The four consumers must agree: success is the only way to reach
+        // `done`/`completed`, and a non-success outcome can never look done.
+        check(
+            `${fixture.name}: done/completed agree with the normalized outcome`,
+            (snapshot.reduced.specKeeperStatus === "done") === (snapshot.reduced.memoryOutcome === "completed") &&
+                (snapshot.reduced.specKeeperStatus === "done") === (fixture.outcome === "succeeded"),
+        );
+    }
+
+    // Invalid JSON must never emit done/completed anywhere in the fan-out.
+    {
+        const invalid = snapshotStepFeedback({ feedbackEntry: { valid: false, response_id: "resp-invalid-2", validationError: "bad shape" }, step: 2, stepText: "Do the work" });
+        check("invalid JSON: local ledger outcome is never succeeded", invalid.ledgerEntry !== null && invalid.ledgerEntry.outcome !== "succeeded");
+        check("invalid JSON: memory outcome is never completed", invalid.reduced.memoryOutcome !== "completed");
+        check("invalid JSON: external status is never done", invalid.reduced.specKeeperStatus !== "done");
+        check("invalid JSON: spec keeper note carries the diagnostic", invalid.reduced.specKeeperNote.includes("outcome invalid"));
+    }
 }
 
 if (failures === 0) { console.log("\nAll plan-handler tests passed."); process.exit(0); }

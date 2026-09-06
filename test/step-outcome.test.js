@@ -16,6 +16,9 @@ const {
     specKeeperStepNoteFromOutcome,
     taskLifecycleNoteFromOutcome,
     reduceStepOutcome,
+    feedbackEvidence,
+    feedbackEvidenceSatisfied,
+    snapshotStepFeedback,
 } = require("./.step-outcome-build/step-outcome.js");
 
 let failures = 0;
@@ -300,6 +303,88 @@ function check(name, cond) {
     const blocked = { valid: true, response_id: "resp-block", feedback: { stepStatus: "blocked", summary: "tool unavailable", findings: [] } };
     const blockedDispatch = dispatchForFeedback(blocked, 4);
     check("fake clients: blocked maps to blocked (not done)", blockedDispatch.reduction.outcome === "blocked" && blockedDispatch.clients.specKeeper.stepTaskUpdates[0].status === "blocked");
+}
+
+// 18. PI-01 behavioral coverage: the five requested fake feedback entries
+//     (invalid JSON, failed checks, blocked tools, successful checks, and
+//     successful non-code deliverables) reduce through snapshotStepFeedback
+//     into one normalized outcome that the local ledgers, memory, external
+//     Spec Keeper status, and review input all agree on. The review line is the
+//     exact formatExecutedSteps contract: "N. text [outcome]".
+{
+    const reviewLine = (entry) => `${entry.step}. ${entry.text}${entry.outcome ? ` [${entry.outcome}]` : ""}`;
+    const fixtures = [
+        {
+            name: "invalid JSON",
+            entry: { valid: false, response_id: "resp-invalid-json", validationError: "Feedback JSON could not be parsed" },
+            stepText: "Run the checks",
+            outcome: "invalid",
+            memory: "unknown",
+            specKeeper: "failed",
+        },
+        {
+            name: "failed checks",
+            entry: { valid: true, response_id: "resp-failed-checks", feedback: { stepStatus: "failed", summary: "checks failed", findings: ["lint failed"] } },
+            stepText: "Run the checks",
+            outcome: "failed",
+            memory: "failed",
+            specKeeper: "failed",
+        },
+        {
+            name: "blocked tools",
+            entry: { valid: true, response_id: "resp-blocked-tool", feedback: { stepStatus: "blocked", summary: "tool unavailable", findings: [] } },
+            stepText: "Use the sandbox tool",
+            outcome: "blocked",
+            memory: "aborted",
+            specKeeper: "blocked",
+        },
+        {
+            name: "successful checks",
+            entry: { valid: true, response_id: "resp-success-checks", feedback: { stepStatus: "completed", summary: "checks passed", findings: ["lint ok", "test ok"] } },
+            stepText: "Run the checks",
+            outcome: "succeeded",
+            memory: "completed",
+            specKeeper: "done",
+        },
+        {
+            name: "successful non-code deliverables",
+            entry: { valid: true, response_id: "resp-success-report", feedback: { stepStatus: "completed", summary: "wrote report", findings: ["deliverable: docs/REPORT.md created"] } },
+            stepText: "Write the summary report",
+            outcome: "succeeded",
+            memory: "completed",
+            specKeeper: "done",
+        },
+    ];
+
+    for (const fixture of fixtures) {
+        const snapshot = snapshotStepFeedback({ feedbackEntry: fixture.entry, step: 1, stepText: fixture.stepText });
+        check(`${fixture.name}: attempt outcome is ${fixture.outcome}`, snapshot.attempt.outcome === fixture.outcome);
+        check(`${fixture.name}: completion ledger records ${fixture.outcome}`, snapshot.ledgerEntry !== null && snapshot.ledgerEntry.outcome === fixture.outcome);
+        check(`${fixture.name}: ledger carries executed step text`, snapshot.ledgerEntry !== null && snapshot.ledgerEntry.text === fixture.stepText);
+        check(`${fixture.name}: reduced outcome matches ledger outcome`, snapshot.reduced.outcome === snapshot.ledgerEntry.outcome);
+        check(`${fixture.name}: memory outcome agrees (${fixture.memory})`, snapshot.reduced.memoryOutcome === fixture.memory);
+        check(`${fixture.name}: external Spec Keeper status agrees (${fixture.specKeeper})`, snapshot.reduced.specKeeperStatus === fixture.specKeeper);
+        check(
+            `${fixture.name}: review input renders the normalized outcome`,
+            reviewLine(snapshot.ledgerEntry) === `1. ${fixture.stepText} [${fixture.outcome}]`,
+        );
+        check(
+            `${fixture.name}: done/completed only when the outcome is succeeded`,
+            (snapshot.reduced.specKeeperStatus === "done") === (fixture.outcome === "succeeded") &&
+                (snapshot.reduced.memoryOutcome === "completed") === (fixture.outcome === "succeeded"),
+        );
+    }
+
+    // Evidence builders stay secret-free and honor the documented criteria.
+    {
+        const validEvidence = feedbackEvidence({ valid: true, feedback: { stepStatus: "completed", summary: "ok", findings: ["f"] } });
+        check("feedbackEvidence: valid entry contributes summary/findings only", validEvidence.summary === "ok" && validEvidence.findings[0] === "f");
+        const invalidEvidence = feedbackEvidence({ valid: false, validationError: "bad shape" });
+        check("feedbackEvidence: invalid entry contributes only the diagnostic", invalidEvidence.validationError === "bad shape" && !("findings" in invalidEvidence));
+        check("feedbackEvidenceSatisfied: non-empty findings satisfy", feedbackEvidenceSatisfied({ findings: ["f"], summary: "" }) === true);
+        check("feedbackEvidenceSatisfied: non-empty summary satisfies", feedbackEvidenceSatisfied({ findings: [], summary: "done" }) === true);
+        check("feedbackEvidenceSatisfied: empty findings+summary do not satisfy", feedbackEvidenceSatisfied({ findings: [], summary: "" }) === false);
+    }
 }
 
 if (failures === 0) { console.log("\nAll step-outcome tests passed."); process.exit(0); }

@@ -340,3 +340,167 @@ export function reduceStepOutcome(outcome: StepOutcome, input: StepOutcomeNoteIn
         taskLifecycleNote: taskLifecycleNoteFromOutcome(outcome, input),
     };
 }
+
+/* -------------------------------------------------------------------------
+ * Execution-feedback snapshot
+ *
+ * The execution loop funnels every executePlanStep result through one reducer
+ * and then fans the single normalized outcome out to the local ledgers
+ * (executionAttempts / completedSteps), memory, Spec Keeper step tasks, the
+ * task-lifecycle progress log, and the review input. `snapshotStepFeedback`
+ * computes that entire fan-out in one place so every consumer agrees on the
+ * same outcome and so the behavior can be tested without booting main.ts.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Secret-free evidence built from one execution-feedback entry. Valid feedback
+ * contributes only the model-reported stepStatus/summary/findings; invalid or
+ * missing feedback contributes only the validation diagnostic. Nothing here
+ * reads file contents, data.json, or credentials.
+ */
+export function feedbackEvidence(feedbackEntry: unknown): unknown {
+    const entry = feedbackEntry as any;
+    if (entry?.valid && entry.feedback) {
+        const feedback = entry.feedback;
+        return {
+            stepStatus: typeof feedback.stepStatus === "string" ? feedback.stepStatus : null,
+            summary: typeof feedback.summary === "string" ? feedback.summary : "",
+            findings: Array.isArray(feedback.findings) ? feedback.findings.slice() : [],
+        };
+    }
+    return {
+        validationError: typeof entry?.validationError === "string"
+            ? entry.validationError
+            : "execution feedback was missing or malformed",
+    };
+}
+
+/**
+ * Evidence-presence criterion used to promote a `completed` status to
+ * `succeeded`. A step only succeeds when the model supplied at least one
+ * non-empty finding or a non-empty summary; a bare `completed` claim with no
+ * evidence degrades to `needs-verification` instead of being trusted.
+ */
+export function feedbackEvidenceSatisfied(evidence: unknown): boolean {
+    if (Array.isArray(evidence)) return evidence.length > 0;
+    if (!evidence || typeof evidence !== "object") return hasEvidence(evidence);
+    const value = evidence as { findings?: unknown; summary?: unknown };
+    return hasEvidence(value.findings) || hasEvidence(value.summary);
+}
+
+/** Append-only execution-attempt entry recorded in `configData.executionAttempts`. */
+export interface StepAttemptEntry {
+    /** One-based plan step number. */
+    readonly step: number;
+    /** Provider response id the feedback came from, or null when unavailable. */
+    readonly feedbackResponseId: string | null;
+    /** The raw, unmodified `stepStatus` value (null when it was absent). */
+    readonly rawStatus: unknown;
+    /** The normalized outcome derived from the raw status plus evidence. */
+    readonly outcome: StepOutcome;
+    /** The secret-free evidence considered when normalizing the outcome. */
+    readonly evidence: unknown;
+    /** ISO-8601 timestamp when the attempt was recorded. */
+    readonly timestamp: string;
+}
+
+/** Completion-ledger entry recorded in `configData.completedSteps` for terminal outcomes. */
+export interface StepLedgerEntry {
+    /** One-based plan step number. */
+    readonly step: number;
+    /** The plan step text that was executed. */
+    readonly text: string;
+    /** Provider response id the feedback came from, or null when unavailable. */
+    readonly feedbackResponseId: string | null;
+    /** The normalized terminal outcome (succeeded/failed/blocked/invalid). */
+    readonly outcome: StepOutcome;
+    /** The secret-free evidence that produced the outcome. */
+    readonly evidence: unknown;
+    /** ISO-8601 timestamp when the entry was recorded. */
+    readonly timestamp: string;
+}
+
+/** One feedback entry reduced into every consumer's per-step values. */
+export interface StepFeedbackSnapshot {
+    /** The append-only `executionAttempts` entry. */
+    readonly attempt: StepAttemptEntry;
+    /** The `completedSteps` ledger entry, or null for a non-terminal outcome. */
+    readonly ledgerEntry: StepLedgerEntry | null;
+    /** Memory / Spec Keeper / task-lifecycle values derived from the same outcome. */
+    readonly reduced: ReducedStepOutcome;
+}
+
+export interface StepFeedbackSnapshotInput extends AttemptFromFeedbackInput {
+    /**
+     * The raw executePlanStep feedback entry: `{ valid, feedback, response_id,
+     * validationError }`. Used to derive the raw status, evidence, and notes
+     * unless the corresponding explicit override is supplied.
+     */
+    readonly feedbackEntry?: unknown;
+    /** One-based plan step number (defaults to 1). */
+    readonly step?: number;
+    /** The executed plan step text recorded on the completion ledger (defaults to "Plan step N"). */
+    readonly stepText?: string;
+}
+
+/**
+ * Reduce one execution-feedback entry into the complete fan-out consumed by
+ * the execution loop: the append-only attempt entry, the terminal-only
+ * completion-ledger entry, and the memory/Spec Keeper/task-lifecycle values.
+ *
+ * The normalized outcome is always recomputed via `outcomeFromFeedback`, so a
+ * `completed` claim with no acceptable evidence is recorded as
+ * `needs-verification` (and therefore absent from the completion ledger),
+ * never as succeeded.
+ */
+export function snapshotStepFeedback(input: StepFeedbackSnapshotInput = {}): StepFeedbackSnapshot {
+    const step = Number.isInteger(input.step) ? (input.step as number) : 1;
+    const stepText = typeof input.stepText === "string" && input.stepText.trim().length > 0
+        ? input.stepText
+        : `Plan step ${step}`;
+    const entry = input.feedbackEntry as any;
+    const valid = Boolean(entry?.valid && entry?.feedback);
+    const evidence = input.evidence !== undefined ? input.evidence : feedbackEvidence(entry);
+    const attemptRecord = attemptFromFeedback({
+        responseId: input.responseId !== undefined
+            ? input.responseId
+            : (entry?.response_id === undefined ? null : entry.response_id),
+        rawStatus: input.rawStatus !== undefined
+            ? input.rawStatus
+            : (valid ? entry.feedback.stepStatus : undefined),
+        evidence,
+        evidenceSatisfied: input.evidenceSatisfied !== undefined ? input.evidenceSatisfied : feedbackEvidenceSatisfied,
+        requireEvidence: input.requireEvidence,
+        timestamp: input.timestamp,
+    });
+    const attempt: StepAttemptEntry = {
+        step,
+        feedbackResponseId: attemptRecord.responseId,
+        rawStatus: attemptRecord.rawStatus,
+        outcome: attemptRecord.outcome,
+        evidence: attemptRecord.evidence,
+        timestamp: attemptRecord.timestamp,
+    };
+    const ledgerEntry: StepLedgerEntry | null = isTerminalOutcome(attemptRecord.outcome)
+        ? {
+            step,
+            text: stepText,
+            feedbackResponseId: attemptRecord.responseId,
+            outcome: attemptRecord.outcome,
+            evidence: attemptRecord.evidence,
+            timestamp: attemptRecord.timestamp,
+        }
+        : null;
+    const reduced = reduceStepOutcome(attemptRecord.outcome, {
+        stepNumber: step,
+        summary: valid && typeof entry.feedback.summary === "string"
+            ? entry.feedback.summary
+            : undefined,
+        validationError: valid
+            ? undefined
+            : (typeof entry?.validationError === "string"
+                ? entry.validationError
+                : "execution feedback was missing or malformed"),
+    });
+    return { attempt, ledgerEntry, reduced };
+}
