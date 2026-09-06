@@ -1,6 +1,6 @@
 # MI-02 — Enforce privacy and trust at memory ingestion and output
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-01](01-contracts-and-identity.md)
 
@@ -62,14 +62,36 @@ Do not scan existing personal logs, credential stores, or `data.json` during imp
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01 commits 0d732be/0dfa638 present.
+Prerequisite evidence: MI-01 DONE (0d732be, 0dfa638).
+Reproduction / old behavior: persistent.ts sanitizeJson only made values serializable; multi-turn-runtime printed full prompts on adapter errors and wrote full prompt/response to llm.log; no trust categories or path-safety checks existed.
 Changed files and behavior:
+  - memory/privacy.ts (new): applyMemoryPrivacy/sanitizeMemoryJson/redactMemoryText; trust categories + deriveMemoryTrust/isAuthoritativeTrust; MEMORY_PRIVACY_POLICY_VERSION; assertSafeMemoryStatePath.
+  - memory/persistent.ts: redact before summarizer, persistence, and retrieval; per-step trust; privacyPolicyVersion; owner-only writes; symlink/ownership path checks.
+  - llm/multi-turn-runtime.ts: metadata-only adapter errors; redacted llm.log and opt-in prompt.log; redacted memory failure diagnostics.
+  - memory/index.ts: export the privacy surface.
+  - test/llm-log.test.ts: adapter-error test updated to assert metadata-only stderr.
+  - test/memory-privacy.test.ts (new): trust, rejection/truncation, owner-only state, symlink rejection, false-positive survival.
+  - docs/MEMORY_PRIVACY_POLICY.md (new): retained/never-retained policy and revision.
+  - package.json: add test:memory-privacy; wire memory/privacy.ts into build and affected memory/llm test scripts.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-privacy -> exit 0
+  - npm run test:llm-log -> exit 0
+  - npm run test:prompt-logger -> exit 0
+  - npm run test:multi-turn-memory -> exit 0
+  - npm run test:memory-contract-v2 -> exit 0
+  - npm run test:persistent-memory -> exit 0
+  - npm run test:composite-memory -> exit 0
+  - npm run test:memory-compaction -> exit 0
+  - npm run test:memory -> exit 0
+  - npm run test:memory-selection -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+  - one-off tsx redaction check: absent=true redacted=true for an sk-style sentinel.
+Schema / configuration / compatibility changes: persistent documents now carry privacyPolicyVersion=1 and per-step trust; no default backend change.
+Residual limitations and follow-up IDs: the workspace safety classifier rejects test sources containing credential-shaped fixtures, so direct secret-absence assertions are not embedded in the committed test; redaction is verified via production code, a one-off runtime check, and the metadata-only stderr test. Retrospective cleanup remains MI-13. No live logs or personal memory were scanned.
+Rollback notes: remove the additive privacy module and its call sites; existing documents without privacyPolicyVersion remain readable (field is additive).
+Implementation commit(s): 8ff18b8 (implementation + tests + docs); completion record commit follows.
 ```
