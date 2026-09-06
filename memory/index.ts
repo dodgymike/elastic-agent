@@ -184,3 +184,17 @@ export type {
   StructuredRecordStatusV2,
   StructuredRecordV2,
 } from "./structured-records.js";
+
+export {
+  DETERMINISTIC_SUMMARIZER_VERSION,
+  INCREMENTAL_SUMMARY_POLICY_VERSION,
+  IncrementalSummaryManager,
+  deterministicIncrementalSummarize,
+} from "./incremental-summary.js";
+export type {
+  IncrementalSummarizeInput,
+  IncrementalSummarizer,
+  IncrementalSummaryOptions,
+  SummaryAdvanceResult,
+  SummaryCheckpointV2,
+} from "./incremental-summary.js";
