@@ -112,7 +112,7 @@ async function testInitialLog(): Promise<void> {
   }
 }
 
-async function testLlmAdapterErrorPrintsPrompt(): Promise<void> {
+async function testLlmAdapterErrorIsMetadataOnly(): Promise<void> {
   const originalConsoleError = console.error;
   let captured = "";
   console.error = ((...args: unknown[]) => {
@@ -129,7 +129,15 @@ async function testLlmAdapterErrorPrintsPrompt(): Promise<void> {
   try {
     await assert.rejects(runtime.create({ input: "prompt that caused the failure" }), /invalid JSON response/);
     assert.ok(captured.includes("[LLM ADAPTER ERROR]"), "adapter errors should print a marker");
-    assert.ok(captured.includes("prompt that caused the failure"), "adapter errors should print the prompt that caused the error");
+    assert.ok(captured.includes("provider=deepseek-v4"), "adapter errors should report the provider");
+    assert.ok(captured.includes("code=provider"), "adapter errors should report the error code");
+    assert.ok(captured.includes("requestType=initial"), "adapter errors should report the request type");
+    assert.ok(captured.includes("model=deepseek-model"), "adapter errors should report the model");
+    assert.ok(captured.includes("DeepSeek returned an invalid JSON response."), "adapter errors should report the error message");
+    assert.ok(
+      !captured.includes("prompt that caused the failure"),
+      "adapter errors must be metadata-only and must not print prompt content",
+    );
   } finally {
     console.error = originalConsoleError;
   }
@@ -158,7 +166,7 @@ async function testLlmLogToolCallResponse(): Promise<void> {
 (async () => {
   await testLlmLog();
   await testInitialLog();
-  await testLlmAdapterErrorPrintsPrompt();
+  await testLlmAdapterErrorIsMetadataOnly();
   await testLlmLogToolCallResponse();
   console.log("LLM log fixtures passed");
 })().catch((error) => {

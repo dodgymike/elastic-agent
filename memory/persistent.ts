@@ -33,6 +33,14 @@
 
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import {
+  assertSafeMemoryStatePath,
+  deriveMemoryTrust,
+  MEMORY_PRIVACY_POLICY_VERSION,
+  redactMemoryText,
+  sanitizeMemoryJson,
+  type MemoryRecordTrust,
+} from "./privacy.js";
 import type {
   ContextRequest,
   MemoryContextResult,
@@ -76,6 +84,8 @@ export interface PersistentStepRecord {
   readonly description?: string;
   /** ISO-8601 timestamp of step completion (may be absent). */
   readonly timestamp?: string;
+  /** Provenance/trust category for this record (see MI-02). */
+  readonly trust?: MemoryRecordTrust;
 }
 
 /**
@@ -86,6 +96,8 @@ export interface PersistentStepRecord {
 export interface PersistentMemoryDocument {
   /** Schema/version marker. */
   readonly version: 1;
+  /** Privacy policy revision stamped into the stored document (MI-02). */
+  readonly privacyPolicyVersion: number;
   /** The session this document belongs to. */
   readonly session_id: string;
   /** Optional user/principal id from the remembered context. */
@@ -187,7 +199,7 @@ export class PersistentMemoryModule implements MemoryModule {
     const previous = this.summaryBySession.get(sessionId);
     try {
       const next = await this.summarizer({ sessionId, previousSummary: previous, entries: toEntries(history) });
-      this.summaryBySession.set(sessionId, next);
+      this.summaryBySession.set(sessionId, redactMemoryText(next));
     } catch (error) {
       report.summarizerFailed = true;
       report.errorMessages = [...report.errorMessages, summarizeError(error)];
@@ -253,11 +265,13 @@ export class PersistentMemoryModule implements MemoryModule {
       errorMessages: [],
     };
     try {
-      summary = await this.summarizer({
-        sessionId,
-        previousSummary: summary || undefined,
-        entries: toEntries(history),
-      });
+      summary = redactMemoryText(
+        await this.summarizer({
+          sessionId,
+          previousSummary: summary || undefined,
+          entries: toEntries(history),
+        }),
+      );
       this.summaryBySession.set(sessionId, summary);
     } catch (error) {
       report.summarizerFailed = true;
@@ -267,12 +281,13 @@ export class PersistentMemoryModule implements MemoryModule {
     const firstContext = history[0]?.context;
     const document: PersistentMemoryDocument = {
       version: 1,
+      privacyPolicyVersion: MEMORY_PRIVACY_POLICY_VERSION,
       session_id: sessionId,
       user_id: firstContext?.user_id,
-      plan: toJsonValue(firstContext?.plan),
+      plan: sanitizeMemoryJson(firstContext?.plan),
       persistedAt: new Date().toISOString(),
       stepCount: steps.length,
-      summary,
+      summary: redactMemoryText(summary),
       steps,
     };
 
@@ -331,7 +346,7 @@ export class PersistentMemoryModule implements MemoryModule {
     const sessionId = request.session_id;
     const history = this.historyBySession.get(sessionId) ?? [];
     const summary = this.summaryBySession.get(sessionId);
-    let text = summary ?? "";
+    let text = redactMemoryText(summary ?? "");
     if (text.length === 0 && history.length > 0) {
       text = `Session ${sessionId}: ${history.length} step(s) remembered, no summary available.`;
     }
@@ -372,11 +387,11 @@ export const createPersistentMemoryModule: MemoryModuleFactory = (
 function toEntries(history: readonly RememberInput[]): MemorySummarizeInput["entries"] {
   return history.map((input, index) => ({
     entryAt: index + 1,
-    context: input.context,
+    context: { ...input.context, context: sanitizeMemoryJson(input.context.context) },
     actions: input.actions.map((action) => action.name),
     outcome: input.outcome,
-    outcomeDetail: input.outcomeDetail,
-    reasoning: input.reasoning,
+    outcomeDetail: sanitizeMemoryJson(input.outcomeDetail),
+    reasoning: input.reasoning === undefined ? undefined : redactMemoryText(input.reasoning),
     timestamp: input.timestamp,
   }));
 }
@@ -388,32 +403,12 @@ function toStepRecord(input: RememberInput, step: number): PersistentStepRecord 
     step,
     actions: input.actions.map((action) => action.name),
     outcome: input.outcome,
-    outcomeDetail: sanitizeJson(input.outcomeDetail),
-    reasoning: input.reasoning,
-    description: first?.description,
+    outcomeDetail: sanitizeMemoryJson(input.outcomeDetail),
+    reasoning: input.reasoning === undefined ? undefined : redactMemoryText(input.reasoning),
+    description: first?.description === undefined ? undefined : redactMemoryText(first.description),
     timestamp: input.timestamp,
+    trust: deriveMemoryTrust(input),
   };
-}
-
-/** Sanitize an outcome detail value for JSON persistence. */
-function sanitizeJson(value: MemoryJsonValue | undefined): MemoryJsonValue | undefined {
-  if (value === undefined) return undefined;
-  try {
-    return JSON.parse(JSON.stringify(value)) as MemoryJsonValue;
-  } catch {
-    return String(value);
-  }
-}
-
-/** Convert an opaque plan reference to a JSON-safe value. */
-function toJsonValue(value: unknown): MemoryJsonValue | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value === "string") return value;
-  try {
-    return JSON.parse(JSON.stringify(value)) as MemoryJsonValue;
-  } catch {
-    return String(value);
-  }
 }
 
 /** Replace characters that are unsafe in a filename with a safe marker. */
@@ -424,11 +419,12 @@ function sanitizeFilePart(part: string): string {
 
 /** Write a JSON document atomically (temp file + rename) to `path`. */
 async function atomicWriteJson(path: string, document: PersistentMemoryDocument): Promise<void> {
+  const safePath = assertSafeMemoryStatePath(path);
   const payload = JSON.stringify(document, null, 2);
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, payload, "utf-8");
-  await rename(tmp, path);
+  await mkdir(dirname(safePath), { recursive: true, mode: 0o700 });
+  const tmp = `${safePath}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tmp, payload, { encoding: "utf-8", mode: 0o600 });
+  await rename(tmp, safePath);
 }
 
 function summarizeError(error: unknown): string {

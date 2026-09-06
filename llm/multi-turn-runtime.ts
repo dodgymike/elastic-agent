@@ -11,6 +11,7 @@ import {
   type ToolResultMessage,
 } from "./adapter-contract.js";
 import { type MemoryContextResult, type MemoryModule } from "../memory/types.js";
+import { redactMemoryText } from "../memory/privacy.js";
 import { type RunAbortPhase, throwIfAborted } from "./run-abort.js";
 import {
   appendLlmLog,
@@ -200,7 +201,7 @@ export class MultiTurnLlmRuntime {
         timestamp: nowIso(),
         requestType: prior ? PROMPT_REQUEST_TYPE_TOOL_CONTINUATION : PROMPT_REQUEST_TYPE_INITIAL,
         model,
-        prompt: formatPromptForLog(messages),
+        prompt: redactMemoryText(formatPromptForLog(messages)),
       };
       appendPromptLog(promptRecord);
     }
@@ -214,8 +215,7 @@ export class MultiTurnLlmRuntime {
       throwIfAborted(signal, abortPhase);
       if (error instanceof LlmAdapterError) {
         console.error(
-          `[LLM ADAPTER ERROR] Prompt that caused the ${error.provider} adapter error (${error.code}):\n` +
-          `${formatPrompt(messages)}`,
+          `[LLM ADAPTER ERROR] provider=${error.provider} code=${error.code} requestType=${requestType} model=${model}: ${redactMemoryText(error.message)}`,
         );
       }
       throw error;
@@ -226,8 +226,8 @@ export class MultiTurnLlmRuntime {
       timestamp: nowIso(),
       requestType,
       model,
-      prompt: formatPrompt(messages),
-      response: formatResponse(generated.message),
+      prompt: redactMemoryText(formatPrompt(messages)),
+      response: redactMemoryText(formatResponse(generated.message)),
       usage: generated.usage,
       responseId: id,
     };
@@ -247,11 +247,11 @@ export class MultiTurnLlmRuntime {
     try {
       result = await this.memory.getContext({ session_id: sessionId });
     } catch (error) {
-      console.error(`[MEMORY] getContext failed (non-fatal): ${describeError(error)}`);
+      console.error(`[MEMORY] getContext failed (non-fatal): ${redactMemoryText(describeError(error))}`);
       return input;
     }
     const suffix = memoryContextSuffix(result);
-    return suffix.length > 0 ? `${input}${suffix}` : input;
+    return suffix.length > 0 ? `${input}${redactMemoryText(suffix)}` : input;
   }
 }
 

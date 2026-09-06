@@ -114,3 +114,22 @@ export type {
 } from "./contracts-v2.js";
 
 export { LegacyMemoryModuleAdapter, adaptLegacyMemoryModule } from "./legacy-compat.js";
+
+export {
+  MEMORY_PRIVACY_POLICY_VERSION,
+  UnsafeMemoryStatePathError,
+  applyMemoryPrivacy,
+  assertSafeMemoryStatePath,
+  deriveMemoryTrust,
+  isAuthoritativeTrust,
+  memoryPrivacyPolicyMetadata,
+  redactMemoryText,
+  sanitizeMemoryJson,
+  validateTrustCategory,
+} from "./privacy.js";
+export type {
+  MemoryPrivacyOptions,
+  MemoryPrivacyResult,
+  MemoryRecordTrust,
+  MemoryTrustCategory,
+} from "./privacy.js";
