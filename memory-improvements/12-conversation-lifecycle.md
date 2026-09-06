@@ -1,6 +1,6 @@
 # MI-12 — Bound conversation state and validate continuation ownership
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-01](01-contracts-and-identity.md), [MI-09](09-context-budget-and-cache.md)
 
@@ -39,10 +39,10 @@ choose equivalent locations if current architecture makes them more appropriate.
 
 ## Acceptance criteria
 
-- [ ] Thousands of sequential completed stub conversations leave a bounded number of retained handles and message references.
-- [ ] Unknown, stale, cross-scope, duplicate, and missing result IDs fail before another provider call.
-- [ ] Active tool continuations preserve their initial memory snapshot and remain usable until completed or explicitly canceled.
-- [ ] Releasing a conversation does not delete durable events or change another active conversation.
+- [x] Thousands of sequential completed stub conversations leave a bounded number of retained handles and message references.
+- [x] Unknown, stale, cross-scope, duplicate, and missing result IDs fail before another provider call.
+- [x] Active tool continuations preserve their initial memory snapshot and remain usable until completed or explicitly canceled.
+- [x] Releasing a conversation does not delete durable events or change another active conversation.
 
 ## Validation
 
@@ -61,14 +61,14 @@ Do not expose stale response IDs as a cross-process resume mechanism. Resume rec
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
-Changed files and behavior:
-Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+Status: DONE
+Baseline revision: dfb107e (MI-11 completion)
+Prerequisite evidence: MI-01 DONE (contracts/identity), MI-09 DONE (context budget/cache)
+Reproduction / old behavior: MultiTurnLlmRuntime kept every generated response snapshot in responseStates with no release API; continuation validation only checked that individual tool-call ids existed, so duplicate/omitted ids and stale response ids were not rejected.
+Changed files and behavior: llm/multi-turn-runtime.ts (owned conversation registry + response-id lookup; exact unique continuation validation before any provider call; bounded completed-conversation retention with maxRetainedConversations; releaseConversation/cancelConversation/close; conversationHandle/conversationStats metadata), main.ts (closeRuntimeClient at run boundaries and shutdown), test/multi-turn-lifecycle.test.ts (new behavioral suite), package.json (test:multi-turn-runtime runs the legacy runtime suite plus the new lifecycle suite).
+Validation commands and actual results: npm run test:multi-turn-runtime (exit 0); npm run test:multi-turn-memory (exit 0); npm run test:abort-paths (exit 0); npm run test:memory-context-budget (exit 0); npm run test:memory-safe-compaction (exit 0); npm run build (exit 0); git diff --check (clean).
+Schema / configuration / compatibility changes: optional request fields scope/purpose and response field conversation_id; new constructor option maxRetainedConversations (default 64, 0 releases immediately). previous_response_id remains supported through the owned lookup, but completed/stale response ids are now rejected instead of silently continued.
+Residual limitations and follow-up IDs: conversationStats metadata is the MI-14 handoff; provider response ids are not a cross-process resume mechanism (resume reconstructs from durable scoped evidence).
+Rollback notes: revert llm/multi-turn-runtime.ts and the closeRuntimeClient wiring in main.ts; test/multi-turn-lifecycle.test.ts and the package.json script are additive and can be dropped independently.
+Implementation commit(s): a73932e
 ```
