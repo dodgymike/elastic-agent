@@ -46,8 +46,10 @@ export type MemoryOutcomeAssertionV2 =
   | "completed"
   | "failed"
   | "aborted"
+  | "blocked"
   | "skipped"
-  | "unknown";
+  | "unknown"
+  | "invalid_feedback";
 
 /**
  * How strongly the asserted outcome is supported. Separating assertion from
@@ -262,8 +264,10 @@ const OUTCOME_ASSERTIONS: ReadonlySet<string> = new Set<MemoryOutcomeAssertionV2
   "completed",
   "failed",
   "aborted",
+  "blocked",
   "skipped",
   "unknown",
+  "invalid_feedback",
 ]);
 
 const VERIFICATION_LEVELS: ReadonlySet<string> = new Set<MemoryVerificationLevelV2>([

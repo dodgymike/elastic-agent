@@ -22,6 +22,7 @@ import type {
   MemoryContext,
   MemoryJsonValue,
   MemoryModule,
+  MemoryOutcomeStatus,
   RememberInput,
 } from "./types.js";
 import {
@@ -34,6 +35,7 @@ import {
   type MemoryCloseResultV2,
   type MemoryEventAppendV2,
   type MemoryFlushResultV2,
+  type MemoryOutcomeAssertionV2,
   type MemoryInitResultV2,
   type MemoryModuleV2,
   type MemoryRetrieveRequestV2,
@@ -156,11 +158,18 @@ function toRememberInput(event: MemoryEventAppendV2): RememberInput {
   return {
     context,
     actions: [{ name: event.kind, description: event.runRef }],
-    outcome: event.outcome?.asserted ?? "unknown",
+    outcome: toV1Outcome(event.outcome?.asserted),
     outcomeDetail: event.payload as MemoryJsonValue | undefined,
     reasoning: event.outcome ? `verification=${event.outcome.verification}` : undefined,
     timestamp: event.timestamp,
   };
+}
+
+function toV1Outcome(asserted: MemoryOutcomeAssertionV2 | undefined): MemoryOutcomeStatus {
+  if (asserted === "completed" || asserted === "failed" || asserted === "aborted" || asserted === "skipped") {
+    return asserted;
+  }
+  return "unknown";
 }
 
 function toContextRequest(request: MemoryRetrieveRequestV2): ContextRequest {

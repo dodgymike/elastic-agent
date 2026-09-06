@@ -154,3 +154,15 @@ export {
   quarantineLegacyFile,
 } from "./legacy-import.js";
 export type { LegacyImportOptions, LegacyImportResult } from "./legacy-import.js";
+
+export {
+  RuntimeCheckpointWriter,
+  normalizeRuntimeOutcome,
+  resumeCheckpointedSteps,
+} from "./runtime-checkpoint.js";
+export type {
+  RuntimeCheckpointInput,
+  RuntimeCheckpointOptions,
+  RuntimeCheckpointResult,
+  RuntimeCheckpointStore,
+} from "./runtime-checkpoint.js";
