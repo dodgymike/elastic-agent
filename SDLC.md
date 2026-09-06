@@ -162,3 +162,24 @@ completed execution steps. CLAUDE.md remains the first prompt section.
 The no-plan fast path remains direct execution. Review planning and focused
 replanning retain their existing behavior. Run `npm run test:planning-loop` for
 research-loop regression tests.
+
+## Concise activity log
+
+`agent.log` is appended in the launch directory, even when execution enters a
+worktree. Each line is JSON with a timestamp, session/run IDs, event, concise
+status, and TLDR (at most 240 characters). Plan events include the numbered-by-
+position step summaries; accepted replans are recorded as revised or restarted
+plans. Step events use the normalized outcome and feedback summary, including
+failed, blocked, invalid, and needs-verification outcomes. Exceptions are logged
+as failed or aborted attempts.
+
+Direct tasks log a one-step plan and a `returned` outcome when the direct model
+loop finishes; this label does not claim independent verification. Logging runs
+in quiet modes too, uses existing text redaction, and never fails execution if
+the log cannot be written. The file is gitignored and new files use mode 0600.
+No extra model call is used to create these summaries. Restart running agents
+to enable the new logger; old activity is not backfilled.
+
+Watch activity with `tail -f agent.log`. Run the focused logger test by compiling
+`test/agent-log.test.ts` with the repository TypeScript compiler and executing
+the emitted JavaScript.

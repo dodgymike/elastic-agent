@@ -84,3 +84,6 @@ prompt.log
 
 # Local agent-busctl client build; keep out of the repository.
 agent-busctl
+
+# Concise plan and step outcome log.
+agent.log

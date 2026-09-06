@@ -1,3 +1,4 @@
+import { appendAgentLog, type AgentLogEvent } from "./agent-log.js";
 import { assertExecutionComplete, stepOutcomeMessage } from "./execution-completion.js";
 import { runPlanningLoop } from "./llm/planning-loop.js";
 import { resolveShellMode } from "./tools/shell-policy.js";
@@ -513,6 +514,12 @@ const maxReviewAttempts = 3;
 // attempts so the review step can inspect the staged changes before committing.
 const executionWorktreeBranch = "review-worktree";
 const mainCwd = process.cwd();
+const agentLogPath = join(mainCwd, "agent.log");
+let agentLogRun = "";
+function logAgentEvent(event: Omit<AgentLogEvent, "session" | "run">): void {
+    appendAgentLog(agentLogPath, { ...event, session: agentSessionId, run: agentLogRun });
+}
+
 // System initialisation: capture the working directory (pwd) and the canonical
 // (symlink-resolved) path of the starting directory before any agent action
 // that depends on file paths. These values feed CLAUDE.md starting-directory
@@ -1789,6 +1796,7 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                     });
                     recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
                     status.change(`Accepted phase-changing replan: moved into phase \`${String(nextPhase)}\` and restarted the entire plan with ${revisedSteps.length} step${revisedSteps.length === 1 ? "" : "s"}.`, hierarchyIndent("contentInStep"));
+                    logAgentEvent({ event: "plan", status: "restarted", tldr: feedback.replanReason || "Phase-changing replan", steps: activeSteps });
                     return { attempted: true, applied: true, steps: revisedSteps, restart: true, phase: nextPhase };
                 }
                 activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
@@ -1809,6 +1817,7 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                 recordReplanElapsedAndAssertBudget(configData, step, attemptStart, maxReplanDurationMs);
                 throwIfConsecutiveNoProgressReplansReached(configData.consecutiveNoProgressReplans ?? 0, maxConsecutiveNoProgressReplans, step);
                 status.change(`Accepted focused replan: replaced ${remainingSteps.length} remaining step${remainingSteps.length === 1 ? "" : "s"} with ${revisedSteps.length}.`, hierarchyIndent("contentInStep"));
+                logAgentEvent({ event: "plan", status: "revised", tldr: feedback.replanReason || "Revised remaining work", steps: activeSteps });
                 return { attempted: true, applied: true, steps: revisedSteps };
             }
             lastFailure = validation.reason;
@@ -2603,7 +2612,13 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                     ),
                 );
             }
-            const feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
+            let feedbackEntry;
+            try {
+                feedbackEntry = await executePlanStep(executedStep, index, activeSteps, formatPlan(activeSteps), configData, executionContext);
+            } catch (error) {
+                logAgentEvent({ event: "step", step: index + 1, status: error instanceof RunAbortError ? "aborted" : "failed", tldr: error instanceof Error ? error.message : String(error) });
+                throw error;
+            }
             // Reduce one piece of execution feedback into the SAME normalized
             // outcome used by the local ledgers, memory, Spec Keeper step tasks,
             // the task-lifecycle progress log, and the review input. The
@@ -2623,6 +2638,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                 configData.completedSteps.push(snapshot.ledgerEntry);
             }
             const reduction = snapshot.reduced;
+            logAgentEvent({ event: "step", step: index + 1, status: reduction.outcome, tldr: feedbackEntry?.valid ? (feedbackEntry.feedback.summary || executedStep) : (feedbackEntry?.validationError || "Invalid execution feedback") });
             executionOutcomes.set(index + 1, reduction.outcome);
             const outcomeMessage = stepOutcomeMessage(index + 1, activeSteps.length, reduction.outcome);
             if (reduction.terminalSuccess) status.success(outcomeMessage, hierarchyIndent("contentInStep"));
@@ -2807,6 +2823,7 @@ async function runSingleStep(
     taskLifecycle: any = null,
 ): Promise<void> {
     const stepText = taskMode ? originalPrompt : commandLinePrompt;
+    logAgentEvent({ event: "plan", status: "direct", tldr: stepText, steps: [stepText] });
     configData.completedSteps = [{ step: 1, text: stepText }];
     configData.activePlanSteps = [stepText];
     configData.lastResponseId = null;
@@ -2913,11 +2930,13 @@ async function runSingleStep(
                     outcome: "completed",
                     reasoning: "Direct single-step execution completed.",
                 });
+                logAgentEvent({ event: "step", step: 1, status: "returned", tldr: responseText(response) || "Direct task returned without a formal verification outcome." });
                 status.success("Direct execution step completed.", hierarchyIndent("contentInStep"));
                 return;
             }
         }
     } catch (error) {
+        logAgentEvent({ event: "step", step: 1, status: error instanceof RunAbortError ? "aborted" : "failed", tldr: error instanceof Error ? error.message : String(error) });
         if (skTask) {
             await specKeeperSync("task blocked", async () => updateTaskStatus(
                 skTask,
@@ -2942,6 +2961,7 @@ async function runSingleStep(
  * non-loop entrypoint and the repeating --loop entrypoint.
  */
 async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean; logPrompts?: boolean; maxToolCallParallelism?: number } = {}): Promise<{ success: boolean; loopReplanPending?: boolean }> {
+    agentLogRun = randomUUID();
     // Re-resolve the concurrency bound from the options actually passed into
     // this run so programmatic callers and loop-mode re-entries share one
     // authoritative value (the CLI also validated it once at startup).
@@ -3204,6 +3224,7 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     saveData(configData);
     if (Object.hasOwn(configData, "memory")) saveMemory(configData.memory);
 
+    logAgentEvent({ event: "plan", status: "created", tldr: configData.planTldr || "Execution plan", steps: activeSteps });
     status.success(`Plan created with ${activeSteps.length} step${activeSteps.length === 1 ? "" : "s"}.`);
 
     if (taskLifecycle) {
