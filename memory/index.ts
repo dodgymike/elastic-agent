@@ -69,3 +69,48 @@ export type {
   CompactionSummaryStore,
   MemoryCompactorOptions,
 } from "./memoryCompaction.js";
+
+export {
+  MEMORY_EVENT_SCHEMA_VERSION,
+  assertScopeMatches,
+  buildEventEnvelope,
+  canonicalizeWorkspacePath,
+  computeEventDigest,
+  deriveWorkspaceId,
+  freshEventId,
+  isJsonSafe,
+  parseEventEnvelope,
+  resolveLocalPrincipalId,
+  resolvePrincipalId,
+  scopeFromIdentity,
+  scopesEqual,
+  serializeEventEnvelope,
+  stableEventId,
+  validateEventAppend,
+  validateEventEnvelope,
+  validateIdentity,
+  validateOutcome,
+  validateRetrievalPurpose,
+  validateScope,
+} from "./contracts-v2.js";
+export type {
+  MemoryAppendResultV2,
+  MemoryCapabilitiesV2,
+  MemoryCloseResultV2,
+  MemoryEventAppendV2,
+  MemoryEventEnvelopeV2,
+  MemoryEventKindV2,
+  MemoryFlushResultV2,
+  MemoryIdentityV2,
+  MemoryInitResultV2,
+  MemoryModuleV2,
+  MemoryOutcomeAssertionV2,
+  MemoryOutcomeV2,
+  MemoryRetrieveRequestV2,
+  MemoryRetrieveResultV2,
+  MemoryRetrievalPurposeV2,
+  MemoryScopeV2,
+  MemoryVerificationLevelV2,
+} from "./contracts-v2.js";
+
+export { LegacyMemoryModuleAdapter, adaptLegacyMemoryModule } from "./legacy-compat.js";
