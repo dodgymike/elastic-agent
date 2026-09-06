@@ -359,6 +359,22 @@ process.on("SIGTERM", () => {
     abortController.abort("SIGTERM");
 });
 let client: MultiTurnLlmRuntime;
+/**
+ * Release the runtime's short-lived conversation handles at safe lifecycle
+ * boundaries. `MultiTurnLlmRuntime` retains bounded completed conversations
+ * for resumable continuation, but each CLI run gets a fresh runtime, so the
+ * previous run's handles are dropped before a new one is constructed and again
+ * after the run (or abort) finishes. Durable session memory is owned by the
+ * MemoryModule and is deliberately untouched here.
+ */
+function closeRuntimeClient(): void {
+    if (!client) return;
+    try {
+        client.close();
+    } catch (error) {
+        status.warning(`Could not close the LLM conversation runtime cleanly: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
 // Module-level swappable MemoryModule + session id for LLM prompt context.
 // We instantiate the in-memory store here (swappable via dependency injection:
 // an operator could supply a different MemoryModule factory / delegating chain
@@ -2638,6 +2654,10 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     // this run so programmatic callers and loop-mode re-entries share one
     // authoritative value (the CLI also validated it once at startup).
     runtimeConfig.maxToolCallParallelism = resolveMaxToolCallParallelism(options.maxToolCallParallelism);
+    // Loop/repeat mode re-enters this function for each run; release the
+    // previous run's bounded conversation handles before constructing a fresh
+    // runtime so a long-lived process never accumulates stale transcripts.
+    closeRuntimeClient();
     client = new MultiTurnLlmRuntime(
         await createRuntimeLlmAdapter({ configuration: plannerProviderConfiguration }),
         plannerRuntimeModel,
@@ -3347,12 +3367,14 @@ const entrypointOutcome = options.loop === true
 
 entrypointOutcome
     .then((outcome) => {
+        closeRuntimeClient();
         cleanupExecutionWorktree();
         if (outcome && outcome.success === false) {
             process.exitCode = 1;
         }
     })
     .catch(async (error) => {
+        closeRuntimeClient();
         if (error instanceof RunAbortError) {
             // Deliberate abort: print exactly one concise [ABORT] block, then
             // run best-effort cleanup, persist the abort record, and report to
