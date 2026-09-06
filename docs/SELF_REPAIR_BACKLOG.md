@@ -20,6 +20,25 @@ See [security boundaries and migration](SECURITY_BOUNDARIES.md) and
 regressions, and the mandatory supported-host gate. The assessment below is the
 original review snapshot, not a description of the repaired implementation.
 
+## Spec Keeper mapping snapshot — 2026-09-06 (plan step 2)
+
+All 40 backlog tasks map to Spec Keeper tasks under `self-repair-epic-1` through `self-repair-epic-10`; none are missing. One decision maps to a backlog task (`BUILD-01` → `236db966-7a80-42af-9fa9-5f6dd313fc12`). Statuses as of this mapping:
+
+| Task set | Done | Blocked | In progress | Todo |
+| --- | --- | --- | --- | --- |
+| SEC-01..05 | SEC-01..04 | SEC-05 | — | — |
+| TOOL-01..05 | — | — | — | all |
+| MEM-01..05 | — | — | — | all |
+| PROV-01..04 | — | — | — | all |
+| RUN-01..05 | — | — | — | all |
+| PROMPT-01..03 | — | — | — | all |
+| BUS-01..02 | — | — | — | all |
+| SECLOG-01..03 | — | — | — | all |
+| BUILD-01..02, TEST-01..03 | — | BUILD-01 | — | BUILD-02, TEST-01..03 |
+| SELF-01..03 | — | — | SELF-03 | SELF-01..02 |
+
+Totals: 4 done, 2 blocked, 1 in progress, 33 todo. Blocked items are implemented and await supported-host validation. Open P0 todo items: TOOL-02, TOOL-03, SECLOG-01.
+
 ## Assessment and evidence
 
 The project has useful foundations: a provider-neutral adapter contract, static tool checks with an LLM fallback, hashed file-edit preconditions, dependency-aware tool scheduling, abort handling, several memory backends, and focused tests. Improve these existing boundaries rather than replacing the system wholesale.
