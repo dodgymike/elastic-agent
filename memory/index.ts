@@ -143,3 +143,14 @@ export {
   createMemoryEventStore,
 } from "./event-store.js";
 export type { MemoryEventStoreOptions } from "./event-store.js";
+
+export { loadSession } from "./session-loader.js";
+export type { SessionLoadResultV2 } from "./session-loader.js";
+
+export {
+  DEFAULT_MAX_LEGACY_FILE_BYTES,
+  LEGACY_IMPORT_MIGRATION_VERSION,
+  importLegacyMemoryDocument,
+  quarantineLegacyFile,
+} from "./legacy-import.js";
+export type { LegacyImportOptions, LegacyImportResult } from "./legacy-import.js";

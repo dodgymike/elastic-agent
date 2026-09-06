@@ -410,10 +410,16 @@ Integration details:
 - **Explicit session id (opt-in)** — pass `--session-id <id>` to pin the run's
   session id to an explicit value instead of a generated `run-<uuid>`. The id
   scopes every `remember()` and `getContext()` call and the end-of-plan
-  persistence, so reusing the same `--session-id` across separate runs lets a
-  later turn recall and continue the same session. It is used verbatim for the
-  LLM context and sanitized only when used as a persisted filename. (See the
-  `--session-id` help text and the Step 1 wiring below.)
+  persistence. It is used verbatim for the LLM context and sanitized only when
+  used as a persisted filename. (See the `--session-id` help text and the Step
+  1 wiring below.)
+
+  > **Restart recall status:** the current default persistent backend is
+  > write-only for a finished plan — it has no disk loader, so reusing the same
+  > `--session-id` across runs does not yet restore the previous run's memory
+  > in that backend. Restart recall is demonstrated by the opt-in versioned
+  > event store (`memory/event-store.ts`, MI-03/MI-04); the default backend is
+  > migrated in the rollout task (MI-16).
 
 ## Plan-execution loop wiring
 
