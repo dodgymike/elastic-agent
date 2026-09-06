@@ -35,9 +35,9 @@ All 40 backlog tasks map to Spec Keeper tasks under `self-repair-epic-1` through
 | BUS-01..02 | — | — | — | all |
 | SECLOG-01..03 | — | — | SECLOG-01 | SECLOG-02..03 |
 | BUILD-01..02, TEST-01..03 | — | BUILD-01 | — | BUILD-02, TEST-01..03 |
-| SELF-01..03 | SELF-03 | — | — | SELF-01..02 |
+| SELF-01..03 | — | — | SELF-03 | SELF-01..02 |
 
-Totals: 5 done, 4 blocked, 1 in progress, 30 todo. Blocked items are implemented and await supported-host validation. Open P0 todo items: none (TOOL-02 and TOOL-03 are blocked pending supported-host test verification; SECLOG-01 is in progress, inspected and deferred).
+Totals: 4 done, 4 blocked, 2 in progress, 30 todo. Blocked items are implemented and await supported-host validation. Open P0 todo items: none (TOOL-02 and TOOL-03 are blocked pending supported-host test verification; SECLOG-01 is in progress, inspected and deferred). Step-2 reconciliation (2026-09-06): live SpecKeeper shows SELF-03 in_progress (version 6, note "Executing plan step 2."), so the snapshot above corrects the earlier "SELF-03 done" total of 5 done.
 
 Step-5 progress: TOOL-02 (`a3025a4`) and TOOL-03 (`830ebdd`) were implemented with focused test suites; both are blocked only on supported-host test verification (the dev host's shell sandbox rejects namespace setup). SECLOG-01 was inspected and intentionally deferred rather than changing runtime logging unverified.
 
