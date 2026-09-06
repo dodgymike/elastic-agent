@@ -85,3 +85,15 @@ Residual limitations and follow-up IDs: semantic quality beyond protected facts 
 Rollback notes: remove the additive safe-compaction module and exports; derived summaries rebuild from events.
 Implementation commit(s): 2db6a34 (implementation + tests); completion record commit follows.
 ```
+
+Verification re-check (verification pass, plan step 8): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:memory-safe-compaction, test:memory-compaction,
+    test:memory-compaction-prompt, test:memory-facts, build.
+  - The recorded literal `npx tsc --noEmit ... memory/index.ts` check was run through the
+    dedicated TypeCheck tool (repo-approved fixed flags, memory/index.ts, noEmit); exit 0.
+  - git diff --check clean.
+  - Prerequisites re-confirmed: MI-09 Status DONE (c7c4d0f/57e3dcb); MI-10 implementation
+    commit 2db6a34 and completion-record commit de7ea47 present in git log.
+  - Skipped checks: none. No code change.
