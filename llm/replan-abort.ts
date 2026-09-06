@@ -6,6 +6,7 @@
  */
 
 import { extractJsonFromResponse, type PlanPhase } from "../plan-printer.js";
+import { planStepDisplayString } from "../plan-model.js";
 import { RunAbortError } from "./run-abort.js";
 
 export type ReplanParseResult =
@@ -84,7 +85,7 @@ export function parseReplanResponse(text: string, maxRevisedPlanSteps = DEFAULT_
     if (!Array.isArray(record.steps)) return { valid: false, reason: "Replan response JSON must contain a 'steps' array." };
     if (record.steps.length === 0) return { valid: false, reason: "The revised plan must contain at least one step." };
     if (record.steps.length > maxRevisedPlanSteps) return { valid: false, reason: `The revised plan has more than ${maxRevisedPlanSteps} steps.` };
-    const steps = record.steps.map((step) => typeof step === "string" ? step.trim() : "");
+    const steps = record.steps.map((step) => typeof step === "string" ? step.trim() : planStepDisplayString(step));
     if (steps.some((step) => !step || /^(none|n\/?a|no action)$/i.test(step))) return { valid: false, reason: "The revised plan contains an empty or non-actionable step." };
 
     // The optional top-level "phase" lets the replanner (for very-high-complexity

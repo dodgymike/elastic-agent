@@ -138,5 +138,19 @@ const formatPlan = (steps) => steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
     check("buildReplanRetryPrompt asks for valid JSON", /valid JSON following the requested structure/.test(out));
 }
 
+// 8. PI-03 structured planning prefix: the new structured plan fields flow
+//    through buildPlanningPrompt unchanged, with CLAUDE.md first and the
+//    dynamic request last, exactly once each.
+{
+    const STRUCTURED_PLANNING_PREFIX = [
+        "REQUIRED STRUCTURED PLAN SHAPE:",
+        '{ "planId": "...", "version": 1, "goal": "...", "scope": "...", "steps": [{ "id": 1, "objective": "...", "expectedArtifact": "...", "completionCriteria": ["..."], "dependencies": [] }], "acceptanceCriteria": ["..."] }',
+    ].join("\n");
+    const out = buildPlanningPrompt("Add a structured plan model", STRUCTURED_PLANNING_PREFIX, "Agent instructions");
+    check("structured planning prefix appears after CLAUDE.md", out === `Agent instructions\n\n${STRUCTURED_PLANNING_PREFIX}\n\nAdd a structured plan model`);
+    check("CLAUDE.md appears first and exactly once", out.startsWith("Agent instructions\n\n") && out.split("Agent instructions").length === 2);
+    check("structured fields survive assembly", out.includes('"planId"') && out.includes('"completionCriteria"') && out.includes('"acceptanceCriteria"'));
+}
+
 if (failures === 0) { console.log("\nAll planner-prompt tests passed."); process.exit(0); }
 else { console.error(`\n${failures} test(s) failed.`); process.exit(1); }

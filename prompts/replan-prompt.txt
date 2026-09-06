@@ -16,10 +16,31 @@ ${remainingPlan}
 
 RESPOND IN JSON FORMAT ONLY. Return one of the two shapes below.
 
-A concise, actionable revised plan containing one or more numbered steps:
+PREFERRED — structured revised steps (same step shape as the initial plan):
+{
+  "steps": [{
+    "id": 1,
+    "objective": "what this revised step must accomplish",
+    "expectedArtifact": "the concrete artifact or result this step leaves behind",
+    "completionCriteria": ["checkable, nonempty criterion 1"],
+    "dependencies": []
+  }]
+}
+
+ALSO ACCEPTED — legacy string steps:
 {
   "steps": ["first revised step", "second revised step"]
 }
+
+RULES FOR REVISED STEPS:
+- Return one or more steps; keep the revised list within 50 steps.
+- If you use structured steps, every "id" must be a unique positive integer,
+  "objective" and "completionCriteria" must be non-empty, "expectedArtifact"
+  may be empty, and "dependencies" must reference only ids in the returned
+  list (or []).
+- Do NOT include runtime fields such as "status", "outcome", "verified", or
+  "evidence" on any revised step. The model cannot mark work complete.
+- Replace only the remaining work. Do not repeat completed work.
 
 OPTIONAL TOP-LEVEL FIELD "phase":
 - "phase" is a top-level JSON field that identifies a major stage of work with

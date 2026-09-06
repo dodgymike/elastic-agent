@@ -58,6 +58,7 @@ import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abo
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { parsePlanOrAbort, planStepsFromObject } from "./prompt-parser.js";
+import { planModelFromPlan } from "./plan-model.js";
 import {
     applyExecutionFeedback,
     buildToolsAvailablePrompt,
@@ -3160,28 +3161,40 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     if (parsedPlanningResponse.result.kind === "abort") {
         throw new RunAbortError("unable-to-complete", "planning", parsedPlanningResponse.result.reason);
     }
+
+    const parsedPlan = parsedPlanningResponse.result.plan;
+    // Retain the structured plan model as the authoritative source of truth for
+    // this run. Legacy `step_number` responses are migrated through the
+    // compatibility adapter, so both new and old plans populate configData.planModel.
+    const planModel = planModelFromPlan(parsedPlan);
+    configData.planModel = planModel;
+    configData.planVersion = planModel.version;
+    configData.planId = planModel.planId;
+
     // The full plan summary is non-essential output; quiet/very-quiet suppress
     // it by passing a no-op write callback (the plan is still parsed/recorded).
-    if (outputVerbose) printPlan(parsedPlanningResponse.result.plan);
-    const activeSteps = planStepsFromObject(parsedPlanningResponse.result.plan);
+    if (outputVerbose) printPlan(parsedPlan);
+    // `activeSteps`/`plan` remain rendered strings for the execution and review
+    // loops; the structured object above is the source of truth.
+    const activeSteps = planStepsFromObject(parsedPlan);
     if (activeSteps.length === 0) {
         throw new RunAbortError("unable-to-complete", "planning", "Planning response JSON had steps without usable text.");
     }
     const plan = formatPlan(activeSteps);
+
     // Store the plan's top-level "phase" on the plan state so the handler can
     // recognize the phase the plan is currently in and detect a phase-level
     // change from a later replan (which restarts the whole plan). Only
     // very-high-complexity plans carry a phase; absent stays undefined.
-    configData.planPhase = parsedPlanningResponse.result.plan.phase;
-    // Persist the plan's top-level tldr (a short human summary of the whole
-    // plan) so the end-of-run implementation tldr can recap the plan. The tldr
-    // may be an object, so it is normalized to a plain single-line string.
-    configData.planTldr = planTldrSummary(parsedPlanningResponse.result.plan.tldr);
-    // Persist the plan's `expected_outcome` (the original acceptance criteria)
-    // so the review request can be explicit about what a successful end result
-    // must satisfy. Like planTldr it is normalized to a plain single-line
-    // string and is never a file payload or credential.
-    configData.planExpectedOutcome = planTldrSummary(parsedPlanningResponse.result.plan.expected_outcome);
+    configData.planPhase = planModel.phase;
+    // Persist a short human summary of the whole plan (the structured model's
+    // goal) so the end-of-run implementation tldr can recap the plan.
+    configData.planTldr = planTldrSummary(planModel.goal);
+    // Persist the plan's acceptance criteria so the review request can be
+    // explicit about what a successful end result must satisfy. The criteria
+    // are joined into a single secret-free string, never a file payload or
+    // credential.
+    configData.planExpectedOutcome = planModel.acceptanceCriteria.join("; ");
     configData.replanAttemptCount = 0;
     configData.replanHistory = [];
     configData.consecutiveNoProgressReplans = 0;

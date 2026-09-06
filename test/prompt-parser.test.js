@@ -12,6 +12,13 @@ const {
     planStepsFromObject,
     extractPlanJson,
     parsePlanOrAbort,
+    parsePlanModel,
+    extractPlanModel,
+    parsePlanModelOrAbort,
+    planStepsFromModel,
+    planModelFromPlan,
+    legacyPlanToModel,
+    isPlanModel,
 } = require("./.prompt-parser-build/prompt-parser.js");
 
 let failures = 0;
@@ -155,6 +162,77 @@ const samplePlan = {
 
     const bad = extractPlanJson(JSON.stringify(samplePlan), { requirePhase: true });
     check("extractPlanJson rejects a missing phase when required", bad.valid === false && /phase/.test(bad.reason));
+}
+
+// 11. PI-03 structured schema: round-trip through parsePlanModel preserves
+//     stable IDs, completion criteria, dependencies, and acceptance criteria.
+{
+    const structured = {
+        planId: "PLAN-STRUCTURED",
+        version: 3,
+        goal: "Refactor plan parsing",
+        scope: "parser and printer",
+        steps: [
+            { id: 10, objective: "Add plan-model.ts", expectedArtifact: "plan-model.ts", completionCriteria: ["compiles"], dependencies: [] },
+            { id: 20, objective: "Re-export the model", expectedArtifact: "plan-printer.ts", completionCriteria: ["exports resolve"], dependencies: [10] },
+        ],
+        acceptanceCriteria: ["Structured plans parse", "Legacy plans parse"],
+    };
+    const model = parsePlanModel(JSON.stringify(structured));
+    check("structured parse returns a PlanModel", isPlanModel(model));
+    check("structured parse preserves non-sequential positive ids", model.steps[0].id === 10 && model.steps[1].id === 20);
+    check("structured parse preserves dependency references", model.steps[1].dependencies[0] === 10);
+    check("structured parse preserves acceptance criteria", model.acceptanceCriteria.length === 2);
+    const steps = planStepsFromModel(model);
+    check("structured steps render for prompts/display", steps.length === 2 && steps[0].includes("Add plan-model.ts"));
+    check("planModelFromPlan is identity for structured models", planModelFromPlan(model) === model);
+}
+
+// 12. PI-03 duplicate IDs, cycles, invalid references, and oversize plans are rejected.
+{
+    const baseStep = (id, dependencies = []) => ({ id, objective: `step ${id}`, expectedArtifact: "", completionCriteria: [`check ${id}`], dependencies });
+    const duplicate = { planId: "P", version: 1, goal: "g", scope: "", steps: [baseStep(1), baseStep(1)], acceptanceCriteria: ["done"] };
+    check("prompt-parser rejects duplicate step IDs", throws(() => parsePlanModel(JSON.stringify(duplicate))));
+
+    const cycle = { planId: "P", version: 1, goal: "g", scope: "", steps: [baseStep(1, [2]), baseStep(2, [1])], acceptanceCriteria: ["done"] };
+    check("prompt-parser rejects dependency cycles", throws(() => parsePlanModel(JSON.stringify(cycle))));
+
+    const missing = { planId: "P", version: 1, goal: "g", scope: "", steps: [baseStep(1, [99])], acceptanceCriteria: ["done"] };
+    check("prompt-parser rejects missing dependency references", throws(() => parsePlanModel(JSON.stringify(missing))));
+
+    const threeSteps = [baseStep(1), baseStep(2), baseStep(3)];
+    const oversized = { planId: "P", version: 1, goal: "g", scope: "", steps: threeSteps, acceptanceCriteria: ["done"] };
+    check("prompt-parser rejects oversize structured plans", throws(() => parsePlanModel(JSON.stringify(oversized), { maxSteps: 2 })));
+}
+
+// 13. PI-03 legacy readability: the compatibility adapter migrates legacy
+//     step_number plans while legacy rendering continues to work.
+{
+    const legacyModel = legacyPlanToModel(samplePlan);
+    check("legacy adapter produces unique positive IDs", legacyModel.steps[0].id === 1 && legacyModel.steps[1].id === 2);
+    check("legacy adapter keeps the tldr as the objective", legacyModel.steps[0].objective.includes("Locate the current parsing helpers"));
+    check("legacy adapter derives acceptance criteria from expected_outcome", legacyModel.acceptanceCriteria[0] === samplePlan.expected_outcome);
+    const autoLegacy = parsePlanModel(JSON.stringify(samplePlan));
+    check("parsePlanModel auto-migrates legacy plans", isPlanModel(autoLegacy) && autoLegacy.legacy === true);
+    check("legacy planStepsFromObject remains readable", planStepsFromObject(samplePlan).length === 2);
+}
+
+// 14. PI-03 plan-or-abort boundary accepts structured models and preserves abort semantics.
+{
+    const structured = {
+        planId: "PLAN-ABORT",
+        version: 1,
+        goal: "g",
+        scope: "",
+        steps: [{ id: 1, objective: "one", expectedArtifact: "", completionCriteria: ["done"], dependencies: [] }],
+        acceptanceCriteria: ["done"],
+    };
+    const parsed = parsePlanModelOrAbort(JSON.stringify(structured));
+    check("parsePlanModelOrAbort accepts structured models", parsed.valid && parsed.result.kind === "plan" && parsed.result.plan.planId === "PLAN-ABORT");
+    const abort = parsePlanModelOrAbort('{"abort":true,"reason":"No plan"}');
+    check("parsePlanModelOrAbort preserves abort", abort.valid && abort.result.kind === "abort" && abort.result.reason === "No plan");
+    const extracted = extractPlanModel(`\`\`\`json\n${JSON.stringify(structured)}\n\`\`\``);
+    check("extractPlanModel extracts structured JSON", extracted.valid && extracted.model.planId === "PLAN-ABORT");
 }
 
 if (failures === 0) { console.log("\nAll prompt-parser tests passed."); process.exit(0); }

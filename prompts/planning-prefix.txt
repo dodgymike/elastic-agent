@@ -18,17 +18,41 @@ Intermediate turns may contain tool calls and brief progress explanations.
 When research is complete, RESPOND IN JSON FORMAT ONLY with the final plan or
 abort object below. Ground steps in the evidence and include concrete checks.
 
-EXAMPLE RESPONSE:
+REQUIRED STRUCTURED PLAN SHAPE:
 {
-  "tldr": { },
+  "planId": "PLAN-<short-unique-label>",
+  "version": 1,
+  "goal": "one clear sentence describing the end state the plan must reach",
+  "scope": "what is and is not included; leave empty only when unambiguous",
   "steps": [{
-    "step_number": 1,
-    "tldr": "",
-    "justification": "",
-    "details": ""
+    "id": 1,
+    "objective": "what this step must accomplish",
+    "expectedArtifact": "the concrete artifact or result this step leaves behind",
+    "completionCriteria": ["checkable, nonempty criterion 1", "checkable, nonempty criterion 2"],
+    "dependencies": []
   }],
-  "expected_outcome": ""
+  "acceptanceCriteria": ["overall checkable, nonempty criterion 1"]
 }
+
+RULES FOR THE STRUCTURED SHAPE:
+- "planId" is a non-empty string; "version" is a positive integer.
+- "goal", "scope", and "acceptanceCriteria" describe the WHOLE plan.
+- "acceptanceCriteria" must be a non-empty array of non-empty strings.
+- Every step has a unique positive integer "id", a non-empty "objective",
+  non-empty "completionCriteria", and a "dependencies" array of existing step
+  ids. Use "dependencies" only when a step truly must follow another step; an
+  independent step uses [].
+- "expectedArtifact" names the concrete artifact/result the step produces, or
+  is an empty string when the result is only a state change.
+- Do NOT include runtime fields such as "status", "outcome", "verified", or
+  "evidence" on the plan or on any step. The model cannot mark work complete.
+- Keep the initial plan to at most 50 steps. Prefer the smallest plan that
+  honestly covers the work; do not split one small edit into many steps.
+
+LEGACY PLANS REMAIN READABLE:
+An older plan using {"steps":[{"step_number":1,"tldr":"...","details":"..."}]}
+and "expected_outcome" is still accepted during migration, but new plans MUST
+use the structured shape above.
 
 OPTIONAL TOP-LEVEL FIELD "phase":
 - "phase" is a top-level JSON field that identifies a major stage of work with

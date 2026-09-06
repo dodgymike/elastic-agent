@@ -46,6 +46,13 @@ export {
     planStepsFromObject,
     extractPlanJson,
     parsePlanOrAbort,
+    parsePlanModel,
+    extractPlanModel,
+    parsePlanModelOrAbort,
+    planStepsFromModel,
+    planModelFromPlan,
+    legacyPlanToModel,
+    isPlanModel,
 } from "./prompt-parser.js";
 export type {
     PlanStep,
@@ -55,9 +62,18 @@ export type {
     PlanJsonOptions,
     ParsedPlanOrAbort,
     PlanOrAbortResult,
+    PlanModel,
+    PlanStepModel,
+    PlanModelParseOptions,
+    PlanModelResult,
+    PlanRuntimeState,
+    StepEvidenceReference,
+    PlanModelOrAbort,
+    PlanModelOrAbortResult,
 } from "./prompt-parser.js";
 
-import type { PlanObject, PlanStep } from "./prompt-parser.js";
+import { isPlanModel } from "./prompt-parser.js";
+import type { PlanObject, PlanStep, PlanModel } from "./prompt-parser.js";
 
 /** Fixed indentation width per hierarchy level (spaces). */
 const INDENT = {
@@ -106,6 +122,42 @@ function text(value: unknown, fallback = "(not provided)"): string {
 }
 
 /**
+ * Pretty-print a structured plan model. Rendering is for display only; the
+ * structured object remains the source of truth during execution.
+ */
+function printStructuredPlan(plan: PlanModel, write: (line: string) => void): void {
+    write(`${indent("plan")}PLAN`);
+    write(`${indent("plan")}PLAN ID: ${text(plan.planId)}`);
+    write(`${indent("plan")}VERSION: ${text(plan.version)}`);
+    write(`${indent("plan")}GOAL: ${text(plan.goal)}`);
+    if (plan.scope.length > 0) {
+        write(`${indent("plan")}SCOPE: ${text(plan.scope)}`);
+    }
+    if (plan.phase !== undefined && plan.phase !== null) {
+        write(`${indent("plan")}PHASE: ${text(plan.phase)}`);
+    }
+    write(`${indent("plan")}STEPS:`);
+    if (plan.steps.length === 0) {
+        write(`${indent("contentInStep")}(no steps provided in the plan)`);
+    } else {
+        for (const step of plan.steps) {
+            write(`${indent("planStep")}STEP ${step.id}`);
+            write(`${indent("contentInStep")}OBJECTIVE: ${text(step.objective)}`);
+            if (step.expectedArtifact.length > 0) {
+                write(`${indent("contentInStep")}EXPECTED ARTIFACT: ${text(step.expectedArtifact)}`);
+            }
+            if (step.completionCriteria.length > 0) {
+                write(`${indent("contentInStep")}COMPLETION CRITERIA: ${text(step.completionCriteria.join("; "))}`);
+            }
+            if (step.dependencies.length > 0) {
+                write(`${indent("contentInStep")}DEPENDENCIES: ${text(step.dependencies.join(", "))}`);
+            }
+        }
+    }
+    write(`${indent("plan")}ACCEPTANCE CRITERIA: ${text(plan.acceptanceCriteria.join("; "))}`);
+}
+
+/**
  * Pretty-print a parsed plan object to stdout as readable, separated lines,
  * indented according to the hierarchy (plan=2, plan step=4, content=6 spaces).
  * The write callback defaults to console.log and is parameterized only so
@@ -115,6 +167,11 @@ export function printPlan(plan: unknown, write: (line: string) => void = (line) 
     if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
         write(`${indent("plan")}PLAN`);
         write(`${indent("contentInStep")}(plan could not be displayed: not a JSON object)`);
+        return;
+    }
+
+    if (isPlanModel(plan)) {
+        printStructuredPlan(plan, write);
         return;
     }
 

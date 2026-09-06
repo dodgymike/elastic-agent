@@ -22,6 +22,19 @@
  * where parsing is required.
  */
 
+import {
+    isPlanModel,
+    looksLikeStructuredPlan,
+    normalizePlanModel,
+    legacyPlanToModel,
+    planModelFromPlan,
+    planStepsFromModel,
+    planStepDisplayString,
+    type PlanModel,
+    type PlanModelParseOptions,
+    type PlanModelResult,
+} from "./plan-model.js";
+
 export interface PlanStep {
     step_number?: number | string;
     tldr?: unknown;
@@ -66,7 +79,32 @@ export interface PlanJsonOptions {
      * optional: it may be present (and must then be valid) or absent.
      */
     requirePhase?: boolean;
+    /** Maximum number of steps allowed in an initial structured plan. */
+    maxSteps?: number;
 }
+
+// Re-export the structured plan-model surface so consumers can import the
+// structured schema from this module (and plan-printer.ts) without reaching
+// into plan-model.ts directly.
+export {
+    DEFAULT_MAX_PLAN_STEPS,
+    PLAN_MODEL_SCHEMA_VERSION,
+    isPlanModel,
+    looksLikeStructuredPlan,
+    normalizePlanModel,
+    legacyPlanToModel,
+    planModelFromPlan,
+    planStepsFromModel,
+    planStepDisplayString,
+} from "./plan-model.js";
+export type {
+    PlanModel,
+    PlanStepModel,
+    PlanModelParseOptions,
+    PlanModelResult,
+    PlanRuntimeState,
+    StepEvidenceReference,
+} from "./plan-model.js";
 
 type ExtractResult =
     | { valid: true; plan: ParsedPlan }
@@ -190,12 +228,13 @@ export function parsePlanJson(extracted: string, options: PlanJsonOptions = {}):
 }
 
 /**
- * Convert a validated plan object into the array of step strings used by the
- * agent's execution/review loops. Each step string is its `tldr`, with the
- * `details` appended when present. This is the bridge between the parsed JSON
- * plan object and the existing text-based step flow.
+ * Convert a parsed plan object into the array of step strings used by the
+ * agent's execution/review loops. Structured plan models are rendered from
+ * their objectives/criteria; legacy plans keep their historical `tldr` /
+ * `details` rendering so existing plans remain readable.
  */
-export function planStepsFromObject(plan: PlanObject): string[] {
+export function planStepsFromObject(plan: PlanObject | PlanModel): string[] {
+    if (isPlanModel(plan)) return planStepsFromModel(plan);
     const steps = Array.isArray(plan.steps) ? plan.steps : [];
     const strings = steps
         .map((step) => {
@@ -225,7 +264,7 @@ export function extractPlanJson(text: string, options: PlanJsonOptions = {}): Ex
 
 /** A parsed planning response: either a usable plan or an explicit abort. */
 export type ParsedPlanOrAbort =
-    | { readonly kind: "plan"; readonly plan: ParsedPlan }
+    | { readonly kind: "plan"; readonly plan: ParsedPlan | PlanModel }
     | { readonly kind: "abort"; readonly reason: string };
 
 /** Non-throwing parse result for a planning response that may be a plan or an abort. */
@@ -278,8 +317,108 @@ export function parsePlanOrAbort(text: string, options: PlanJsonOptions = {}): P
         }
     }
 
+    if (looksLikeStructuredPlan(record)) {
+        try {
+            return { valid: true, result: { kind: "plan", plan: normalizePlanModel(record, options) } };
+        } catch (error) {
+            return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+        }
+    }
+
     try {
         return { valid: true, result: { kind: "plan", plan: parsePlanJson(extracted, options) } };
+    } catch (error) {
+        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+/** A parsed plan-model response: either a normalized model or an explicit abort. */
+export type PlanModelOrAbort =
+    | { readonly kind: "plan"; readonly plan: PlanModel }
+    | { readonly kind: "abort"; readonly reason: string };
+
+/** Non-throwing parse result for a planning response that may be a plan model or an abort. */
+export type PlanModelOrAbortResult =
+    | { readonly valid: true; readonly result: PlanModelOrAbort }
+    | { readonly valid: false; readonly reason: string };
+
+/**
+ * Parse an extracted JSON string into a normalized structured `PlanModel`.
+ * Structured schema responses are validated directly; legacy `step_number`
+ * responses are migrated through the compatibility adapter so existing plans
+ * remain readable.
+ */
+export function parsePlanModel(extracted: string, options: PlanJsonOptions = {}): PlanModel {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(extracted);
+    } catch (error) {
+        throw new Error(`Plan model JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Plan model JSON must be an object.");
+    }
+
+    const record = parsed as Record<string, unknown>;
+    if (looksLikeStructuredPlan(record)) {
+        return normalizePlanModel(record, options);
+    }
+    return legacyPlanToModel(record, options);
+}
+
+/**
+ * Extract a JSON plan-model object from response text and return it as a
+ * non-throwing result.
+ */
+export function extractPlanModel(text: string, options: PlanJsonOptions = {}): PlanModelResult {
+    try {
+        const extracted = extractJsonFromResponse(text);
+        return { valid: true, model: parsePlanModel(extracted, options) };
+    } catch (error) {
+        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+/**
+ * Parse a planning response that may contain either a normalized plan model or
+ * the explicit abort object. Abort semantics match `parsePlanOrAbort`.
+ */
+export function parsePlanModelOrAbort(text: string, options: PlanJsonOptions = {}): PlanModelOrAbortResult {
+    let extracted: string;
+    try {
+        extracted = extractJsonFromResponse(text);
+    } catch (error) {
+        return { valid: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(extracted);
+    } catch (error) {
+        return { valid: false, reason: `Planning response JSON could not be parsed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { valid: false, reason: "Planning response JSON is not an object." };
+    }
+
+    const record = parsed as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(record, "abort")) {
+        if (typeof record.abort !== "boolean") {
+            return { valid: false, reason: "Planning response 'abort' must be a boolean." };
+        }
+        if (record.abort === true) {
+            const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+            if (!reason) {
+                return { valid: false, reason: "An aborted planning response must provide a non-empty 'reason'." };
+            }
+            return { valid: true, result: { kind: "abort", reason } };
+        }
+    }
+
+    try {
+        return { valid: true, result: { kind: "plan", plan: parsePlanModel(extracted, options) } };
     } catch (error) {
         return { valid: false, reason: error instanceof Error ? error.message : String(error) };
     }
