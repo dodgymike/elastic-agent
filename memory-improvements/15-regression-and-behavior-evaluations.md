@@ -106,3 +106,39 @@ Rollback notes: remove the three added npm scripts and the new
                  memory/runtime code was changed by this task.
 Implementation commit(s): (see commit referencing MI-15)
 ```
+
+Verification re-check (verification pass, plan step 13): repaired.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    the PATH node/npm pair used by RunPackageScript.
+  - Recorded check `npm run test:memory-regression` initially failed: scenario
+    "retrieval ranks verified evidence, supersedes stale decisions, excludes
+    untrusted constraints, redacts sensitive fields" asserted "verified
+    evidence ranks above unverified claims" and got `unverified`. Root cause:
+    commit 97add63 ("Add hybrid memory retrieval and non-executing prompt
+    interrogation") changed memory/retrieval.ts to sort candidates
+    newest-first before deduplication, so a newer unverified same-subject
+    fact shadowed an older verified fact.
+  - Reproduced with a focused failing test
+    (`testVerifiedEvidenceBeatsNewerUnverifiedClaims` in
+    test/memory-retrieval.test.ts); it failed red before the fix.
+  - Fix: memory/retrieval.ts dedup now keeps the strongest-evidence record on
+    a record-id or kind:subject collision (verified > unverified > refuted);
+    on an evidence tie the newest-first order is preserved. Fix commit
+    bfc0211.
+  - Actual results after fix, all exit 0: test:memory-retrieval,
+    test:memory-regression (13 scenarios; scale-100/scale-1000 measured),
+    test:memory-hybrid-interrogation (related shared-retrieval suite),
+    test:memory-improvements (26 offline suites), build. The recorded
+    `scripts/memory-live-model-quality.ts type-check via tsc --noEmit` was run
+    through the dedicated TypeCheck tool (files
+    scripts/memory-live-model-quality.ts, noEmit) and exits 0.
+  - git diff --check clean.
+  - Prerequisites re-confirmed: MI-10 Status DONE (2db6a34/de7ea47), MI-11
+    Status DONE (1b615eb/dfb107e), MI-12 Status DONE (a73932e/2850313), MI-13
+    Status DONE (be980a5/d582d9e), MI-14 Status DONE (ba5f01a/f488d96); MI-15
+    implementation commit fe83803 present in git log.
+  - Skipped checks: scale-10000 (opt-in via MEMORY_SCALE_INCLUDE_10K=1) and
+    the live-model quality evaluation (no provider config) remain skipped, as
+    recorded originally; never counted as passes.
+  - Pre-existing working-tree changes (.spec-keeper/config, package-lock.json,
+    and untracked files) were left unstaged and untouched.
