@@ -1,6 +1,6 @@
 # MI-06 — Build a structured view of facts, decisions, and unfinished work
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-05](05-runtime-checkpoints-and-outcomes.md)
 
@@ -60,14 +60,24 @@ Structured views are derived data and may be rebuilt; raw sanitized committed ev
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-05 commits present.
+Prerequisite evidence: MI-05 DONE (7c40eca/e79e9ea).
+Reproduction / old behavior: narrative memory could not reliably distinguish old hypotheses from current decisions, completed effects from unfinished work, or supported facts from unsupported claims.
 Changed files and behavior:
+  - memory/structured-records.ts (new): deterministic projection with record kinds fact/decision/constraint/open-task/failure/artifact; protected constraint/open-task maps; explicit supersession/retraction; evidence levels; policy/cursor.
+  - memory/index.ts: export the projection surface.
+  - test/memory-facts.test.ts (new): replay equivalence, retracted decisions, constraint protection, malicious external content, evidence levels, open-work idempotence.
+  - package.json: add test:memory-facts script.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-facts -> exit 0
+  - npm run test:memory-privacy -> exit 0
+  - npm run test:memory-runtime-checkpoint -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: derived projection policyVersion=1; no storage schema change (events remain source of truth).
+Residual limitations and follow-up IDs: optional model extractor not added (deterministic extraction only); topic ranking deferred to MI-08.
+Rollback notes: remove the additive projection module and exports; no stored-data migration required.
+Implementation commit(s): b08954a (implementation + tests); completion record commit follows.
 ```
