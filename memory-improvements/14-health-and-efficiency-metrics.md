@@ -116,5 +116,5 @@ Rollback notes:
   Remove memory/health-metrics.ts, the persistent-v2 recording calls, and the
   backend-factory healthSnapshot routing; delete test/memory-health.test.ts and
   the package.json script. main.ts wiring (if present) is independent.
-Implementation commit(s): (this task's commit; recorded next)
+Implementation commit(s): ba5f01a
 ```
