@@ -185,3 +185,158 @@ export function attemptFromFeedback(input: AttemptFromFeedbackInput = {}): StepA
         timestamp: normalizeTimestamp(input.timestamp),
     };
 }
+
+/* -------------------------------------------------------------------------
+ * Consumer reducers
+ *
+ * The runtime funnels every execution attempt through `outcomeFromFeedback`
+ * first, then maps that single normalized outcome into the values each
+ * consumer needs (memory, Spec Keeper step tasks, task-lifecycle progress
+ * log, and review inputs). Keeping the mappings here prevents any consumer
+ * from re-deriving success/failure from the raw `stepStatus` string and
+ * re-introducing the bug where invalid feedback was remembered as completed.
+ * ------------------------------------------------------------------------- */
+
+/** Memory-contract outcome status (mirrors memory/types.ts MemoryOutcomeStatus). */
+export type MemoryContractOutcome = "completed" | "failed" | "aborted" | "skipped" | "unknown";
+
+/**
+ * Map a normalized step outcome onto the memory contract. Only `succeeded`
+ * becomes `completed`; unverified or invalid outcomes become `unknown` so a
+ * step that merely returned control is never remembered as completed work.
+ */
+export function memoryOutcomeFromOutcome(outcome: StepOutcome): MemoryContractOutcome {
+    switch (outcome) {
+        case "succeeded":
+            return "completed";
+        case "failed":
+            return "failed";
+        case "blocked":
+            return "aborted";
+        case "needs-verification":
+        case "invalid":
+        case "pending":
+        case "running":
+        default:
+            return "unknown";
+    }
+}
+
+/** Spec Keeper step-task statuses emitted by the reducer. */
+export type SpecKeeperStepStatus = "done" | "blocked" | "failed" | "in_progress";
+
+/**
+ * Map a normalized step outcome onto the Spec Keeper step-task lifecycle.
+ * Only `succeeded` becomes `done`. `blocked` maps to blocked, `failed` maps to
+ * an explicit failed status, and `needs-verification`/`invalid` never become
+ * `done` (`needs-verification` stays in_progress; invalid feedback is recorded
+ * as an explicit failed status with a diagnostic note).
+ */
+export function specKeeperStepStatusFromOutcome(outcome: StepOutcome): SpecKeeperStepStatus {
+    switch (outcome) {
+        case "succeeded":
+            return "done";
+        case "blocked":
+            return "blocked";
+        case "failed":
+            return "failed";
+        case "needs-verification":
+            return "in_progress";
+        case "invalid":
+            return "failed";
+        case "pending":
+        case "running":
+        default:
+            return "in_progress";
+    }
+}
+
+/** Inputs shared by the per-consumer note builders. */
+export interface StepOutcomeNoteInput {
+    /** One-based plan step number the note refers to. */
+    readonly stepNumber: number;
+    /** Optional secret-free model summary for the step. */
+    readonly summary?: string;
+    /** Optional validation diagnostic for invalid/malformed feedback. */
+    readonly validationError?: string;
+}
+
+function appendSummary(base: string, summary: string | undefined): string {
+    const trimmed = typeof summary === "string" ? summary.trim() : "";
+    return trimmed.length > 0 ? `${base} ${trimmed}` : base;
+}
+
+function invalidFeedbackDetail(validationError: string | undefined): string {
+    const detail = typeof validationError === "string" ? validationError.trim() : "";
+    return detail.length > 0 ? detail : "execution feedback was missing or malformed";
+}
+
+/** Human-readable diagnostic note for a Spec Keeper step task. */
+export function specKeeperStepNoteFromOutcome(outcome: StepOutcome, input: StepOutcomeNoteInput): string {
+    const step = `Step ${input.stepNumber}`;
+    switch (outcome) {
+        case "succeeded":
+            return appendSummary(`${step} completed.`, input.summary);
+        case "blocked":
+            return appendSummary(`${step} blocked.`, input.summary);
+        case "failed":
+            return appendSummary(`${step} failed.`, input.summary);
+        case "needs-verification":
+            return appendSummary(`${step} needs verification: execution finished but success has not been evidenced.`, input.summary);
+        case "invalid":
+            return `${step} outcome invalid: ${invalidFeedbackDetail(input.validationError)}.`;
+        case "pending":
+        case "running":
+        default:
+            return `${step} in progress.`;
+    }
+}
+
+/** Human-readable note for the task-lifecycle progress log. */
+export function taskLifecycleNoteFromOutcome(outcome: StepOutcome, input: StepOutcomeNoteInput): string {
+    const step = `Plan step ${input.stepNumber}`;
+    switch (outcome) {
+        case "succeeded":
+            return appendSummary(`${step} succeeded.`, input.summary);
+        case "blocked":
+            return appendSummary(`${step} blocked.`, input.summary);
+        case "failed":
+            return appendSummary(`${step} failed.`, input.summary);
+        case "needs-verification":
+            return appendSummary(`${step} needs verification: execution finished but success has not been evidenced.`, input.summary);
+        case "invalid":
+            return `${step} outcome invalid: ${invalidFeedbackDetail(input.validationError)}.`;
+        case "pending":
+        case "running":
+        default:
+            return `${step} in progress.`;
+    }
+}
+
+/** One normalized outcome reduced into every consumer's per-step values. */
+export interface ReducedStepOutcome {
+    readonly outcome: StepOutcome;
+    /** True only for `succeeded`; never true for an unverified model claim. */
+    readonly terminalSuccess: boolean;
+    readonly memoryOutcome: MemoryContractOutcome;
+    readonly specKeeperStatus: SpecKeeperStepStatus;
+    readonly specKeeperNote: string;
+    readonly taskLifecycleNote: string;
+}
+
+/**
+ * Reduce one normalized outcome into the values all step consumers need.
+ * Callers that record a step to memory, Spec Keeper, and the task-lifecycle
+ * log in one place should use this once and fan the fields out, guaranteeing
+ * every consumer agrees on the same outcome.
+ */
+export function reduceStepOutcome(outcome: StepOutcome, input: StepOutcomeNoteInput = { stepNumber: 1 }): ReducedStepOutcome {
+    return {
+        outcome,
+        terminalSuccess: isTerminalSuccess(outcome),
+        memoryOutcome: memoryOutcomeFromOutcome(outcome),
+        specKeeperStatus: specKeeperStepStatusFromOutcome(outcome),
+        specKeeperNote: specKeeperStepNoteFromOutcome(outcome, input),
+        taskLifecycleNote: taskLifecycleNoteFromOutcome(outcome, input),
+    };
+}

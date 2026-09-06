@@ -11,6 +11,11 @@ const {
     isTerminalSuccess,
     isTerminalOutcome,
     attemptFromFeedback,
+    memoryOutcomeFromOutcome,
+    specKeeperStepStatusFromOutcome,
+    specKeeperStepNoteFromOutcome,
+    taskLifecycleNoteFromOutcome,
+    reduceStepOutcome,
 } = require("./.step-outcome-build/step-outcome.js");
 
 let failures = 0;
@@ -173,6 +178,128 @@ function check(name, cond) {
     check("attemptFromFeedback: blocked stays blocked", blocked.outcome === "blocked");
     const partial = attemptFromFeedback({ rawStatus: "partial", evidence: { a: 1 } });
     check("attemptFromFeedback: partial stays needs-verification", partial.outcome === "needs-verification");
+}
+
+// 13. memoryOutcomeFromOutcome: only succeeded is ever remembered as completed.
+{
+    check("memoryOutcomeFromOutcome: succeeded -> completed", memoryOutcomeFromOutcome("succeeded") === "completed");
+    check("memoryOutcomeFromOutcome: failed -> failed", memoryOutcomeFromOutcome("failed") === "failed");
+    check("memoryOutcomeFromOutcome: blocked -> aborted", memoryOutcomeFromOutcome("blocked") === "aborted");
+    check("memoryOutcomeFromOutcome: needs-verification -> unknown", memoryOutcomeFromOutcome("needs-verification") === "unknown");
+    check("memoryOutcomeFromOutcome: invalid -> unknown (never completed)", memoryOutcomeFromOutcome("invalid") === "unknown");
+    check("memoryOutcomeFromOutcome: pending -> unknown", memoryOutcomeFromOutcome("pending") === "unknown");
+    check("memoryOutcomeFromOutcome: running -> unknown", memoryOutcomeFromOutcome("running") === "unknown");
+}
+
+// 14. specKeeperStepStatusFromOutcome: only succeeded becomes done.
+{
+    check("specKeeperStepStatusFromOutcome: succeeded -> done", specKeeperStepStatusFromOutcome("succeeded") === "done");
+    check("specKeeperStepStatusFromOutcome: blocked -> blocked", specKeeperStepStatusFromOutcome("blocked") === "blocked");
+    check("specKeeperStepStatusFromOutcome: failed -> failed", specKeeperStepStatusFromOutcome("failed") === "failed");
+    check("specKeeperStepStatusFromOutcome: needs-verification -> in_progress", specKeeperStepStatusFromOutcome("needs-verification") === "in_progress");
+    check("specKeeperStepStatusFromOutcome: invalid -> not done", specKeeperStepStatusFromOutcome("invalid") !== "done");
+    check("specKeeperStepStatusFromOutcome: invalid -> failed (diagnostic)", specKeeperStepStatusFromOutcome("invalid") === "failed");
+    check("specKeeperStepStatusFromOutcome: pending -> in_progress", specKeeperStepStatusFromOutcome("pending") === "in_progress");
+    check("specKeeperStepStatusFromOutcome: running -> in_progress", specKeeperStepStatusFromOutcome("running") === "in_progress");
+}
+
+// 15. Note builders carry the step number and a diagnostic for invalid feedback.
+{
+    check(
+        "specKeeperStepNoteFromOutcome: succeeded carries summary",
+        specKeeperStepNoteFromOutcome("succeeded", { stepNumber: 2, summary: "all green" }) === "Step 2 completed. all green",
+    );
+    check(
+        "specKeeperStepNoteFromOutcome: blocked carries summary",
+        specKeeperStepNoteFromOutcome("blocked", { stepNumber: 2, summary: "tool unavailable" }) === "Step 2 blocked. tool unavailable",
+    );
+    check(
+        "specKeeperStepNoteFromOutcome: needs-verification carries diagnostic",
+        specKeeperStepNoteFromOutcome("needs-verification", { stepNumber: 3 }).includes("needs verification"),
+    );
+    check(
+        "specKeeperStepNoteFromOutcome: invalid carries validation diagnostic",
+        specKeeperStepNoteFromOutcome("invalid", { stepNumber: 4, validationError: "Feedback JSON could not be parsed" })
+            === "Step 4 outcome invalid: Feedback JSON could not be parsed.",
+    );
+    check(
+        "taskLifecycleNoteFromOutcome: invalid never claims completion",
+        taskLifecycleNoteFromOutcome("invalid", { stepNumber: 1, validationError: "boom" }).includes("outcome invalid"),
+    );
+    check(
+        "taskLifecycleNoteFromOutcome: succeeded claims success",
+        taskLifecycleNoteFromOutcome("succeeded", { stepNumber: 1, summary: "done" }) === "Plan step 1 succeeded. done",
+    );
+}
+
+// 16. reduceStepOutcome fans one normalized outcome out to every consumer.
+{
+    const reduced = reduceStepOutcome("invalid", { stepNumber: 7, validationError: "malformed" });
+    check("reduceStepOutcome: invalid outcome is invalid", reduced.outcome === "invalid");
+    check("reduceStepOutcome: invalid terminalSuccess is false", reduced.terminalSuccess === false);
+    check("reduceStepOutcome: invalid memoryOutcome is never completed", reduced.memoryOutcome !== "completed");
+    check("reduceStepOutcome: invalid specKeeperStatus is never done", reduced.specKeeperStatus !== "done");
+    check("reduceStepOutcome: invalid specKeeperNote is diagnostic", reduced.specKeeperNote.includes("Step 7 outcome invalid"));
+    check("reduceStepOutcome: invalid taskLifecycleNote is diagnostic", reduced.taskLifecycleNote.includes("outcome invalid"));
+}
+
+// 17. Fake memory/Spec Keeper/task-lifecycle clients: invalid feedback never
+//     emits `done` or a `completed` memory outcome (no real external updates).
+{
+    const makeFakeClients = () => ({
+        memory: { remembered: [] },
+        specKeeper: { stepTaskUpdates: [] },
+        taskLifecycle: { notes: [] },
+    });
+
+    // Mirror the runExecutionPhase consumer dispatch using the same reducer
+    // outputs, then assert nothing about invalid feedback looks like success.
+    const dispatchForFeedback = (feedbackEntry, stepNumber) => {
+        const attemptRecord = attemptFromFeedback({
+            responseId: feedbackEntry?.response_id ?? null,
+            rawStatus: feedbackEntry?.valid ? feedbackEntry.feedback.stepStatus : undefined,
+            evidence: feedbackEntry?.valid
+                ? { stepStatus: feedbackEntry.feedback.stepStatus, summary: feedbackEntry.feedback.summary, findings: feedbackEntry.feedback.findings ?? [] }
+                : { validationError: feedbackEntry?.validationError ?? "execution feedback was missing or malformed" },
+            evidenceSatisfied: (evidence) =>
+                Array.isArray(evidence?.findings) && evidence.findings.length > 0
+                    ? true
+                    : Boolean(evidence?.summary && String(evidence.summary).trim().length > 0),
+        });
+        const reduction = reduceStepOutcome(attemptRecord.outcome, {
+            stepNumber,
+            summary: feedbackEntry?.valid ? feedbackEntry.feedback.summary : undefined,
+            validationError: feedbackEntry?.valid ? undefined : (feedbackEntry?.validationError ?? "execution feedback was missing or malformed"),
+        });
+        const clients = makeFakeClients();
+        clients.memory.remembered.push({ outcome: reduction.memoryOutcome, detail: { normalizedOutcome: reduction.outcome } });
+        clients.specKeeper.stepTaskUpdates.push({ status: reduction.specKeeperStatus, note: reduction.specKeeperNote });
+        clients.taskLifecycle.notes.push({ action: `step ${stepNumber} ${reduction.specKeeperStatus}`, note: reduction.taskLifecycleNote });
+        return { reduction, clients };
+    };
+
+    const invalidJson = { valid: false, response_id: "resp-invalid", validationError: "Feedback JSON could not be parsed" };
+    const invalid = dispatchForFeedback(invalidJson, 1);
+    check("fake clients: invalid JSON normalizes to invalid", invalid.reduction.outcome === "invalid");
+    check("fake clients: invalid JSON never remembers completed", invalid.clients.memory.remembered.every((m) => m.outcome !== "completed"));
+    check("fake clients: invalid JSON never marks Spec Keeper done", invalid.clients.specKeeper.stepTaskUpdates.every((u) => u.status !== "done"));
+    check("fake clients: invalid JSON task note is diagnostic", invalid.clients.taskLifecycle.notes[0].note.includes("outcome invalid"));
+
+    const bareCompleted = { valid: true, response_id: "resp-bare", feedback: { stepStatus: "completed", summary: "", findings: [] } };
+    const bare = dispatchForFeedback(bareCompleted, 2);
+    check("fake clients: bare completed normalizes to needs-verification", bare.reduction.outcome === "needs-verification");
+    check("fake clients: bare completed never marks Spec Keeper done", bare.clients.specKeeper.stepTaskUpdates.every((u) => u.status !== "done"));
+    check("fake clients: bare completed memory is not completed", bare.clients.memory.remembered.every((m) => m.outcome !== "completed"));
+
+    const successful = { valid: true, response_id: "resp-ok", feedback: { stepStatus: "completed", summary: "checks passed", findings: ["lint ok"] } };
+    const success = dispatchForFeedback(successful, 3);
+    check("fake clients: evidenced completed normalizes to succeeded", success.reduction.outcome === "succeeded");
+    check("fake clients: evidenced completed marks Spec Keeper done", success.clients.specKeeper.stepTaskUpdates[0].status === "done");
+    check("fake clients: evidenced completed remembers completed", success.clients.memory.remembered[0].outcome === "completed");
+
+    const blocked = { valid: true, response_id: "resp-block", feedback: { stepStatus: "blocked", summary: "tool unavailable", findings: [] } };
+    const blockedDispatch = dispatchForFeedback(blocked, 4);
+    check("fake clients: blocked maps to blocked (not done)", blockedDispatch.reduction.outcome === "blocked" && blockedDispatch.clients.specKeeper.stepTaskUpdates[0].status === "blocked");
 }
 
 if (failures === 0) { console.log("\nAll step-outcome tests passed."); process.exit(0); }

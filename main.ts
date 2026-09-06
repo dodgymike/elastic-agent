@@ -77,6 +77,7 @@ import {
     attemptFromFeedback,
     hasEvidence,
     isTerminalOutcome,
+    reduceStepOutcome,
 } from "./step-outcome.js";
 import { indent, printPlan } from "./plan-printer.js";
 import { abortBlockText, boundedAbortReason } from "./llm/abort-report.js";
@@ -2341,27 +2342,6 @@ async function dispatchToolCallsBatch(functionCalls, configData, goalKey): Promi
 }
 
 /**
- * Normalize a step's execution-feedback `stepStatus` (completed / partial /
- * blocked / failed) into the memory contract's outcome status
- * (completed / failed / aborted / skipped / unknown). Unknown/partial values
- * map conservatively: anything that is not a plain success is recorded as
- * failed so the summary reflects that the step did not fully complete.
- */
-function memoryOutcomeFromFeedback(stepStatus: string): MemoryOutcomeStatus {
-    switch (stepStatus) {
-        case "completed":
-            return "completed";
-        case "partial":
-        case "failed":
-            return "failed";
-        case "blocked":
-            return "aborted";
-        default:
-            return "unknown";
-    }
-}
-
-/**
  * Build the secret-free evidence object considered when normalizing one
  * step's execution feedback. Valid feedback contributes only the model's
  * reported stepStatus/summary/findings; invalid or missing feedback
@@ -2684,11 +2664,27 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                     timestamp: attemptRecord.timestamp,
                 });
             }
+            // Memory, Spec Keeper step tasks, and the task-lifecycle progress
+            // log all consume the SAME normalized outcome. The reducer derives
+            // every consumer value from `attemptRecord.outcome` so no consumer
+            // re-derives success/failure from the raw stepStatus — and invalid
+            // feedback is never remembered or marked as completed work.
+            const reduction = reduceStepOutcome(attemptRecord.outcome, {
+                stepNumber: index + 1,
+                summary: feedbackEntry?.valid && feedbackEntry.feedback?.summary
+                    ? feedbackEntry.feedback.summary
+                    : undefined,
+                validationError: feedbackEntry?.valid
+                    ? undefined
+                    : (feedbackEntry?.validationError ?? "execution feedback was missing or malformed"),
+            });
+
             // Memory integration (step 5): record this plan step into the
-            // swappable MemoryModule. The outcome/status is derived from the
-            // step's execution feedback when it parsed; otherwise it is a plain
-            // completed step. Fail-safe: rememberAgentStep never throws, so the
-            // plan loop continues even if memory is disabled or fails.
+            // swappable MemoryModule. Fail-safe: rememberAgentStep never
+            // throws, so the plan loop continues even if memory is disabled or
+            // fails. outcomeDetail carries the normalized outcome plus the
+            // secret-free evidence summary; nothing from file contents,
+            // data.json, or credentials is included.
             await rememberAgentStep({
                 index,
                 step: executedStep,
@@ -2698,36 +2694,38 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                     attemptedSteps: configData.executionAttempts?.length ?? 0,
                     activePlanSteps: configData.activePlanSteps ?? [],
                 },
-                outcome: feedbackEntry?.valid ? memoryOutcomeFromFeedback(feedbackEntry.feedback.stepStatus) : "completed",
-                outcomeDetail: feedbackEntry?.valid
-                    ? { findings: feedbackEntry.feedback.findings ?? [] }
-                    : { invalid: true, validationError: feedbackEntry?.validationError ?? "unknown" },
+                outcome: reduction.memoryOutcome,
+                outcomeDetail: {
+                    normalizedOutcome: reduction.outcome,
+                    findings: feedbackEntry?.valid ? (feedbackEntry.feedback.findings ?? []) : [],
+                    validationError: feedbackEntry?.valid
+                        ? null
+                        : (feedbackEntry?.validationError ?? "execution feedback was missing or malformed"),
+                },
                 reasoning: feedbackEntry?.valid && feedbackEntry.feedback.summary
                     ? feedbackEntry.feedback.summary
                     : undefined,
             });
             if (specKeeperState?.stepTasks?.[index]) {
-                const stepStatus = feedbackEntry?.valid && feedbackEntry.feedback?.stepStatus === "blocked" ? "blocked" : "done";
-                const stepNote = feedbackEntry?.valid
-                    ? `Step ${index + 1} ${feedbackEntry.feedback.stepStatus}. ${feedbackEntry.feedback.summary ?? ""}`.trim()
-                    : `Step ${index + 1} completed.`;
                 await specKeeperSync(
-                    `step ${index + 1} marked ${stepStatus}`,
+                    `step ${index + 1} marked ${reduction.specKeeperStatus}`,
                     async () => updateSpecKeeperTask(
                         specKeeperState.stepTasks[index],
-                        { status: stepStatus, status_note: stepNote },
+                        { status: reduction.specKeeperStatus, status_note: reduction.specKeeperNote },
                         specKeeperState.taskUpdateOptions,
                     ),
                 );
             }
             if (taskLifecycle) {
-                const stepSummary = feedbackEntry?.valid && feedbackEntry.feedback?.summary
-                    ? feedbackEntry.feedback.summary
-                    : "completed";
+                const stepAction = reduction.specKeeperStatus === "done"
+                    ? "completed"
+                    : reduction.specKeeperStatus === "in_progress"
+                        ? "needs verification"
+                        : reduction.specKeeperStatus;
                 await specKeeperTaskNote(
                     taskLifecycle,
-                    `step ${index + 1} completed`,
-                    `Plan step ${index + 1} ${stepSummary}.`,
+                    `step ${index + 1} ${stepAction}`,
+                    reduction.taskLifecycleNote,
                 );
             }
             const appliedChanges = applyExecutionFeedback(feedbackEntry, activeSteps, index);
