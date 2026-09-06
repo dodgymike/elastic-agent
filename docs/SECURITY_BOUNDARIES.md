@@ -83,6 +83,20 @@ and permission to create user, mount, PID, and network namespaces. Bubblewrap
 receives explicit namespace flags and drops capabilities. A setup failure
 returns a tool error; it never retries the command on the host.
 
+Select the mode at launch with `--shell-mode sandbox` or
+`--shell-mode trusted-host`. Precedence is CLI option, then `AGENT_SHELL_MODE`
+(including the optional `.env`), then `sandbox`. Verbose startup output reports
+the selected mode. Tool arguments cannot change it during a run.
+
+If `ExecuteCommand` reports "Shell sandbox failed", the machine may lack
+bubblewrap or permission to create namespaces. The error preserves captured
+stderr for diagnosis. Enable namespace support to retain isolation, or explicitly
+add `--shell-mode trusted-host` to your existing launch arguments and restart.
+Host mode grants host filesystem/network access; it retains tool safety checks,
+environment filtering, deadlines, and output limits. There is no automatic
+fallback. A persistent opt-in can use `AGENT_SHELL_MODE=trusted-host` in the
+launch environment or local `.env`.
+
 The sandbox exposes standard system executable/library directories read-only,
 selected workspace roots with their configured write permissions, private
 `/tmp`, `/dev`, and `/proc`, and no host network namespace. Host home/run

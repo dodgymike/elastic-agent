@@ -1,4 +1,4 @@
-import { shellModeFromEnvironment } from "./tools/shell-policy.js";
+import { resolveShellMode } from "./tools/shell-policy.js";
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { resolveHighestModelConfiguration } from "./llm/model-defaults.js";
 import {
@@ -145,6 +145,7 @@ import { postSpecKeeperTaskNote, updateSpecKeeperTaskStatus, attachSpecKeeperTas
 import { abortSpecKeeperTask, completeSpecKeeperTask, failSpecKeeperTask } from "./specKeeperTaskCompletion.ts";
 import { Command } from "commander";
 import { addLoopOptions } from "./cli-loop-options.js";
+import { addShellOptions } from "./cli-shell-options.js";
 import { enforceExecutionPolicy, classifyToolCall, createToolSafetyLogger, resolveClassifierModel, toolRiskLevel } from "./tool-safety-classifier.js";
 import { routeGitExecuteCommand, GIT_COMMAND_ROUTER_PROMPT_PATH } from "./git-command-router.js";
 import { detectAgentBusCommand } from "./tools/agent-bus-detect.js";
@@ -171,6 +172,7 @@ program
     .argument("[prompt]", "task or request to plan and execute (omit when using --task-id)")
     .option("--task-id <task-id>", "run task mode for an existing Spec Keeper task ID (task key or public_id); cannot be combined with <prompt>");
 addLoopOptions(program);
+addShellOptions(program);
 program
     .option("--provider <provider-id>", "LLM provider: openai, bedrock-claude, or deepseek-v4 (overrides LLM_PROVIDER)")
     .option("--planner-model <model-id>", "Optional planner model override; when omitted, uses the selected provider's default planner model")
@@ -317,6 +319,21 @@ const commitInstruction = options.review ? "do not commit" : "commit all of your
 const providerSelection = selectCliProvider(process.argv.slice(2));
 
 const modelConfiguration = resolveRuntimeLlmModel({ configuration: providerSelection.configuration });
+// Model configuration loads the optional .env first. Resolve shell mode once
+// at startup so CLI precedence is stable for the whole run.
+let shellMode: ReturnType<typeof resolveShellMode>;
+try {
+    shellMode = resolveShellMode(options.shellMode);
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
+if (outputVerbose) {
+    console.log(shellMode === "sandbox"
+        ? "[SHELL] mode=sandbox (requires working Linux bubblewrap namespaces)"
+        : "[SHELL] mode=trusted-host (host filesystem/network access; no OS isolation)");
+}
+
 // Wire an explicit --planner-model override to the provider whose catalog
 // advertises it (the selected provider first, then every built-in provider in
 // a stable sorted order). The resolved provider/model pair is handed to the
@@ -1117,7 +1134,7 @@ const tools = [
         exec_handler: ({ command, parameters }) => ExecuteCommand(command, parameters, toolSafetyConfig.startDirConfigured ? toolSafetyConfig.startDir : undefined, {
             signal: abortController.signal,
             policy: {
-                mode: shellModeFromEnvironment(),
+                mode: shellMode,
                 writableRoots: [...(toolSafetyConfig.startDirConfigured || toolSafetyConfig.allowAgentSourceModifications ? [toolSafetyConfig.startDir] : []), ...(toolSafetyConfig.safeDirs ?? [])],
                 readableRoots: [process.cwd(), ...(toolSafetyConfig.allowAgentSourceModifications ? [] : [toolSafetyConfig.agentSourceDir])],
             },

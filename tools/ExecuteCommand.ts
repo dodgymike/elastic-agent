@@ -1,4 +1,4 @@
-import { shellEnvironment, shellModeFromEnvironment, sandboxArguments, type ShellPolicy } from "./shell-policy.js";
+import { shellEnvironment, shellModeFromEnvironment, shellSandboxFailureMessage, sandboxArguments, type ShellPolicy } from "./shell-policy.js";
 import { spawn } from "node:child_process";
 import { detectAgentBusCommand } from "./agent-bus-detect.js";
 
@@ -141,10 +141,14 @@ export function executeCommand(
       options.signal?.removeEventListener("abort", abort);
       killGroup("SIGKILL"); // Do not leave background descendants behind.
       const partial = { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), stdoutTruncated, stderrTruncated };
-      if (failure) reject(new ExecuteCommandError(failure.message, partial));
+      if (failure) reject(new ExecuteCommandError(
+        policy.mode === "sandbox" && (failure as NodeJS.ErrnoException).code === "ENOENT"
+          ? shellSandboxFailureMessage() : failure.message,
+        partial,
+      ));
       else if (exitCode === null) reject(new ExecuteCommandError(`Shell was terminated by signal ${signal ?? "unknown"}`, partial));
       else if (policy.mode === "sandbox" && exitCode !== 0 && Buffer.concat(stderr).toString().includes("bwrap:")) {
-        reject(new Error("Shell sandbox failed; host fallback is disabled. Check Linux bubblewrap/user-namespace support."));
+        reject(new ExecuteCommandError(shellSandboxFailureMessage(), partial));
       } else resolve({ exitCode, stdout: partial.stdout, stderr: partial.stderr, stdoutTruncated: false, stderrTruncated: false });
     });
   });

@@ -93,7 +93,7 @@ plain text; the exit code and streams are still shown. No `[SUCCESS]` or
 > target resolves inside a user-declared `--safe-dir` directory. When the flag
 > is set, each detected file target must resolve inside `--agent-source-dir`,
 > `--start-dir`, or `--safe-dir` (boundary-safe, so `../` traversal is
-> blocked). `--disable-classifier` bypasses the check.
+> blocked). `--disable-classifier` disables only LLM review; deterministic checks remain active.
 
 **Allowed**
 - Read-only verification commands: builds, tests, grep, listing, and repository
@@ -164,7 +164,11 @@ without inherited provider credentials or shell startup configuration.
 Known credential/state paths are masked. Failed sandbox setup never retries
 on the host. `AGENT_SHELL_MODE=trusted-host` is an explicit operator opt-in to
 host filesystem/network access; it is not sandboxed. Model tool arguments
-cannot select this mode.
+cannot select this mode. The operator can also pass `--shell-mode trusted-host`
+or `--shell-mode sandbox` at launch; this overrides `AGENT_SHELL_MODE`.
+Selection is fixed at startup. If sandbox setup fails, report the captured
+stderr and ask the operator to fix namespace support or explicitly select host
+mode and restart; do not repeatedly retry an unavailable sandbox.
 
 Both modes have a 120-second deadline and combined stdout/stderr limit of
 1 MiB. Abort or exceeding a limit terminates the process group; background

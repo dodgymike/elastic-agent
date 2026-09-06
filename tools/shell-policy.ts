@@ -7,10 +7,25 @@ export interface ShellPolicy {
   readonly writableRoots: readonly string[];
   readonly readableRoots: readonly string[];
 }
-export function shellModeFromEnvironment(env: NodeJS.ProcessEnv = process.env): ShellPolicy["mode"] {
-  const mode = env.AGENT_SHELL_MODE ?? "sandbox";
-  if (mode !== "sandbox" && mode !== "trusted-host") throw new Error("AGENT_SHELL_MODE must be sandbox or trusted-host.");
+/** CLI overrides the environment; no option silently disables isolation. */
+export function resolveShellMode(explicitMode?: unknown, env: NodeJS.ProcessEnv = process.env): ShellPolicy["mode"] {
+  const mode = explicitMode ?? env.AGENT_SHELL_MODE ?? "sandbox";
+  if (mode !== "sandbox" && mode !== "trusted-host") {
+    throw new Error("Shell mode must be sandbox or trusted-host (--shell-mode or AGENT_SHELL_MODE).");
+  }
   return mode;
+}
+export function shellModeFromEnvironment(env: NodeJS.ProcessEnv = process.env): ShellPolicy["mode"] {
+  return resolveShellMode(undefined, env);
+}
+
+/** Actionable operator guidance, never an automatic retry on the host. */
+export function shellSandboxFailureMessage(): string {
+  return "Shell sandbox failed; host fallback is disabled. " +
+    "Check Linux bubblewrap/user-namespace support. " +
+    "To explicitly run without OS isolation, restart with --shell-mode trusted-host " +
+    "or set AGENT_SHELL_MODE=trusted-host in the launch environment/.env. " +
+    "Host mode retains safety checks, environment filtering, deadlines, and output limits.";
 }
 export function shellEnvironment(): NodeJS.ProcessEnv {
   // Never inherit provider credentials, proxy settings, NODE_OPTIONS, BASH_ENV,
