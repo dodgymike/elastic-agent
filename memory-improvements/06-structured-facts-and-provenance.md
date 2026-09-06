@@ -81,3 +81,15 @@ Residual limitations and follow-up IDs: optional model extractor not added (dete
 Rollback notes: remove the additive projection module and exports; no stored-data migration required.
 Implementation commit(s): b08954a (implementation + tests); completion record commit follows.
 ```
+
+Verification re-check (verification pass, plan step 4): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:memory-facts, test:memory-privacy,
+    test:memory-runtime-checkpoint, build.
+  - The recorded literal `npx tsc --noEmit ... memory/index.ts` check was run through the
+    dedicated TypeCheck tool (repo-approved fixed flags, memory/index.ts, noEmit); exit 0.
+  - git diff --check clean.
+  - Prerequisite re-confirmed: MI-05 Status DONE; commits 7c40eca/e79e9ea (MI-05) and
+    b08954a/b451455 (MI-06) present in git log.
+  - Skipped checks: none. No code change.
