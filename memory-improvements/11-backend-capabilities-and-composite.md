@@ -93,3 +93,17 @@ Residual limitations and follow-up IDs: forgetting/export/retention are MI-13; h
 Rollback notes: restore the pre-MI-11 compositeMemory.ts and main.ts selection, or remove the additive backend-capabilities/backend-factory/persistent-v2 files and their index exports.
 Implementation commit(s): 1b615eb (implementation + tests + completion record)
 ```
+
+Verification re-check (verification pass, plan step 9): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:memory-backend-capabilities,
+    test:memory-selection, test:composite-memory, test:memory, test:graph-memory,
+    test:memory-context-budget, test:memory-safe-compaction, build.
+  - The recorded literal `npx tsc --noEmit ... memory/index.ts` check was run through the
+    dedicated TypeCheck tool (repo-approved fixed flags, memory/index.ts, noEmit); exit 0.
+  - git diff --check clean.
+  - Prerequisites re-confirmed: MI-09 Status DONE (c7c4d0f/57e3dcb) and MI-10 Status DONE
+    (2db6a34/de7ea47); MI-11 implementation commit 1b615eb and completion-record commit
+    dfb107e present in git log.
+  - Skipped checks: none. No code change.
