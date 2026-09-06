@@ -378,3 +378,12 @@ an initial request.
   `review-prompt.txt`; they must stay consistent with `validateReviewResult` in
   `main.ts`.
 - Do not introduce secrets or credentials into any prompt file.
+
+### Research before initial planning
+
+The initial planner may use the supplied research tools over multiple turns
+before returning the plan JSON. `llm/planning-loop.ts` retains tool results,
+enforces research-only calls and shared round/call budgets, and validates the
+final plan. See [Investigative planning](../SDLC.md#investigative-planning).
+The standalone assembly examples above describe the initial prompt; production
+initial planning passes it to this loop rather than a single generation.

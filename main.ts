@@ -1,3 +1,4 @@
+import { runPlanningLoop } from "./llm/planning-loop.js";
 import { resolveShellMode } from "./tools/shell-policy.js";
 import { createRuntimeLlmAdapter, resolveRuntimeLlmModel } from "./llm/application.js";
 import { resolveHighestModelConfiguration } from "./llm/model-defaults.js";
@@ -2900,27 +2901,24 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
 
     const planningPrompt = buildPlanningPrompt(prompt, planningPrefix, claudeInstructions);
 
-    let planParseFailure: string | null = null;
-    let parsedPlanningResponse: ReturnType<typeof parsePlanOrAbort> = { valid: false, reason: "Planning did not produce a response." };
-    for (let attempt = 0; attempt <= maxPlanParseRetries; attempt += 1) {
-        throwIfAborted(abortController.signal, "planning");
-        const promptToSend = attempt === 0
-            ? planningPrompt
-            : buildPlanningRetryPrompt(planningPrompt, planParseFailure);
-        const planningResponse = await client.create({ input: promptToSend, abortPhase: "planning" });
-        new CompatibleResponseWrapper(planningResponse).print();
-        recordUsage(configData, planningResponse);
-        throwIfProviderCancelled(planningResponse, "planning");
-        parsedPlanningResponse = parsePlanOrAbort(responseText(planningResponse));
-        if (parsedPlanningResponse.valid) break;
-        planParseFailure = parsedPlanningResponse.reason;
-        if (attempt < maxPlanParseRetries) {
-            status.warning("Planning response was not valid plan JSON; sending a retry request with the parsing error appended.", hierarchyIndent("plan"));
-        }
-    }
-    if (!parsedPlanningResponse.valid) {
-        throw new RunAbortError("unable-to-complete", "planning", `Planning response was not valid after ${maxPlanParseRetries} parse retries: ${parsedPlanningResponse.reason}`);
-    }
+    const parsedPlanningResponse = await runPlanningLoop({
+        prompt: planningPrompt,
+        tools: tools as unknown as readonly import("./llm/adapter-contract.js").ToolDefinition[],
+        signal: abortController.signal,
+        maxParseRetries: maxPlanParseRetries,
+        create: (request) => client.create(request),
+        onResponse: (response) => {
+            new CompatibleResponseWrapper(response).print();
+            recordUsage(configData, response);
+            throwIfProviderCancelled(response, "planning");
+        },
+        dispatch: async (call) => {
+            const dispatched = await dispatchToolCall(call, configData, "planning-research");
+            appendHistory(configData.toolCallTldrs, summarizeToolCall(dispatched.output.name, dispatched.toolArguments, dispatched.toolResponse));
+            saveData(configData);
+            return { ...functionCallOutput(dispatched.output, dispatched.toolResponse), type: "function_call_output" as const };
+        },
+    });
     if (parsedPlanningResponse.result.kind === "abort") {
         throw new RunAbortError("unable-to-complete", "planning", parsedPlanningResponse.result.reason);
     }

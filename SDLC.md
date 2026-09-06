@@ -11,8 +11,8 @@ modules described under [Module structure](#module-structure) below.
 The agent runs a plan-then-execute loop against a configurable LLM provider with
 a mandatory post-plan **review phase**. The lifecycle is:
 
-1. **Plan** — build a planning prompt and ask the model for a step-by-step
-   execution plan.
+1. **Plan** — build a planning prompt and let the model investigate through
+   multiple tool-call turns before returning a validated execution plan.
 2. **Execute** — run each plan step, invoking tools as needed, and collect a
    machine-readable execution-feedback block per step. Replanning is supported
    when a step requests it (up to `maxReplanAttempts`).
@@ -129,3 +129,29 @@ of the repository (`prompt.log` is gitignored alongside `llm.log`).
 |---------------------|---------|------------------------------------------|
 | `maxReplanAttempts` | `3`     | Max focused replans within one execution |
 | `maxReviewAttempts` | `3`     | Max post-plan review attempts            |
+
+## Investigative planning
+
+Formal initial planning uses `llm/planning-loop.ts`. The planner can read named
+files, list/find/grep local source, inspect read-only Git modes, and research
+permitted URLs or search API endpoints through HTTP GET/HEAD. There is no
+built-in web-search provider; existing HTTP origin and network policies apply.
+Planning advertises only these research tools and rejects mutation calls before
+dispatch. Allowed calls use the normal safety classifier, execution policy,
+rendering, and tool handlers. Shell commands are deferred to execution.
+
+Research can span 12 tool-call rounds and 48 calls, including calls made during
+JSON repair. Exhausting either limit aborts planning before further tools run.
+Tools retain their existing per-call limits, and user cancellation is honored.
+These are call-count limits, not a new overall wall-clock deadline.
+
+The runtime preserves the conversation and tool results between research turns.
+A final text response must parse as a plan or explicit abort; one JSON repair is
+allowed and receives the gathered evidence. Intermediate tool turns are not
+parsed as final plans. Planning calls contribute to usage and normal LLM logs,
+and research calls contribute to tool history, without being recorded as
+completed execution steps. CLAUDE.md remains the first prompt section.
+
+The no-plan fast path remains direct execution. Review planning and focused
+replanning retain their existing behavior. Run `npm run test:planning-loop` for
+research-loop regression tests.
