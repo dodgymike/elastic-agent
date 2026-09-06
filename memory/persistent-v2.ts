@@ -38,7 +38,8 @@ import {
   type MemoryOutcomeAssertionV2,
   type MemoryScopeV2,
 } from "./contracts-v2.js";
-import { createMemoryEventStore, type MemoryEventStore } from "./event-store.js";
+import { EVENT_STORE_DB_VERSION, createMemoryEventStore, type MemoryEventStore } from "./event-store.js";
+import { MemoryHealthMetrics, type MemoryHealthSnapshot } from "./health-metrics.js";
 import {
   MemoryRetentionController,
   type MemoryExportDocumentV1,
@@ -98,6 +99,7 @@ export class PersistentV2MemoryModule implements MemoryModule {
   private readonly delegate?: MemoryModule;
   private readonly sequenceBySession = new Map<string, number>();
   private retention: MemoryRetentionController | null = null;
+  private readonly health: MemoryHealthMetrics;
 
   /** The most recent non-fatal failure reported by this module, if any. */
   lastFailure: PersistentV2FailureReport | null = null;
@@ -110,6 +112,10 @@ export class PersistentV2MemoryModule implements MemoryModule {
     this.runId = `run-${randomUUID()}`;
     this.maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
     this.delegate = options.delegate;
+    this.health = new MemoryHealthMetrics("persistent-v2", {
+      durability: "durable",
+      storageSchemaVersion: EVENT_STORE_DB_VERSION,
+    });
   }
 
   /** The resolved event-store database path. */
@@ -117,9 +123,19 @@ export class PersistentV2MemoryModule implements MemoryModule {
     return this.store.path;
   }
 
+  /** MI-14: metadata-only health snapshot for tests/monitoring and the CLI. */
+  healthSnapshot(): MemoryHealthSnapshot {
+    return this.health.snapshot();
+  }
+
   /** v2 lifecycle passthrough: prepare a scope. */
   async initialize(scope: MemoryScopeV2): Promise<MemoryInitResultV2> {
-    return this.store.initialize(scope);
+    const result = await this.store.initialize(scope);
+    this.health.recordInitialization(
+      result.status === "ready",
+      result.status === "failure" ? result.reason : undefined,
+    );
+    return result;
   }
 
   /** v2 lifecycle passthrough: flush durable state for a scope. */
@@ -152,6 +168,15 @@ export class PersistentV2MemoryModule implements MemoryModule {
     } else {
       this.lastFailure = { message: `persistent-v2 append failed: ${result.reason}` };
     }
+    this.health.recordAppend({
+      status: result.status,
+      sequence: result.status === "durable" ? result.sequence : undefined,
+      sessionId: scope.sessionId,
+      reason:
+        result.status === "durable" || result.status === "duplicate"
+          ? undefined
+          : result.reason,
+    });
 
     if (this.delegate) {
       try {
@@ -176,6 +201,15 @@ export class PersistentV2MemoryModule implements MemoryModule {
         limit: DEFAULT_RETRIEVE_LIMIT,
       });
       const events = result.events;
+      this.health.recordRetrieval({
+        success: true,
+        sessionId: scope.sessionId,
+        cacheHit: false,
+        candidates: events.length,
+        selected: events.length,
+        omitted: 0,
+        hasMemory: events.length > 0,
+      });
       let text = renderEvents(events);
       if (request.maxChars !== undefined && text.length > request.maxChars) {
         text = `${text.slice(0, request.maxChars)}…`;
@@ -186,7 +220,13 @@ export class PersistentV2MemoryModule implements MemoryModule {
         hasMemory: events.length > 0,
       };
     } catch (error) {
-      this.lastFailure = { message: describeError(error) };
+      const message = describeError(error);
+      this.lastFailure = { message };
+      this.health.recordRetrieval({
+        success: false,
+        sessionId: scope.sessionId,
+        reason: message,
+      });
       return { text: "", matchedContexts: [], hasMemory: false };
     }
   }

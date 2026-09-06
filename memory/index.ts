@@ -288,3 +288,25 @@ export type {
   MemoryBackendHandle,
   MemoryTypeSelection,
 } from "./backend-factory.js";
+
+export {
+  DEFAULT_MAX_LLM_REQUESTS,
+  MemoryHealthMetrics,
+  emptyHealthSnapshot,
+  formatHealthDiagnostic,
+  renderLocalHealthReport,
+} from "./health-metrics.js";
+export type {
+  AppendHealthResult,
+  LlmAuxiliaryRequestRecord,
+  LlmAuxiliaryUsage,
+  LlmRequestSummary,
+  MemoryDurabilityState,
+  MemoryHealthSnapshot,
+  MemoryHealthState,
+  MemoryHealthMetricsOptions,
+  MemoryOperationCounters,
+  RetrievalHealthResult,
+  ScopedMemoryFailure,
+  SyntheticSessionHealthInput,
+} from "./health-metrics.js";

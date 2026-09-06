@@ -22,6 +22,7 @@
  */
 
 import { capabilitiesOf } from "./backend-capabilities.js";
+import { emptyHealthSnapshot, type MemoryHealthSnapshot } from "./health-metrics.js";
 import { createCompositeMemoryModule } from "./compositeMemory.js";
 import {
   validateScope,
@@ -102,6 +103,8 @@ export interface MemoryBackendHandle {
   close(scope: MemoryScopeV2): Promise<MemoryCloseResultV2>;
   /** End-of-plan durable hook; resolves undefined for non-durable backends. */
   finalize(sessionId: string): Promise<unknown>;
+  /** MI-14: metadata-only health snapshot for tests/monitoring and the CLI. */
+  healthSnapshot(): MemoryHealthSnapshot;
 }
 
 /**
@@ -210,6 +213,7 @@ function buildHandle(kind: MemoryTypeSelection, module: MemoryModule): MemoryBac
     flush: (scope) => routeFlush(module, kind, scope),
     close: (scope) => routeClose(module, scope),
     finalize: (sessionId) => routeFinalize(module, sessionId),
+    healthSnapshot: () => routeHealth(module, kind),
   };
 }
 
@@ -244,6 +248,15 @@ async function routeClose(
   const v2 = module as Partial<Pick<MemoryModuleV2, "close">>;
   if (typeof v2.close === "function") return v2.close(scope);
   return { status: "closed" };
+}
+
+function routeHealth(module: MemoryModule, kind: MemoryTypeSelection): MemoryHealthSnapshot {
+  const provider = module as Partial<{ healthSnapshot(): MemoryHealthSnapshot }>;
+  if (typeof provider.healthSnapshot === "function") return provider.healthSnapshot();
+  return emptyHealthSnapshot({
+    backendType: kind,
+    durability: capabilitiesOf(module).durable ? "durable" : "volatile",
+  });
 }
 
 async function routeFinalize(module: MemoryModule, sessionId: string): Promise<unknown> {
