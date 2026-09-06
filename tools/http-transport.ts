@@ -23,6 +23,37 @@ export interface HttpTransportResult {
   body: string;
 }
 
+/** Partial HTTP body preserved when reading stops at the byte limit. */
+export interface HttpTransportPartialOutput {
+  partialBody: string;
+  truncated: boolean;
+  reason: string;
+}
+
+/**
+ * Error raised when an HTTP response exceeds its byte ceiling. The capped body
+ * prefix and truncation flag remain available so the caller/model can see how
+ * much was received before the transport stopped reading.
+ */
+export class HttpTransportError extends Error {
+  readonly partialBody: string;
+  readonly truncated: boolean;
+  readonly reason: string;
+
+  constructor(message: string, partial: HttpTransportPartialOutput) {
+    super(message);
+    this.name = "HttpTransportError";
+    this.partialBody = partial.partialBody;
+    this.truncated = partial.truncated;
+    this.reason = partial.reason;
+  }
+
+  /** Serializable payload merged into the tool result by the dispatcher. */
+  toToolPayload(): HttpTransportPartialOutput {
+    return { partialBody: this.partialBody, truncated: this.truncated, reason: this.reason };
+  }
+}
+
 function origins(value: string | undefined): string[] {
   return (value ?? "").split(",").filter(Boolean).map((item) => {
     const url = new URL(item.trim());
@@ -138,9 +169,17 @@ export async function requestHttp(
         }, (res) => {
           const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer) => {
+            const priorBytes = usedBytes;
             usedBytes += chunk.length;
             if (usedBytes > maxBytes) {
-              reject(new Error("HTTP response exceeds byte limit."));
+              // Keep the capped prefix of the crossing chunk so the caller can
+              // see exactly how much was received before reading stopped.
+              const remaining = Math.max(0, maxBytes - priorBytes);
+              const prefix = remaining > 0 ? chunk.subarray(0, remaining) : Buffer.alloc(0);
+              const partialBody = Buffer.concat([...chunks, prefix]).toString("utf8");
+              reject(new HttpTransportError("HTTP response exceeds byte limit.", {
+                partialBody, truncated: true, reason: "output-limit",
+              }));
               req.destroy(new Error("HTTP response exceeds byte limit."));
               res.destroy();
             } else chunks.push(chunk);

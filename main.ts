@@ -2052,7 +2052,12 @@ async function executePreparedToolCall(prepared) {
     } catch (error) {
         timer.stop();
         const message = error instanceof Error ? error.message : String(error);
-        return { toolResponse: { error: message }, errorMessage: message };
+        const toToolPayload = (error as { toToolPayload?: unknown } | null | undefined)?.toToolPayload;
+        const payload = typeof toToolPayload === "function" ? toToolPayload() : null;
+        const toolResponse = payload && typeof payload === "object"
+            ? { error: message, ...payload }
+            : { error: message };
+        return { toolResponse, errorMessage: message };
     } finally {
         restoreStartDir(toolCwdSwitch);
     }
