@@ -1,6 +1,6 @@
 # MI-08 — Retrieve relevant evidence and deduplicate memory
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-06](06-structured-facts-and-provenance.md)
 
@@ -62,14 +62,23 @@ Do not add a vector database or external embedding API in the first implementati
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-07 commits present.
+Prerequisite evidence: MI-06 DONE (b08954a/b451455).
+Reproduction / old behavior: persistent retrieval returned a single session summary; graph favored recent chain; composite used object-identity dedup; runtime supplied only session_id.
 Changed files and behavior:
+  - memory/retrieval.ts (new): deterministic lexical ranking with constraints/open work first, file/task/query/recency/evidence scoring, stable ID + normalized identity dedup, superseded/unauthorized filtering, bounded output.
+  - memory/index.ts: export retrieval surface.
+  - test/memory-retrieval.test.ts (new): relevance vs distractors, duplicate projections, superseded/unauthorized filtering, deterministic ties, limits, empty query.
+  - package.json: add test:memory-retrieval script.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-retrieval -> exit 0
+  - npm run test:memory-facts -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: no storage schema change; structured selections returned instead of one truncated string.
+Residual limitations and follow-up IDs: final formatting and complete-request budget enforcement deferred to MI-09; no vector/embedding service added.
+Rollback notes: remove the additive retrieval module and exports.
+Implementation commit(s): 249698d (implementation + tests); completion record commit follows.
 ```
