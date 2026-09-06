@@ -75,3 +75,22 @@ Residual limitations and follow-up IDs: workspace/principal-wide tombstones are 
 Rollback notes: revert the schema v2 migration and the new retention module/wiring. The migration is additive and does not delete v1 data, so reverting the code before writing tombstones is safe; do not downgrade a database that has already written tombstones without an explicit migration path.
 Implementation commit(s): be980a5
 ```
+
+Verification re-check (verification pass, plan step 11): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:memory-retention, test:memory-event-store,
+    test:memory-reload, test:memory-import, test:memory-incremental-summary,
+    test:memory-selection, test:memory-backend-capabilities, test:memory-contract-v2,
+    test:memory-runtime-checkpoint, test:memory-facts, test:memory-retrieval,
+    test:memory-context-budget, test:memory-safe-compaction, test:memory-privacy,
+    test:memory, test:persistent-memory, test:graph-memory, test:composite-memory,
+    build.
+  - git diff --check clean.
+  - Prerequisites re-confirmed: MI-04 Status DONE (e37a96e/ac048b4), MI-06 Status
+    DONE (b08954a/b451455), MI-07 Status DONE (80985f7/cddc5ab), MI-08 Status
+    DONE (249698d/b2e9689), MI-11 Status DONE (1b615eb/dfb107e), MI-12 Status
+    DONE (a73932e/2850313); MI-13 implementation commit be980a5 and completion
+    record commit d582d9e present in git log.
+  - Skipped checks: none. No code change; pre-existing working-tree changes left
+    untouched.
