@@ -28,6 +28,8 @@ export interface ReplanPromptInputs {
     readonly remainingSteps: readonly string[];
     /** The current top-level plan phase, already stringified ("(none)" when absent). */
     readonly currentPhase: string;
+    /** Completion criteria of the step being replanned ("(none)" when absent). */
+    readonly currentStepCriteria: string;
 }
 
 /**
@@ -84,6 +86,7 @@ export function buildReplanPrompt(
         toolFindings: inputs.toolFindings,
         remainingPlan: inputs.formatPlan(inputs.remainingSteps),
         currentPhase: inputs.currentPhase,
+        currentStepCriteria: inputs.currentStepCriteria,
     });
 }
 

@@ -53,6 +53,13 @@ export {
     planModelFromPlan,
     legacyPlanToModel,
     isPlanModel,
+    planModelStepIndexById,
+    planModelStepIdByIndex,
+    planModelStepById,
+    planModelCriteriaById,
+    planModelStepIds,
+    replacePlanModelRemainingSteps,
+    rebuildPlanModelSteps,
 } from "./prompt-parser.js";
 export type {
     PlanStep,

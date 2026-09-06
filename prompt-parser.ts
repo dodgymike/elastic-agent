@@ -96,6 +96,13 @@ export {
     planModelFromPlan,
     planStepsFromModel,
     planStepDisplayString,
+    planModelStepIndexById,
+    planModelStepIdByIndex,
+    planModelStepById,
+    planModelCriteriaById,
+    planModelStepIds,
+    replacePlanModelRemainingSteps,
+    rebuildPlanModelSteps,
 } from "./plan-model.js";
 export type {
     PlanModel,

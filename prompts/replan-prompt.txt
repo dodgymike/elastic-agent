@@ -8,6 +8,9 @@ ${completedWork}
 Current step feedback:
 ${feedbackJson}
 
+Current step completion criteria (the revised plan must still satisfy these):
+${currentStepCriteria}
+
 Recent tool-result summaries:
 ${toolFindings}
 

@@ -493,6 +493,107 @@ export function planStepsFromModel(model: PlanModel): string[] {
 }
 
 /**
+ * Resolve a stable step ID to its zero-based execution index in `model.steps`.
+ * Returns -1 when the ID is absent. Execution keeps the rendered step strings
+ * for prompts/display, but this mapping is what ties a running step back to
+ * its model-authored identity.
+ */
+export function planModelStepIndexById(model: PlanModel, stepId: PlanStepId): number {
+    for (let index = 0; index < model.steps.length; index += 1) {
+        if (model.steps[index].id === stepId) return index;
+    }
+    return -1;
+}
+
+/** Resolve the stable step ID at a zero-based execution index (null when absent). */
+export function planModelStepIdByIndex(model: PlanModel, index: number): PlanStepId | null {
+    if (!Number.isInteger(index) || index < 0 || index >= model.steps.length) return null;
+    return model.steps[index].id;
+}
+
+/** Resolve a plan step by stable ID (null when absent). */
+export function planModelStepById(model: PlanModel, stepId: PlanStepId): PlanStepModel | null {
+    const index = planModelStepIndexById(model, stepId);
+    return index >= 0 ? model.steps[index] : null;
+}
+
+/** Return a copy of the completion criteria for a stable step ID ([] when absent). */
+export function planModelCriteriaById(model: PlanModel, stepId: PlanStepId): string[] {
+    const step = planModelStepById(model, stepId);
+    return step ? step.completionCriteria.slice() : [];
+}
+
+/** Return every stable step ID in model order. */
+export function planModelStepIds(model: PlanModel): PlanStepId[] {
+    return model.steps.map((step) => step.id);
+}
+
+/** Derive a fresh positive step ID larger than every ID in the model. */
+function freshPlanStepIdStart(model: PlanModel): number {
+    return model.steps.reduce((max, step) => Math.max(max, step.id), 0) + 1;
+}
+
+/** Build a valid replacement step from a rendered string plus a fresh ID. */
+function synthesizedPlanStep(id: PlanStepId, text: string): PlanStepModel {
+    const objective = text.trim().length > 0 ? text.trim() : `Revised plan step ${id}`;
+    return {
+        id,
+        objective,
+        expectedArtifact: "",
+        completionCriteria: [`Step ${id} is completed and verified as described.`],
+        dependencies: [],
+        summary: undefined,
+        justification: undefined,
+        details: undefined,
+    };
+}
+
+/**
+ * Return a new `PlanModel` that preserves the first `keepCount` steps exactly
+ * — their stable IDs and completion criteria survive — and replaces every later
+ * step with fresh, uniquely-identified steps built from the supplied rendered
+ * strings. Used by focused replans while revised plans still arrive as
+ * rendered steps; the structured object stays the execution source of truth.
+ */
+export function replacePlanModelRemainingSteps(
+    model: PlanModel,
+    keepCount: number,
+    revisedStepTexts: readonly string[],
+): PlanModel {
+    if (!Number.isInteger(keepCount) || keepCount < 0) {
+        throw new Error("Plan model 'keepCount' must be a non-negative integer.");
+    }
+    const keptCount = Math.min(keepCount, model.steps.length);
+    const kept = model.steps.slice(0, keptCount);
+    const startId = freshPlanStepIdStart(model);
+    const replacements = revisedStepTexts.map((text, index) =>
+        synthesizedPlanStep(startId + index, String(text ?? "")));
+    return { ...model, steps: [...kept, ...replacements] };
+}
+
+/**
+ * Return a new `PlanModel` whose step list is entirely rebuilt from rendered
+ * strings with fresh stable IDs, optionally moving into a new top-level phase.
+ * Plan identity (planId), version, goal, scope, and acceptance criteria are
+ * preserved. Used by the legacy phase-changing replan path, which replaces the
+ * whole plan and restarts execution from the first step.
+ */
+export function rebuildPlanModelSteps(
+    model: PlanModel,
+    revisedStepTexts: readonly string[],
+    nextPhase?: string | number,
+): PlanModel {
+    const startId = freshPlanStepIdStart(model);
+    const steps = revisedStepTexts.map((text, index) =>
+        synthesizedPlanStep(startId + index, String(text ?? "")));
+    return {
+        ...model,
+        steps,
+        phase: nextPhase !== undefined ? nextPhase : model.phase,
+    };
+}
+
+/**
  * Render one step object (string, legacy step, or structured step) into a
  * single display string. Used by replan parsing while revised plans still
  * produce string steps for the execution loop.

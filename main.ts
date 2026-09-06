@@ -60,7 +60,14 @@ import { RunAbortError, throwIfAborted, type RunAbortPhase } from "./llm/run-abo
 import { buildPrettyStepLines } from "./step-renderer.js";
 import { responseDisplayText, wrapResponseText } from "./response-format.js";
 import { parsePlanOrAbort, planStepsFromObject } from "./prompt-parser.js";
-import { planModelFromPlan } from "./plan-model.js";
+import {
+    planModelFromPlan,
+    planModelStepById,
+    planModelStepIdByIndex,
+    planModelCriteriaById,
+    replacePlanModelRemainingSteps,
+    rebuildPlanModelSteps,
+} from "./plan-model.js";
 import {
     applyExecutionFeedback,
     buildToolsAvailablePrompt,
@@ -1748,6 +1755,15 @@ function captureExecutionFeedback(configData, response, stepIndex) {
 }
 async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, configData) {
     const step = completedStepCount + 1;
+    // The stored PlanModel is the execution source of truth: resolve the stable
+    // step ID and its completion criteria from the model, while `activeSteps`
+    // remains a rendered projection used only for prompts/display.
+    const planModel = configData?.planModel ?? null;
+    const stepId = planModel ? (planModelStepIdByIndex(planModel, completedStepCount) ?? step) : step;
+    const currentStep = planModel ? planModelStepById(planModel, stepId) : null;
+    const currentStepCriteria = currentStep
+        ? (currentStep.completionCriteria.map((criterion) => `- ${criterion}`).join("\n") || "(none)")
+        : "(none)";
     throwIfAborted(abortController.signal, "replan", step);
     const remainingStart = completedStepCount + 1;
     const remainingSteps = activeSteps.slice(remainingStart);
@@ -1774,7 +1790,7 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
         .join("\n") || "(none)";
     const toolFindings = (configData.toolCallTldrs ?? []).slice(-historyLimit).join("\n") || "(none)";
     const currentPhase = configData.planPhase === undefined ? "(none)" : String(configData.planPhase);
-    const request = buildReplanPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps, currentPhase });
+    const request = buildReplanPrompt(replanPromptTemplate, { claudeInstructions, completedWork, feedback, toolFindings, formatPlan, remainingSteps, currentPhase, currentStepCriteria });
     let lastFailure = "unknown";
     try {
         for (let parseAttempt = 0; parseAttempt <= maxReplanParseRetries; parseAttempt += 1) {
@@ -1802,9 +1818,13 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                     activeSteps.splice(0, activeSteps.length, ...revisedSteps);
                     configData.completedSteps = [];
                     configData.planPhase = nextPhase;
+                    if (planModel) {
+                        configData.planModel = rebuildPlanModelSteps(planModel, revisedSteps, nextPhase);
+                    }
                     configData.consecutiveNoProgressReplans = 0;
                     configData.replanHistory.push({
                         attempt,
+                        stepId,
                         response_id: response.id,
                         reason: feedback.replanReason,
                         applied: true,
@@ -1818,6 +1838,9 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                     return { attempted: true, applied: true, steps: revisedSteps, restart: true, phase: nextPhase };
                 }
                 activeSteps.splice(remainingStart, remainingSteps.length, ...revisedSteps);
+                if (planModel) {
+                    configData.planModel = replacePlanModelRemainingSteps(planModel, remainingStart, revisedSteps);
+                }
                 const afterKey = replanRemainingKey(activeSteps, completedStepCount);
                 const progressed = afterKey !== beforeKey;
                 configData.consecutiveNoProgressReplans = nextConsecutiveNoProgressReplans(
@@ -1826,6 +1849,7 @@ async function attemptReplan(feedbackEntry, activeSteps, completedStepCount, con
                 );
                 configData.replanHistory.push({
                     attempt,
+                    stepId,
                     response_id: response.id,
                     reason: feedback.replanReason,
                     applied: true,
@@ -2584,6 +2608,10 @@ async function executePlanStep(step, index, steps, plan, configData, executionCo
 
 async function runExecutionPhase(activeSteps, plan, configData, executionContext = "(none)", useReviewWorktree = false, specKeeperState: any = null, taskLifecycle: any = null) {
     const executionOutcomes = new Map<number, import("./step-outcome.js").StepOutcome>();
+    // The stored PlanModel is the execution source of truth. `activeSteps` is a
+    // rendered projection for prompts/display; step identity and completion
+    // criteria come from the model whenever it is present.
+    const planModel = configData?.planModel ?? null;
     configData.completedSteps = [];
     configData.executionAttempts = [];
     configData.replanAttemptCount = 0;
@@ -2620,6 +2648,11 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
         for (let index = 0; index < activeSteps.length; index += 1) {
             throwIfAborted(abortController.signal, "execution", index + 1);
             const executedStep = activeSteps[index];
+            // Stable model-authored identity for this execution index. The
+            // rendered `executedStep` is still what the model sees; the ID and
+            // criteria below are what the run records and replans against.
+            const stepId = planModel ? (planModelStepIdByIndex(planModel, index) ?? index + 1) : index + 1;
+            const stepCriteria = planModel ? planModelCriteriaById(planModel, stepId) : [];
             if (specKeeperState?.stepTasks?.[index]) {
                 await specKeeperSync(
                     `step ${index + 1} marked in_progress`,
@@ -2646,7 +2679,7 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             // work. executionAttempts is append-only: replans and phase
             // restarts may clear the completion ledger, but they never erase
             // this history.
-            const snapshot = snapshotStepFeedback({ feedbackEntry, step: index + 1, stepText: executedStep });
+            const snapshot = snapshotStepFeedback({ feedbackEntry, step: index + 1, stepId, stepText: executedStep });
             configData.executionAttempts.push(snapshot.attempt);
             // The completion ledger records only steps with a terminal
             // normalized outcome plus the evidence that produced it. A
@@ -2676,10 +2709,15 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                     completedSteps: configData.completedSteps?.length ?? 0,
                     attemptedSteps: configData.executionAttempts?.length ?? 0,
                     activePlanSteps: configData.activePlanSteps ?? [],
+                    activeStepId: stepId,
+                    planId: planModel?.planId ?? null,
+                    planVersion: planModel?.version ?? null,
                 },
                 outcome: reduction.memoryOutcome,
                 outcomeDetail: {
                     normalizedOutcome: reduction.outcome,
+                    stepId,
+                    completionCriteria: stepCriteria,
                     findings: feedbackEntry?.valid ? (feedbackEntry.feedback.findings ?? []) : [],
                     validationError: feedbackEntry?.valid
                         ? null

@@ -18,6 +18,13 @@ const {
     planModelFromPlan,
     legacyPlanToModel,
     isPlanModel,
+    planModelStepIndexById,
+    planModelStepIdByIndex,
+    planModelStepById,
+    planModelCriteriaById,
+    planModelStepIds,
+    replacePlanModelRemainingSteps,
+    rebuildPlanModelSteps,
 } = require("./.plan-parser-build/plan-printer.js");
 
 let failures = 0;
@@ -328,6 +335,72 @@ const samplePlan = {
     check("parsePlanModelOrAbort preserves abort semantics", abort.valid && abort.result.kind === "abort" && abort.result.reason === "Cannot plan");
     const extracted = extractPlanModel(`\`\`\`json\n${JSON.stringify(structuredPlan)}\n\`\`\``);
     check("extractPlanModel extracts fenced structured JSON", extracted.valid && extracted.model.planId === "PLAN-OR-ABORT");
+}
+
+// 26. PI-03 execution-source-of-truth helpers: stable step IDs map to execution
+//     indices and round-trip completion criteria without mutating the model.
+{
+    const model = parsePlanModel(JSON.stringify({
+        planId: "PLAN-MAP",
+        version: 3,
+        goal: "map ids to execution indices",
+        scope: "",
+        steps: [
+            { id: 10, objective: "first", expectedArtifact: "", completionCriteria: ["a"], dependencies: [] },
+            { id: 20, objective: "second", expectedArtifact: "", completionCriteria: ["b", "c"], dependencies: [10] },
+        ],
+        acceptanceCriteria: ["done"],
+    }));
+    check("planModelStepIds returns every id in order", JSON.stringify(planModelStepIds(model)) === JSON.stringify([10, 20]));
+    check("planModelStepIdByIndex maps an execution index to a stable id", planModelStepIdByIndex(model, 1) === 20);
+    check("planModelStepIdByIndex returns null for an out-of-range index", planModelStepIdByIndex(model, 5) === null);
+    check("planModelStepIndexById maps a stable id back to its execution index", planModelStepIndexById(model, 20) === 1);
+    check("planModelStepIndexById returns -1 for a missing id", planModelStepIndexById(model, 99) === -1);
+    check("planModelStepById resolves a stable step record", planModelStepById(model, 10)?.objective === "first");
+    check("planModelCriteriaById round-trips criteria", JSON.stringify(planModelCriteriaById(model, 20)) === JSON.stringify(["b", "c"]));
+    check("planModelCriteriaById returns [] for a missing id", planModelCriteriaById(model, 99).length === 0);
+}
+
+// 27. PI-03 focused replan helper preserves the completed prefix (IDs + criteria)
+//     and assigns fresh unique IDs to the replacement steps.
+{
+    const model = parsePlanModel(JSON.stringify({
+        planId: "PLAN-FOCUS",
+        version: 1,
+        goal: "focused replan",
+        scope: "",
+        steps: [
+            { id: 1, objective: "done one", expectedArtifact: "", completionCriteria: ["done-1"], dependencies: [] },
+            { id: 2, objective: "old two", expectedArtifact: "", completionCriteria: ["old-2"], dependencies: [1] },
+            { id: 3, objective: "old three", expectedArtifact: "", completionCriteria: ["old-3"], dependencies: [2] },
+        ],
+        acceptanceCriteria: ["done"],
+    }));
+    const updated = replacePlanModelRemainingSteps(model, 1, ["new two", "new three"]);
+    check("focused replan keeps completed step ids and criteria",
+        updated.steps[0].id === 1 && JSON.stringify(updated.steps[0].completionCriteria) === JSON.stringify(["done-1"]));
+    check("focused replan replaces remaining steps", updated.steps.length === 3 && updated.steps[1].objective === "new two");
+    check("focused replan assigns fresh unique ids", updated.steps[1].id !== 2 && updated.steps[2].id !== 3 && updated.steps[1].id !== updated.steps[2].id);
+    check("focused replan never mutates the original model", model.steps.length === 3 && model.steps[1].objective === "old two");
+}
+
+// 28. PI-03 phase-restart helper rebuilds the whole step list with fresh IDs and
+//     optionally moves into a new phase while preserving plan identity.
+{
+    const model = parsePlanModel(JSON.stringify({
+        planId: "PLAN-PHASE",
+        version: 1,
+        goal: "phase restart",
+        scope: "",
+        phase: "design",
+        steps: [{ id: 7, objective: "old", expectedArtifact: "", completionCriteria: ["old"], dependencies: [] }],
+        acceptanceCriteria: ["done"],
+    }));
+    const updated = rebuildPlanModelSteps(model, ["fresh one", "fresh two"], "verify");
+    check("phase restart preserves planId/version", updated.planId === "PLAN-PHASE" && updated.version === 1);
+    check("phase restart replaces all steps with fresh ids", updated.steps.length === 2 && updated.steps[0].id !== 7 && updated.steps[1].id !== updated.steps[0].id);
+    check("phase restart moves into the requested phase", updated.phase === "verify");
+    check("phase restart keeps the original model intact", model.steps.length === 1 && model.steps[0].id === 7);
 }
 
 if (failures === 0) { console.log("\nAll plan-parser tests passed."); process.exit(0); }

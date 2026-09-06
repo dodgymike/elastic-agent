@@ -392,6 +392,8 @@ export function feedbackEvidenceSatisfied(evidence: unknown): boolean {
 export interface StepAttemptEntry {
     /** One-based plan step number. */
     readonly step: number;
+    /** Stable plan-model step ID when available; falls back to `step` otherwise. */
+    readonly stepId?: number;
     /** Provider response id the feedback came from, or null when unavailable. */
     readonly feedbackResponseId: string | null;
     /** The raw, unmodified `stepStatus` value (null when it was absent). */
@@ -408,6 +410,8 @@ export interface StepAttemptEntry {
 export interface StepLedgerEntry {
     /** One-based plan step number. */
     readonly step: number;
+    /** Stable plan-model step ID when available; falls back to `step` otherwise. */
+    readonly stepId?: number;
     /** The plan step text that was executed. */
     readonly text: string;
     /** Provider response id the feedback came from, or null when unavailable. */
@@ -439,6 +443,8 @@ export interface StepFeedbackSnapshotInput extends AttemptFromFeedbackInput {
     readonly feedbackEntry?: unknown;
     /** One-based plan step number (defaults to 1). */
     readonly step?: number;
+    /** Stable plan-model step ID (falls back to `step` when omitted). */
+    readonly stepId?: number;
     /** The executed plan step text recorded on the completion ledger (defaults to "Plan step N"). */
     readonly stepText?: string;
 }
@@ -455,6 +461,9 @@ export interface StepFeedbackSnapshotInput extends AttemptFromFeedbackInput {
  */
 export function snapshotStepFeedback(input: StepFeedbackSnapshotInput = {}): StepFeedbackSnapshot {
     const step = Number.isInteger(input.step) ? (input.step as number) : 1;
+    const stepId = Number.isInteger(input.stepId) && (input.stepId as number) > 0
+        ? (input.stepId as number)
+        : step;
     const stepText = typeof input.stepText === "string" && input.stepText.trim().length > 0
         ? input.stepText
         : `Plan step ${step}`;
@@ -475,6 +484,7 @@ export function snapshotStepFeedback(input: StepFeedbackSnapshotInput = {}): Ste
     });
     const attempt: StepAttemptEntry = {
         step,
+        stepId,
         feedbackResponseId: attemptRecord.responseId,
         rawStatus: attemptRecord.rawStatus,
         outcome: attemptRecord.outcome,
@@ -484,6 +494,7 @@ export function snapshotStepFeedback(input: StepFeedbackSnapshotInput = {}): Ste
     const ledgerEntry: StepLedgerEntry | null = isTerminalOutcome(attemptRecord.outcome)
         ? {
             step,
+            stepId,
             text: stepText,
             feedbackResponseId: attemptRecord.responseId,
             outcome: attemptRecord.outcome,
