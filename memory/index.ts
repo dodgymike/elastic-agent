@@ -216,3 +216,16 @@ export type {
   ContextAssemblyInput,
   MemoryContextAssemblerOptions,
 } from "./context-assembly.js";
+
+export {
+  SAFE_COMPACTION_POLICY_VERSION,
+  SafeCompactor,
+  protectedSubjectsFor,
+} from "./safe-compaction.js";
+export type {
+  CompactionModelRequestV2,
+  CompactionModelResponseV2,
+  CompactionModelV2,
+  SafeCompactionResult,
+  SafeCompactorOptions,
+} from "./safe-compaction.js";
