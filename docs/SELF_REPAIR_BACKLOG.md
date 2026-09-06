@@ -173,6 +173,20 @@ Outcome: every tool call is validated, cancelable where applicable, and produces
 
 Outcome: a session can resume across processes without contaminating another workspace, leaking sensitive content, or flooding the model.
 
+> **Implementation evidence (MI-01..MI-16):** the detailed workstream under
+> [`memory-improvements/`](../memory-improvements/README.md) implemented the
+> MEM-01..05 capabilities behind the opt-in
+> `ELAGENT_MEMORY_TYPE=persistent-v2` backend. Reload, identity isolation,
+> context budgets, incremental summaries, retrieval, redaction, retention,
+> forget/export, and health metrics are covered by task-local suites and the
+> offline aggregate `npm run test:memory-improvements` (see
+> [MI-15](../memory-improvements/15-regression-and-behavior-evaluations.md) and
+> [MI-16](../memory-improvements/16-rollout-and-operator-documentation.md)).
+> The default backend remains the legacy `persistent` JSON store until an
+> explicit operator migration; `persistent-v2` is opt-in and documented in
+> [README.md](../README.md#rollout-migration-and-rollback). Residual: a
+> dedicated local preflight CLI and default promotion remain rollout follow-ups.
+
 ### MEM-01 — Implement persistent reload and schema validation [P1, M]
 
 - **Evidence — Observed:** [`PersistentMemoryModule`](../memory/persistent.ts) initializes empty maps, imports write/rename operations, and has no disk loader. `getContext` reads those maps. [`README.md`](../README.md) promises recall across runs using the same `--session-id`.

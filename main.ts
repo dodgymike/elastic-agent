@@ -44,6 +44,7 @@ import { restoreStartDir, switchToStartDir } from "./tool-cwd.js";
 import { MultiTurnLlmRuntime } from "./llm/multi-turn-runtime.js";
 import { createMemoryBackend, type MemoryBackendHandle } from "./memory/backend-factory.js";
 import { MemoryCompactor } from "./memory/memoryCompaction.js";
+import { formatHealthDiagnostic } from "./memory/health-metrics.js";
 import type {
     MemoryAction,
     MemoryJsonValue,
@@ -2134,6 +2135,11 @@ function memoryOutcomeFromFeedback(stepStatus: string): MemoryOutcomeStatus {
     }
 }
 
+// Emits one non-fatal warning per degradation episode (resets once healthy) so
+// a durable append failure stays visible at the runtime boundary without
+// spamming a warning on every subsequent step.
+let memoryHealthWarningEmitted = false;
+
 /**
  * Record one completed plan (or direct) step into the swappable MemoryModule.
  *
@@ -2193,6 +2199,17 @@ async function rememberAgentStep(options: {
     } catch (error) {
         status.warning(`Memory remember() failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
     }
+    // MI-14: surface a scoped durable-append/recall failure at the runtime
+    // boundary even when the cache/summary projection updated successfully.
+    const health = agentMemoryBackend?.healthSnapshot();
+    if (health && (health.state === "degraded" || health.state === "recall-failed")) {
+        if (!memoryHealthWarningEmitted) {
+            memoryHealthWarningEmitted = true;
+            status.warning(`Memory health: ${formatHealthDiagnostic(health)}`);
+        }
+    } else {
+        memoryHealthWarningEmitted = false;
+    }
     // Memory-compaction hook (post-memory-update): after the store records the
     // new step and refreshes its summary, check whether the summary has grown
     // past the context-window threshold and, if so, compact it with the highest
@@ -2240,6 +2257,26 @@ async function finalizePersistentMemory(): Promise<void> {
         status.success(`Persisted end-of-plan memory to ${path}`);
     } catch (error) {
         status.warning(`End-of-plan memory finalize failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+/**
+ * MI-14: print one concise, metadata-only memory health diagnostic to the CLI
+ * after end-of-plan finalization. `memory-disabled`, `no-relevant-memory`, and
+ * `recall-failed` are distinct states; degradation/recall failure print as a
+ * warning while healthy/no-relevant-memory print as a success line.
+ */
+function reportMemoryHealth(): void {
+    if (!agentMemoryBackend) {
+        status.success("Memory health: memory disabled (ELAGENT_MEMORY_DISABLE=1)");
+        return;
+    }
+    const snapshot = agentMemoryBackend.healthSnapshot();
+    const line = `Memory health: ${formatHealthDiagnostic(snapshot)}`;
+    if (snapshot.state === "degraded" || snapshot.state === "recall-failed") {
+        status.warning(line);
+    } else {
+        status.success(line);
     }
 }
 
@@ -3143,6 +3180,7 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
     // End-of-plan memory lifecycle (persistent backend only): summarise and
     // persist the full session just before the terminal completion line. Fail-safe.
     await finalizePersistentMemory();
+    reportMemoryHealth();
     status.success(isTaskMode ? "Task-mode plan execution complete. Stopping." : "Plan complete. Stopping.");
     cleanupExecutionWorktree();
     return { success: true };

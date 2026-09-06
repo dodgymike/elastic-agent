@@ -241,27 +241,29 @@ ELAGENT_MEMORY_DISABLE=1      npm run build
 ## Selecting the backend
 
 `main.ts` chooses the memory backend at startup from `ELAGENT_MEMORY_TYPE`. The
-**default is the persistent (disk-backed) backend** — when the variable is unset
-or unrecognised, or set to `persistent`, `main.ts` builds the durable
-`PersistentMemoryModule`. The accepted values are:
+**default is the legacy persistent (disk-backed) backend** — when the variable
+is unset or set to `persistent`, `main.ts` builds the durable
+`PersistentMemoryModule`. Unrecognised values are rejected at startup with an
+actionable error instead of silently falling back. The accepted values are:
 
 | `ELAGENT_MEMORY_TYPE` | Backend | Factory |
 | --- | --- | --- |
-| (unset / unrecognised) / `persistent` | **persistent** (durable, disk-backed; the default) | `createPersistentMemoryModule` |
-| `in-memory` | in-memory (volatile in-process; the original default, explicit opt-in) | `createInMemoryMemoryModule` |
+| (unset) / `persistent` | **legacy persistent** (durable end-of-plan JSON; the default) | `createPersistentMemoryModule` |
+| `in-memory` | in-memory (volatile in-process; explicit opt-in) | `createInMemoryMemoryModule` |
 | `graph` | graph-backed (nodes + typed edges) | `createGraphMemoryModule` |
-| `concat` / `both` | **concatenation composite** (persistent `primary` + in-memory `secondary`) | `createCompositeMemoryModule` |
+| `concat` / `both` | **concatenation composite** (legacy persistent `primary` + in-memory `secondary`) | `createCompositeMemoryModule` |
+| `persistent-v2` | **versioned SQLite event store** (opt-in; reload, forget, export, health) | `createPersistentV2MemoryModule` |
 
 `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely (fail-open) for every backend.
 
 ```sh
-# default: persistent (disk-backed)
+# default: legacy persistent (disk-backed)
 ELAGENT_MEMORY_TYPE=            npm run build
 
-# explicit persistent
+# explicit legacy persistent
 ELAGENT_MEMORY_TYPE=persistent  npm run build
 
-# in-memory (original default, no end-of-plan persistence)
+# in-memory (volatile, no end-of-plan persistence)
 ELAGENT_MEMORY_TYPE=in-memory   npm run build
 
 # graph-backed
@@ -273,16 +275,20 @@ ELAGENT_MEMORY_TYPE=concat      npm run build
 # concatenation alias
 ELAGENT_MEMORY_TYPE=both        npm run build
 
+# versioned SQLite event store (opt-in; restart recall, forget, export, health)
+ELAGENT_MEMORY_TYPE=persistent-v2 npm run build
+
 # disabled (fail-open)
 ELAGENT_MEMORY_DISABLE=1        npm run build
 ```
 
-For the persistent backend (and the persistent half of concatenation mode),
+For the legacy persistent backend (and its half of concatenation mode),
 `ELAGENT_MEMORY_OUTPUT_DIR` (or `ELAGENT_MEMORY_OUTPUT_PATH`) selects where the
-durable per-session documents land. For the default (unset) backend, omit the
-variable or set it to `persistent`; setting `ELAGENT_MEMORY_TYPE` to anything
-unrecognised other than the values above also falls back to the persistent
-default.
+durable per-session documents land. `ELAGENT_MEMORY_EVENT_STORE_PATH` selects
+the SQLite file used by `persistent-v2`; these path variables are never
+silently reinterpreted as each other's database or document file. An
+unrecognised `ELAGENT_MEMORY_TYPE` is a startup error
+(`Invalid memory backend selection`).
 
 ## Concatenation mode (`memory/compositeMemory.ts`)
 
@@ -414,12 +420,13 @@ Integration details:
   used as a persisted filename. (See the `--session-id` help text and the Step
   1 wiring below.)
 
-  > **Restart recall status:** the current default persistent backend is
-  > write-only for a finished plan — it has no disk loader, so reusing the same
-  > `--session-id` across runs does not yet restore the previous run's memory
-  > in that backend. Restart recall is demonstrated by the opt-in versioned
-  > event store (`memory/event-store.ts`, MI-03/MI-04); the default backend is
-  > migrated in the rollout task (MI-16).
+  > **Restart recall status:** the default legacy persistent backend remains
+  > write-only for a finished plan (it has no disk loader), so reusing the same
+  > `--session-id` across runs does not restore the previous run's memory in
+  > that backend. The opt-in `ELAGENT_MEMORY_TYPE=persistent-v2` backend
+  > (`memory/event-store.ts` + `memory/persistent-v2.ts`) reloads committed
+  > sessions across restarts and adds forget/export/health; see
+  > [Rollout, migration, and rollback](#rollout-migration-and-rollback).
 
 ## Plan-execution loop wiring
 
@@ -427,18 +434,23 @@ Integration details:
 
 1. On startup it derives the `agentSessionId` — from `--session-id <id>` when
    supplied, otherwise a fresh `run-${randomUUID()}` — and selects the backend
-   via `ELAGENT_MEMORY_TYPE` — the **default (unset or
-   unrecognised) and explicit `persistent`** build
-   `createPersistentMemoryModule(options)` (the durable, disk-backed default);
-   `in-memory` builds `createInMemoryMemoryModule(options)`; `graph` builds
-   `createGraphMemoryModule(options)`; and `concat`/`both` build a
-   `createCompositeMemoryModule({ primary: persistent, secondary: in-memory })`
-   — swappable via dependency injection. See [Selecting the backend](#selecting-the-backend).
-   For the persistent backend and the persistent half of concat, `main.ts` also
-   calls `finalizePersistentMemory()` at end of plan to summarise and persist the
-   session (via `instanceof PersistentMemoryModule` or the composite's
-   `finalize()` passthrough). `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely
-   (fail-open): the plan loop and LLM prompts run exactly as before.
+   via `ELAGENT_MEMORY_TYPE` — the **default (unset) and explicit
+   `persistent`** build `createPersistentMemoryModule(options)` (the durable,
+   disk-backed default); `in-memory` builds `createInMemoryMemoryModule(options)`;
+   `graph` builds `createGraphMemoryModule(options)`; `concat`/`both` build a
+   `createCompositeMemoryModule({ primary: persistent, secondary: in-memory })`;
+   and `persistent-v2` builds the opt-in SQLite event-store backend
+   (`createPersistentV2MemoryModule`), honoring
+   `ELAGENT_MEMORY_EVENT_STORE_PATH`. An unrecognised value is a startup error.
+   See [Selecting the backend](#selecting-the-backend).
+   For the legacy persistent backend and the persistent half of concat, `main.ts`
+   also calls `finalizePersistentMemory()` at end of plan to summarise and
+   persist the session (via `instanceof PersistentMemoryModule` or the
+   composite's `finalize()` passthrough). After finalization it prints a
+   metadata-only `Memory health:` line (see
+   [Rollout, migration, and rollback](#rollout-migration-and-rollback)).
+   `ELAGENT_MEMORY_DISABLE=1/true` opts out entirely (fail-open): the plan loop
+   and LLM prompts run exactly as before.
 2. The runtime is constructed with `{ memory: agentMemory, sessionId:
    agentSessionId }`, so each initial LLM prompt is prefixed with recalled
    context.
@@ -579,8 +591,43 @@ npm run test:memory-compaction  # compaction detection + invocation: 50% thresho
 npm run test:memory-compaction-prompt  # prompts/memory-compaction.md: placeholders + compress-without-losing-detail contract
 npm run test:model-defaults     # highest-model resolution used by compaction (resolveHighestModelConfiguration)
 npm run test:prompt-logger      # prompt.log writer (--log-prompts)
-npm run build                   # includes memory/types.ts, memory/inMemory.ts, graph-store.ts, graph-memory.ts, persistent.ts, compositeMemory.ts, memoryCompaction.ts
+npm run test:memory-improvements  # offline aggregate: regression + every memory/abort/prompt suite (prompt-builder golden fixture excluded; see MI-09)
+npm run build                   # compiles every memory/ module (index, types, privacy, inMemory, graph, persistent, composite, compaction, v2 event-store stack, backend-factory, health, retention)
 ```
+
+## Rollout, migration, and rollback
+
+The new memory reliability workstream ([memory improvements](memory-improvements/README.md),
+tasks MI-01 through MI-16) ships the **opt-in** `persistent-v2` backend while
+keeping the previous selection behavior as the default:
+
+- **Default unchanged:** `ELAGENT_MEMORY_TYPE` unset (or `persistent`) still
+  selects the legacy end-of-plan JSON backend, so existing runs behave exactly
+  as before.
+- **Legacy name:** `persistent` remains the explicit name for the legacy
+  backend during migration. It is not silently reinterpreted as the SQLite
+  event store.
+- **Opt-in migration:** set `ELAGENT_MEMORY_TYPE=persistent-v2` (and, when you
+  want a specific database, `ELAGENT_MEMORY_EVENT_STORE_PATH=<file>`) to use
+  the versioned SQLite event store. It reloads committed sessions across
+  restarts and adds forget, export, and health snapshots. Import a legacy
+  session explicitly via the legacy-import path (`memory/legacy-import.ts`)
+  rather than pointing `ELAGENT_MEMORY_EVENT_STORE_PATH` at an old JSON file.
+- **Rollback:** select `ELAGENT_MEMORY_TYPE=persistent` (or unset the
+  variable) to return to the legacy backend, or revert code/configuration while
+  leaving the v2 database file intact. Neither action deletes the other
+  backend's data: legacy JSON documents remain untouched, and new events
+  written only to v2 never appear in legacy JSON files. If rollback must carry
+  recent work, export it explicitly from v2 (`memory/retention.ts`).
+- **Diagnostics:** after finalization the CLI prints a metadata-only
+  `Memory health: ...` line (degraded/recall-failed render as a warning); an
+  unrecognised `ELAGENT_MEMORY_TYPE` fails startup with
+  `Invalid memory backend selection`. Health snapshots are metadata-only and
+  never include payloads, session strings, or credentials.
+
+Deployment, external service updates, and bulk migration of real user memory
+are separate actions that require explicit operator authorization; the rollout
+task only prepares a reviewable local candidate.
 
 ## Relationship to legacy memory
 

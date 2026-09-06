@@ -1,9 +1,14 @@
 # Memory improvements — implementation plan
 
 Prepared 2026-09-06 from the root checkout at `c0d5f09`. This directory contains
-16 focused implementation tasks. All start **TODO**. No memory code or runtime
-state was changed to produce this plan, and no implementation tests were run
-for this documentation-only task.
+16 focused implementation tasks. MI-01 through MI-15 are **DONE** — each
+numbered task file carries its own completion record with validation evidence
+and implementation commits. MI-16 (rollout and operator documentation) is the
+adoption step; see
+[16-rollout-and-operator-documentation.md](16-rollout-and-operator-documentation.md).
+No memory code or runtime state was changed to produce the original plan; the
+per-task completion records list the implementation commits and checks actually
+run.
 
 Start with [MI-01](01-contracts-and-identity.md). Each numbered file is a work
 order with source anchors, prerequisites, implementation steps, acceptance
