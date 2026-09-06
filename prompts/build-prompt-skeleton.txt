@@ -1,7 +1,4 @@
 ${claudeInstructions}
 
-Recent tool call TLDRs (oldest to newest; last ${historyLimit}):
-${toolHistory}
-
 Current command line prompt:
 ${commandLinePrompt}
