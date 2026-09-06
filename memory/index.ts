@@ -198,3 +198,10 @@ export type {
   SummaryAdvanceResult,
   SummaryCheckpointV2,
 } from "./incremental-summary.js";
+
+export { retrieveRelevant, retrieveRelevantRecords } from "./retrieval.js";
+export type {
+  RelevantRetrievalRequest,
+  RetrievedItemV2,
+  RetrievalResultV2,
+} from "./retrieval.js";
