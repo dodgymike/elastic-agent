@@ -1,6 +1,6 @@
 # MI-01 — Define versioned memory contracts and identity boundaries
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: None; start here.
 
@@ -62,14 +62,26 @@ Do not modify live session files or the legacy database. This task only introduc
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); working tree at main with pre-existing .spec-keeper/config and package.json/package-lock.json (tsx) changes preserved.
+Prerequisite evidence: None (MI-01 has no dependencies). Source anchors re-read against the current checkout before implementation.
+Reproduction / old behavior: memory/types.ts indexed primarily by session_id with optional user/plan filters; rememberAgentStep put the task ID into user_id (main.ts ~line 2235). No versioned envelope and no enforced scope existed.
 Changed files and behavior:
+  - memory/contracts-v2.ts (new): MemoryScopeV2/MemoryIdentityV2; versioned envelope (schemaVersion 1, positive per-session sequence, controlled kinds/outcomes); typed init/append/retrieve/flush/close results; validation helpers; canonicalizeWorkspacePath/deriveWorkspaceId; stableEventId/freshEventId; computeEventDigest.
+  - memory/legacy-compat.ts (new): LegacyMemoryModuleAdapter (legacy MemoryModule -> MemoryModuleV2); append fails closed on durability.
+  - memory/index.ts: additive re-exports of the new surface.
+  - docs/MEMORY_V2_CONTRACT.md (new): schema/identity decisions.
+  - test/memory-contract-v2.test.ts (new): scope/identity, envelope round-trip and rejection, digest conflict, workspace canonicalization, adapter tests.
+  - package.json: add test:memory-contract-v2 script (kept the pre-existing tsx dependency intact).
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-contract-v2 -> exit 0
+  - npm run build -> exit 0
+  - npm run test:memory-selection -> exit 0
+  - npm run test:memory -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean (exit 0)
+Schema / configuration / compatibility changes: new event schema version 1; no default backend change; legacy factories remain usable through the explicit adapter until rollout.
+Residual limitations and follow-up IDs: legacy adapter append reports failure (non-durable) by design; the durable event store lands in MI-03; persistent-v2 selection is deferred to MI-16.
+Rollback notes: remove the additive types/exports and their adapter; no stored-data migration is required.
+Implementation commit(s): 0d732be (implementation + tests + docs); completion record commit follows.
 ```
