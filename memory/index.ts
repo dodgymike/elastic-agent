@@ -166,3 +166,21 @@ export type {
   RuntimeCheckpointResult,
   RuntimeCheckpointStore,
 } from "./runtime-checkpoint.js";
+
+export {
+  STRUCTURED_PROJECTION_POLICY_VERSION,
+  buildStructuredProjection,
+  currentConstraints,
+  currentDecisions,
+  currentFacts,
+  emptyProjection,
+  evidenceBackedFacts,
+  extractStructuredRecords,
+  openWork,
+} from "./structured-records.js";
+export type {
+  StructuredProjection,
+  StructuredRecordKindV2,
+  StructuredRecordStatusV2,
+  StructuredRecordV2,
+} from "./structured-records.js";
