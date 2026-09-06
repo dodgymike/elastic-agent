@@ -2,6 +2,8 @@
 
 For repository-wide improvements, see the [self-repair backlog](docs/SELF_REPAIR_BACKLOG.md): prioritized epics and tasks with code evidence, acceptance criteria, and validation steps.
 
+For the detailed memory implementation workstream, start with [memory improvements](memory-improvements/README.md).
+
 For tool permission changes, HTTP destination configuration, and shell sandbox setup, see [security boundaries and migration](docs/SECURITY_BOUNDARIES.md).
 
 ## Requirements
