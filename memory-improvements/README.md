@@ -229,3 +229,7 @@ blocked on verification.
 > Index reconciliation note (documentation-only): this index was reconciled with
 > the verification-pass and re-verification commits recorded in the table above;
 > no implementation changes were made.
+
+> Re-check note (documentation-only, 2026-09-06): re-checked all 16 tasks
+> (MI-01..MI-16); every task remains DONE in both its header Status line and
+> its completion record, and no implementation changes were made.
