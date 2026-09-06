@@ -1,6 +1,6 @@
 # MI-16 — Roll out the new memory backend with explicit migration and rollback
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-15](15-regression-and-behavior-evaluations.md)
 
@@ -42,10 +42,10 @@ choose equivalent locations if current architecture makes them more appropriate.
 
 ## Acceptance criteria
 
-- [ ] A new user can follow the documented setup and prove restart recall with the supported runtime.
-- [ ] Unknown backend/configuration, incompatible schemas, and missing permissions fail with useful redacted diagnostics.
-- [ ] Rollback does not destroy old or new data and accurately describes what each backend can recall.
-- [ ] All earlier task records include validation evidence; the default is not promoted with unresolved required privacy, durability, scope, or context-budget failures.
+- [x] A new user can follow the documented setup and prove restart recall with the supported runtime.
+- [x] Unknown backend/configuration, incompatible schemas, and missing permissions fail with useful redacted diagnostics.
+- [x] Rollback does not destroy old or new data and accurately describes what each backend can recall.
+- [x] All earlier task records include validation evidence; the default is not promoted with unresolved required privacy, durability, scope, or context-budget failures.
 
 ## Validation
 
@@ -64,14 +64,27 @@ This task authorizes preparation of a local release candidate, not an external d
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan prepared); implementation started at fe83803 (MI-15).
+Prerequisite evidence: MI-01..MI-15 completion records are present with validation evidence; MI-15 offline aggregate `npm run test:memory-improvements` and the opt-in `memory:evaluate-live` harness are committed (fe83803).
+Reproduction / old behavior: the build script compiled only the legacy memory modules; README documented "(unset / unrecognised) -> persistent" with no persistent-v2, rollback, or health-diagnostic guidance; memory-improvements/README.md still said "All start TODO"; the main.ts MI-14 health wiring (reportMemoryHealth + rememberAgentStep degradation warning) was present but uncommitted.
 Changed files and behavior:
+  - package.json: `build` now compiles the full memory/ module set (index, types, privacy, inMemory, graph, persistent, composite, compaction, v2 event-store stack, backend-factory, retention, health, legacy-compat).
+  - README.md: corrected the backend matrix (unrecognised values are startup errors; persistent-v2 documented), restart-recall status, build/test notes, and added "Rollout, migration, and rollback".
+  - memory-improvements/README.md: intro records MI-01..MI-15 DONE and MI-16 as the adoption step.
+  - docs/SELF_REPAIR_BACKLOG.md: Epic 3 evidence note links MI-01..MI-16 and records residual limitations.
+  - main.ts: committed the previously-uncommitted MI-14 health wiring (reportMemoryHealth after finalization plus one warning per degradation episode in rememberAgentStep).
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
+  - npm run build -> exit 0 (compiles the full memory module list).
+  - npm run test:memory-selection -> OK (factory default=persistent; all selections; persistent-v2 opt-in; unknown rejected).
+  - npm run test:memory-health -> OK.
+  - npm run test:memory-backend-capabilities -> OK.
+  - git diff --check -> clean.
+Schema / configuration / compatibility changes: no event-store schema change in this task; `ELAGENT_MEMORY_TYPE=persistent-v2` stays opt-in and the legacy default is unchanged. `ELAGENT_MEMORY_OUTPUT_DIR`/`ELAGENT_MEMORY_OUTPUT_PATH` and `ELAGENT_MEMORY_EVENT_STORE_PATH` remain separate and are not silently reinterpreted as each other.
 Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - No standalone local preflight CLI yet; startup rejection plus the end-of-run `Memory health:` line cover the diagnostic path. A dedicated `memory:preflight` command is a follow-up.
+  - Default backend promotion is intentionally not performed; persistent-v2 remains opt-in until an explicit operator migration.
+  - `test:prompt-builder` stays excluded from the aggregate because of the pre-existing golden-fixture mismatch recorded under MI-09.
+Rollback notes: `ELAGENT_MEMORY_TYPE=persistent` (or unset) restores the legacy backend and leaves the v2 database file intact; legacy JSON and v2 SQLite data are independent. See README "Rollout, migration, and rollback".
+Implementation commit(s): 462da67 (implementation + main.ts MI-14 health wiring); this file's own commit records completion.
 ```
