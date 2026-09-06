@@ -152,7 +152,8 @@ import {
   updateSpecKeeperTask,
   updateTaskStatus,
   updateEpicStatus,
-  syncPlanStepTasks,
+  syncPlanStepTasksById,
+  reconcilePlanStepTasks,
   epicIdentifier,
 } from "./specKeeperFlow.ts";
 import { resolveSpecKeeperRuntimeDefaults, describeSpecKeeperRuntimeDefaults } from "./specKeeperConfig.ts";
@@ -1515,6 +1516,49 @@ function specKeeperClientOptions(defaults: any) {
 }
 
 /**
+ * Build stable step-task descriptors pairing each rendered execution step with
+ * its model-authored step ID. The stable ID (resolved by execution index, the
+ * same mapping runExecutionPhase uses) is what keeps an external Spec Keeper
+ * task attached to the right step when a replan reorders or rewrites steps.
+ */
+function planStepTaskDescriptors(planModel: any, activeSteps: string[]): Array<{ stepId: number; title: string }> {
+    if (!Array.isArray(activeSteps)) return [];
+    return activeSteps.map((title, index) => ({
+        stepId: planModel ? (planModelStepIdByIndex(planModel, index) ?? index + 1) : index + 1,
+        title: typeof title === "string" && title.trim().length > 0 ? title : `Plan step ${index + 1}`,
+    }));
+}
+
+/** Return a state's step tasks whether stored as a Map or a legacy array. */
+function specKeeperStepTaskValues(state: any): any[] {
+    if (state?.stepTasks instanceof Map) return [...state.stepTasks.values()];
+    if (Array.isArray(state?.stepTasks)) return state.stepTasks;
+    return [];
+}
+
+/**
+ * Reconcile the prompt-mode Spec Keeper step tasks against the replanned plan
+ * model. Matching is by stable step ID, never by array position. Best-effort
+ * through specKeeperSync: on failure the existing mapping is kept and the next
+ * replan retries, while the local plan state (plan model and ledgers) is never
+ * mutated here.
+ */
+async function reconcileSpecKeeperStepTasks(specKeeperState: any, planModel: any, activeSteps: string[]): Promise<void> {
+    if (!specKeeperState?.epic) return;
+    const descriptors = planStepTaskDescriptors(planModel, activeSteps);
+    const result = await specKeeperSync(
+        "plan step tasks reconciled after replan",
+        () => reconcilePlanStepTasks(
+            specKeeperState.epic,
+            specKeeperState.stepTasks instanceof Map ? specKeeperState.stepTasks : new Map(),
+            descriptors,
+            specKeeperState.stepTaskOptions ?? specKeeperState.taskUpdateOptions ?? {},
+        ),
+    );
+    if (result) specKeeperState.stepTasks = result.tasks;
+}
+
+/**
  * Run a best-effort Spec Keeper sync operation, logging success under the
  * dedicated [SPEC KEEPER] label and failures as clear, actionable warnings.
  * Operation names and statuses are logged; request/response bodies never are.
@@ -1647,7 +1691,7 @@ async function finalizePromptSpecKeeperAbort(error: RunAbortError): Promise<void
     if (state?.runTask) {
         await specKeeperSync("run task blocked", async () => updateTaskStatus(state.runTask, "blocked", abortNote, options));
     }
-    for (const stepTask of state?.stepTasks ?? []) {
+    for (const stepTask of specKeeperStepTaskValues(state)) {
         if (!stepTask) continue;
         if (String(stepTask.status ?? "").toLowerCase() === "done") continue;
         await specKeeperSync("plan step task blocked", async () => updateTaskStatus(stepTask, "blocked", abortNote, options));
@@ -2652,8 +2696,10 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
     const executionOutcomes = new Map<number, import("./step-outcome.js").StepOutcome>();
     // The stored PlanModel is the execution source of truth. `activeSteps` is a
     // rendered projection for prompts/display; step identity and completion
-    // criteria come from the model whenever it is present.
-    const planModel = configData?.planModel ?? null;
+    // criteria come from the model whenever it is present. This snapshot is
+    // refreshed after each applied replan so step IDs keep resolving against
+    // the current model, not the model the phase started with.
+    let planModel = configData?.planModel ?? null;
     configData.completedSteps = [];
     configData.executionAttempts = [];
     configData.replanAttemptCount = 0;
@@ -2695,11 +2741,16 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             // criteria below are what the run records and replans against.
             const stepId = planModel ? (planModelStepIdByIndex(planModel, index) ?? index + 1) : index + 1;
             const stepCriteria = planModel ? planModelCriteriaById(planModel, stepId) : [];
-            if (specKeeperState?.stepTasks?.[index]) {
+            // Resolve the external step task by stable step ID, never by array
+            // position, so a reordered plan keeps the right Spec Keeper task.
+            const stepTask = specKeeperState?.stepTasks instanceof Map
+                ? specKeeperState.stepTasks.get(stepId)
+                : specKeeperState?.stepTasks?.[index];
+            if (stepTask) {
                 await specKeeperSync(
-                    `step ${index + 1} marked in_progress`,
+                    `step ${stepId} marked in_progress`,
                     async () => updateSpecKeeperTask(
-                        specKeeperState.stepTasks[index],
+                        stepTask,
                         { status: "in_progress", status_note: `Executing plan step ${index + 1}.` },
                         specKeeperState.taskUpdateOptions,
                     ),
@@ -2768,11 +2819,11 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
                     ? feedbackEntry.feedback.summary
                     : undefined,
             });
-            if (specKeeperState?.stepTasks?.[index]) {
+            if (stepTask) {
                 await specKeeperSync(
-                    `step ${index + 1} marked ${reduction.specKeeperStatus}`,
+                    `step ${stepId} marked ${reduction.specKeeperStatus}`,
                     async () => updateSpecKeeperTask(
-                        specKeeperState.stepTasks[index],
+                        stepTask,
                         { status: reduction.specKeeperStatus, status_note: reduction.specKeeperNote },
                         specKeeperState.taskUpdateOptions,
                     ),
@@ -2795,6 +2846,14 @@ async function runExecutionPhase(activeSteps, plan, configData, executionContext
             const replanResult = await attemptReplan(feedbackEntry, activeSteps, index, configData);
             configData.activePlanSteps = [...activeSteps];
             configData.lastAppliedPlanChanges = appliedChanges;
+            if (replanResult?.applied) {
+                // A replan rebuilt the stored plan model. Refresh the local
+                // snapshot and reconcile the external step tasks by stable step
+                // ID so reordered, added, and removed steps keep the correct
+                // Spec Keeper task (never the array-position neighbour).
+                planModel = configData.planModel ?? planModel;
+                await reconcileSpecKeeperStepTasks(specKeeperState, planModel, activeSteps);
+            }
             if (worktree) {
                 // Stage all changes this step produced into the worktree. We never
                 // commit here; the review step commits only when it is satisfied.
@@ -3338,7 +3397,8 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
         specKeeperState = {
             epic: epicSync?.epic ?? null,
             runTask: null,
-            stepTasks: [],
+            stepTasks: new Map<number, any>(),
+            stepTaskOptions: null,
             taskUpdateOptions: skClientOptions,
         };
         activePromptSpecKeeperState = specKeeperState;
@@ -3376,14 +3436,15 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
                 ));
             }
 
-            const stepSync = await specKeeperSync("plan step tasks sync", async () => syncPlanStepTasks(
+            specKeeperState.stepTaskOptions = {
+                keyPrefix: specKeeperDefaults.defaultTask?.keyPrefix,
+                epicId: epicIdentifier(epicSync.epic),
+                ...skClientOptions,
+            };
+            const stepSync = await specKeeperSync("plan step tasks sync", async () => syncPlanStepTasksById(
                 epicSync.epic,
-                activeSteps,
-                {
-                    keyPrefix: specKeeperDefaults.defaultTask?.keyPrefix,
-                    epicId: epicIdentifier(epicSync.epic),
-                    ...skClientOptions,
-                },
+                planStepTaskDescriptors(planModel, activeSteps),
+                specKeeperState.stepTaskOptions,
             ));
             if (stepSync) specKeeperState.stepTasks = stepSync.tasks;
         }

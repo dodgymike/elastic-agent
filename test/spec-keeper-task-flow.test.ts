@@ -5,6 +5,8 @@ import {
   updateTaskStatus,
   updateEpicStatus,
   syncPlanStepTasks,
+  syncPlanStepTasksById,
+  reconcilePlanStepTasks,
   taskIdentifier,
   generateTaskKey,
   selectMatchingTask,
@@ -108,6 +110,100 @@ assert.equal(selectMatchingTask([taskA, taskB], undefined, "totally different"),
     status: "in_progress",
     epic_key: "EPIC-A",
   });
+
+  // syncPlanStepTasksById keys tasks by stable step ID instead of array position.
+  requests.length = 0;
+  const byId = await syncPlanStepTasksById(
+    epicA,
+    [
+      { stepId: 10, title: "First step" },
+      { stepId: 20, title: "Second step" },
+    ],
+    { keyPrefix: "EA-" },
+    noTasksClient as never,
+  );
+  assert.equal(byId.createdCount, 2);
+  assert.equal(byId.tasks.size, 2);
+  assert.equal(byId.tasks.get(10)?.status, "in_progress");
+  assert.equal(byId.tasks.get(20)?.status, "todo");
+  assert.equal(byId.tasks.has(1), false);
+
+  // reconcilePlanStepTasks keeps existing tasks by stable ID even when steps
+  // are reordered/reworded, and creates a task only for newly introduced IDs.
+  requests.length = 0;
+  const reconcileClient = async (opts: { path: string; method?: string; body?: unknown }) => {
+    (requests as any).push({ url: opts.path, method: opts.method ?? "GET", body: opts.body });
+    const { path, method, body } = opts;
+    if (path.startsWith("/tasks") && method === "GET") return { status: 200, statusText: "OK", headers: {}, body: [] as unknown[] };
+    if (path.startsWith("/tasks") && method === "POST") {
+      return { status: 201, statusText: "Created", headers: {}, body: { key: (body as any)?.key, title: (body as any)?.title, epic_key: (body as any)?.epic_key, status: (body as any)?.status } };
+    }
+    if (path.startsWith("/tasks") && method === "PATCH") {
+      return { status: 200, statusText: "OK", headers: {}, body: { key: (path as string).split("/")[2], ...(body as object) } };
+    }
+    return { status: 200, statusText: "OK", headers: {}, body: {} };
+  };
+  const originalTasks = new Map<number, any>([
+    [1, { key: "S-1", title: "Step one", status: "done" }],
+    [2, { key: "S-2", title: "Step two", status: "todo" }],
+  ]);
+  const reconciled = await reconcilePlanStepTasks(
+    epicA,
+    originalTasks,
+    [
+      { stepId: 2, title: "Step two (reworded)" },
+      { stepId: 3, title: "Step three" },
+      { stepId: 1, title: "Step one" },
+    ],
+    { keyPrefix: "EA-", epicId: "EPIC-A" },
+    reconcileClient as never,
+  );
+  assert.deepEqual(reconciled.createdStepIds, [3]);
+  assert.deepEqual(reconciled.removedStepIds, []);
+  assert.equal(reconciled.tasks.get(1), originalTasks.get(1));
+  assert.equal(reconciled.tasks.get(2), originalTasks.get(2));
+  assert.equal(reconciled.tasks.get(3)?.title, "Step three");
+  assert.equal(originalTasks.size, 2);
+
+  // A step ID that disappears is blocked (unless done) and dropped.
+  requests.length = 0;
+  const withRemoval = new Map<number, any>([
+    [1, { key: "S-1", title: "Step one", status: "done" }],
+    [2, { key: "S-2", title: "Step two", status: "todo" }],
+    [3, { key: "S-3", title: "Step three", status: "in_progress" }],
+  ]);
+  const afterRemoval = await reconcilePlanStepTasks(
+    epicA,
+    withRemoval,
+    [
+      { stepId: 1, title: "Step one" },
+      { stepId: 3, title: "Step three" },
+    ],
+    { keyPrefix: "EA-", epicId: "EPIC-A" },
+    reconcileClient as never,
+  );
+  assert.deepEqual(afterRemoval.removedStepIds, [2]);
+  assert.equal(afterRemoval.tasks.has(2), false);
+  const patches = requests.filter((entry) => entry.method === "PATCH");
+  assert.equal(patches.length, 1);
+  assert.deepEqual(patches[0], {
+    url: "/tasks/S-2",
+    method: "PATCH",
+    body: { status: "blocked", status_note: "Removed from the plan by a replan." },
+  });
+  assert.equal(withRemoval.size, 3);
+
+  // Removed tasks that are already done are left untouched.
+  requests.length = 0;
+  const doneRemoval = await reconcilePlanStepTasks(
+    epicA,
+    new Map([[9, { key: "S-9", title: "Done step", status: "done" }]]),
+    [],
+    { keyPrefix: "EA-", epicId: "EPIC-A" },
+    reconcileClient as never,
+  );
+  assert.deepEqual(doneRemoval.removedStepIds, [9]);
+  assert.equal(requests.filter((entry) => entry.method === "PATCH").length, 0);
 
   console.log("Spec Keeper task flow fixtures passed");
 })().catch((error) => {

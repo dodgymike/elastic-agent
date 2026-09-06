@@ -291,6 +291,31 @@ export interface PlanStepSyncOptions extends Omit<SpecKeeperOptions, "path"> {
   tasksPath?: string;
 }
 
+/**
+ * One plan step as it should be represented in Spec Keeper: a stable step ID
+ * plus the rendered step text used for the external task title/description.
+ * The stable ID (not the array position) is what ties an external task back
+ * to a step across replans, so reordered or reworded steps keep their own
+ * task instead of silently reusing a neighbouring one.
+ */
+export interface PlanStepTaskDescriptor {
+  readonly stepId: number;
+  readonly title: string;
+}
+
+/** Result of syncing plan step tasks keyed by stable step ID. */
+export interface SyncPlanStepTasksByIdResult {
+  tasks: Map<number, TaskLike>;
+  createdCount: number;
+}
+
+/** Result of reconciling plan step tasks against a replanned model. */
+export interface ReconcilePlanStepTasksResult {
+  tasks: Map<number, TaskLike>;
+  createdStepIds: number[];
+  removedStepIds: number[];
+}
+
 export interface EpicUpdateOptions extends Omit<SpecKeeperOptions, "path"> {
   epicsPath?: string;
 }
@@ -452,9 +477,43 @@ export async function updateEpicStatus(
 }
 
 /**
- * Create or reuse one task per plan step under the epic. The first step is
- * created/updated as in_progress and the rest as todo so the execution phase
- * can flip each step task as it runs.
+ * Create or reuse one task per plan step keyed by the step's stable ID. The
+ * first step is created/updated as in_progress and the rest as todo so the
+ * execution phase can flip each step task as it runs.
+ */
+export async function syncPlanStepTasksById(
+  epic: EpicLike,
+  descriptors: readonly PlanStepTaskDescriptor[],
+  options: PlanStepSyncOptions,
+  client: (opts: SpecKeeperOptions) => Promise<SpecKeeperResult> = specKeeperDefault,
+): Promise<SyncPlanStepTasksByIdResult> {
+  const epicId = epicIdentifier(epic);
+  const tasks = new Map<number, TaskLike>();
+  let createdCount = 0;
+
+  for (let index = 0; index < descriptors.length; index += 1) {
+    const descriptor = descriptors[index];
+    const synced = await syncSpecKeeperTask(
+      {
+        ...options,
+        title: descriptor.title,
+        description: `Plan step ${descriptor.stepId} under epic ${epicId ?? "(no id)"}: ${descriptor.title}`,
+        epicId,
+        defaultStatus: index === 0 ? "in_progress" : "todo",
+      },
+      client,
+    );
+    tasks.set(descriptor.stepId, synced.task);
+    if (synced.created) createdCount += 1;
+  }
+
+  return { tasks, createdCount };
+}
+
+/**
+ * Backward-compatible wrapper around {@link syncPlanStepTasksById} for callers
+ * that still describe plan steps as an array of rendered strings. Steps are
+ * assigned sequential IDs matching their array position.
  */
 export async function syncPlanStepTasks(
   epic: EpicLike,
@@ -462,25 +521,72 @@ export async function syncPlanStepTasks(
   options: PlanStepSyncOptions,
   client: (opts: SpecKeeperOptions) => Promise<SpecKeeperResult> = specKeeperDefault,
 ): Promise<{ tasks: TaskLike[]; createdCount: number }> {
-  const epicId = epicIdentifier(epic);
-  const tasks: TaskLike[] = [];
-  let createdCount = 0;
+  const descriptors = steps.map((title, index) => ({ stepId: index + 1, title }));
+  const result = await syncPlanStepTasksById(epic, descriptors, options, client);
+  return { tasks: [...result.tasks.values()], createdCount: result.createdCount };
+}
 
-  for (let index = 0; index < steps.length; index += 1) {
-    const step = steps[index];
+/**
+ * Reconcile the Spec Keeper step-task mapping against a replanned model.
+ *
+ * Steps are matched by stable step ID, never by array position:
+ *
+ *   - a step ID already present keeps its existing external task (so a reordered
+ *     or reworded step never silently reuses a different task);
+ *   - a newly introduced step ID gets a fresh task created under the epic;
+ *   - a step ID that no longer exists in the model has its task blocked (unless
+ *     it is already done) and is dropped from the returned mapping.
+ *
+ * The input mapping is never mutated. Failures are propagated to the caller so
+ * the runtime can retry the whole reconciliation safely; the local plan state
+ * is not modified on error.
+ */
+export async function reconcilePlanStepTasks(
+  epic: EpicLike,
+  currentTasks: ReadonlyMap<number, TaskLike> | null | undefined,
+  descriptors: readonly PlanStepTaskDescriptor[],
+  options: PlanStepSyncOptions,
+  client: (opts: SpecKeeperOptions) => Promise<SpecKeeperResult> = specKeeperDefault,
+): Promise<ReconcilePlanStepTasksResult> {
+  const epicId = epicIdentifier(epic);
+  const tasks = new Map<number, TaskLike>();
+  const createdStepIds: number[] = [];
+  const removedStepIds: number[] = [];
+
+  for (const descriptor of descriptors) {
+    const existing = currentTasks?.get(descriptor.stepId);
+    if (existing) {
+      tasks.set(descriptor.stepId, existing);
+      continue;
+    }
     const synced = await syncSpecKeeperTask(
       {
         ...options,
-        title: step,
-        description: `Plan step ${index + 1} of ${steps.length} under epic ${epicId ?? "(no id)"}: ${step}`,
+        title: descriptor.title,
+        description: `Plan step ${descriptor.stepId} under epic ${epicId ?? "(no id)"}: ${descriptor.title}`,
         epicId,
-        defaultStatus: index === 0 ? "in_progress" : "todo",
+        defaultStatus: "todo",
       },
       client,
     );
-    tasks.push(synced.task);
-    if (synced.created) createdCount += 1;
+    tasks.set(descriptor.stepId, synced.task);
+    createdStepIds.push(descriptor.stepId);
   }
 
-  return { tasks, createdCount };
+  if (currentTasks) {
+    for (const [stepId, task] of currentTasks) {
+      if (tasks.has(stepId)) continue;
+      removedStepIds.push(stepId);
+      if (String(task.status ?? "").toLowerCase() === "done") continue;
+      await updateTaskStatus(
+        task,
+        "blocked",
+        "Removed from the plan by a replan.",
+        options,
+        client,
+      );
+    }
+  }
+
+  return { tasks, createdStepIds, removedStepIds };
 }
