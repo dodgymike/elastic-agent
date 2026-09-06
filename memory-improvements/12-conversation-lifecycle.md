@@ -72,3 +72,15 @@ Residual limitations and follow-up IDs: conversationStats metadata is the MI-14 
 Rollback notes: revert llm/multi-turn-runtime.ts and the closeRuntimeClient wiring in main.ts; test/multi-turn-lifecycle.test.ts and the package.json script are additive and can be dropped independently.
 Implementation commit(s): a73932e
 ```
+
+Verification re-check (verification pass, plan step 10): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:multi-turn-runtime, test:multi-turn-memory,
+    test:abort-paths, test:memory-context-budget, test:memory-safe-compaction, build.
+  - git diff --check clean.
+  - Prerequisites re-confirmed: MI-01 Status DONE (0d732be/0dfa638) and MI-09 Status
+    DONE (c7c4d0f/57e3dcb); MI-12 implementation commit a73932e and completion record
+    commit 2850313 present in git log.
+  - Skipped checks: none. No code change; pre-existing working-tree changes left
+    untouched.
