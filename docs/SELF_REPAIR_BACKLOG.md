@@ -33,13 +33,13 @@ All 40 backlog tasks map to Spec Keeper tasks under `self-repair-epic-1` through
 | RUN-01..05 | — | — | — | all |
 | PROMPT-01..03 | — | — | — | all |
 | BUS-01..02 | — | — | — | all |
-| SECLOG-01..03 | — | — | SECLOG-01 | SECLOG-02..03 |
+| SECLOG-01..03 | — | SECLOG-01, SECLOG-03 | — | SECLOG-02 |
 | BUILD-01..02, TEST-01..03 | — | BUILD-01 | — | BUILD-02, TEST-01..03 |
-| SELF-01..03 | — | — | SELF-03 | SELF-01..02 |
+| SELF-01..03 | SELF-03 | — | — | SELF-01..02 |
 
-Totals: 4 done, 4 blocked, 2 in progress, 30 todo. Blocked items are implemented and await supported-host validation. Open P0 todo items: none (TOOL-02 and TOOL-03 are blocked pending supported-host test verification; SECLOG-01 is in progress, inspected and deferred). Step-2 reconciliation (2026-09-06): live SpecKeeper shows SELF-03 in_progress (version 6, note "Executing plan step 2."), so the snapshot above corrects the earlier "SELF-03 done" total of 5 done.
+Totals: 5 done, 6 blocked, 0 in progress, 29 todo. Blocked items await supported-host verification: SEC-05, TOOL-02, TOOL-03, BUILD-01, and SECLOG-03 are implemented; SECLOG-01 was inspected and its implementation is deferred to a verification-capable host. Open P0 todo items: none (TOOL-02, TOOL-03, and SECLOG-01 are blocked pending supported-host verification). Step-6 reconciliation (2026-09-06): live SpecKeeper shows SELF-03 done and SECLOG-03 blocked; SECLOG-01 is deferred pending supported-host verification and recorded as blocked. The earlier step-2 note ("SELF-03 in_progress") is superseded.
 
-Step-5 progress: TOOL-02 (`a3025a4`) and TOOL-03 (`830ebdd`) were implemented with focused test suites; both are blocked only on supported-host test verification (the dev host's shell sandbox rejects namespace setup). SECLOG-01 was inspected and intentionally deferred rather than changing runtime logging unverified.
+Step-5 progress: TOOL-02 (`a3025a4`) and TOOL-03 (`830ebdd`) were implemented with focused test suites; both are blocked only on supported-host test verification (the dev host's shell sandbox rejects namespace setup). SECLOG-01 was inspected and intentionally deferred rather than changing runtime logging unverified. SECLOG-03 (`a284a35`) added precise ignore rules, an artifact-policy document, and a focused test; it is blocked only on supported-host test execution plus index-only untracking of `database.sqlite`/`llm2.log` (commands documented in `docs/ARTIFACT_POLICY.md`).
 
 ## Assessment and evidence
 
@@ -328,6 +328,7 @@ Outcome: operators can diagnose cost, latency, and failure without full conversa
 
 ### SECLOG-01 — Redact and bound logs and persisted artifacts [P0, M]
 
+- **Status:** Blocked — inspected (`llm-log.ts`, `prompt-logger.ts`, `multi-turn-runtime.ts`); runtime logging changes are deferred to a verification-capable host (this host's shell sandbox rejects namespace setup). Required on the supported host: `npm run test:llm-log`, `npm run test:prompt-logger`, `npm run test:multi-turn-memory`.
 - **Evidence — Observed:** [`MultiTurnLlmRuntime`](../llm/multi-turn-runtime.ts) always calls `appendLlmLog` and prints a full prompt on adapter errors. [`llm-log.ts`](../llm/llm-log.ts) appends synchronously without rotation or explicit file mode. `--log-prompts` controls an additional log, not this baseline log. [`normalizeToolParameters`](../tool-safety-classifier.ts) says normalized parameters must not be logged, but its runtime call flows through the shared logger.
 - **Work:** default to metadata; make bounded content logging explicit; apply central redaction before every sink, including errors and memory; use restrictive permissions, rotation, retention, and safe log path resolution. Treat synthetic secret matching as a defense, not a guarantee of detecting all sensitive text.
 - **Accept:** sentinel secrets in user text, tool errors, headers, memory, and adapter failures never appear in default logs or stderr; content logging is explicit and redacted; file modes and rotation are tested; classifier calls honor their logging policy.
@@ -342,6 +343,7 @@ Outcome: operators can diagnose cost, latency, and failure without full conversa
 
 ### SECLOG-03 — Clean up artifact tracking policy [P1, S]
 
+- **Status:** Blocked — implemented and committed (`a284a35`); test verification and index-only untracking of `database.sqlite`/`llm2.log` are pending on a supported host (`npm run test:artifact-policy`, `npm run build`, `git rm --cached database.sqlite llm2.log`). See [`ARTIFACT_POLICY.md`](ARTIFACT_POLICY.md).
 - **Evidence — Observed:** `git ls-files` lists `database.sqlite` and `llm2.log`; their contents were not inspected. `memory-output/` is untracked and not excluded by [`.gitignore`](../.gitignore), despite README describing it as ignored. This is an artifact-policy issue, not proof those files contain secrets.
 - **Work:** inventory tracked generated artifacts by metadata first, classify fixtures versus runtime outputs, add precise ignore rules, and move sanitized examples into documented fixtures. Remove tracked runtime artifacts only after confirming their role; assess credential exposure only through an authorized redacted scan.
 - **Accept:** a normal run leaves no memory/log/state artifacts eligible for accidental staging; required fixtures remain available; documentation matches ignore behavior. Do not rewrite history or rotate credentials without evidence and appropriate authorization.
