@@ -1,6 +1,6 @@
 # MI-10 — Compact derived summaries without losing constraints or progress
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-09](09-context-budget-and-cache.md)
 
@@ -63,14 +63,25 @@ Lossy summaries are replaceable projections. Never delete events merely because 
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-09 commits present.
+Prerequisite evidence: MI-09 DONE (c7c4d0f/57e3dcb).
+Reproduction / old behavior: compaction only validated syntax/size and had no revision check, cancellation, or protected-reference contract.
 Changed files and behavior:
+  - memory/safe-compaction.ts (new): SafeCompactor with protected structured references, versioned response validation, stale revision rejection, cancellation/deadline, retry suppression; events never mutated.
+  - memory/index.ts: export safe-compaction surface.
+  - test/memory-safe-compaction.test.ts (new): protected-reference preservation, missing/fabricated references, oversized/empty/cancelled output, retry suppression.
+  - package.json: add test:memory-safe-compaction script.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-safe-compaction -> exit 0
+  - npm run test:memory-compaction -> exit 0
+  - npm run test:memory-compaction-prompt -> exit 0
+  - npm run test:memory-facts -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: derived summary policyVersion=1; no storage schema change; existing compaction component unchanged.
+Residual limitations and follow-up IDs: semantic quality beyond protected facts deferred to MI-15; next incremental/finalize wiring remains opt-in until MI-16.
+Rollback notes: remove the additive safe-compaction module and exports; derived summaries rebuild from events.
+Implementation commit(s): 2db6a34 (implementation + tests); completion record commit follows.
 ```
