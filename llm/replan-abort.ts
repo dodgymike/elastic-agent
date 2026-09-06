@@ -29,7 +29,7 @@ export function phaseRestartRequired(previousPhase: PlanPhase | undefined, nextP
 
 /**
  * Validate a top-level `phase` value present on a replan response object.
- * Mirrors the plan-parser contract in prompts/planning-suffix.txt: a present
+ * Mirrors the plan-parser contract in prompts/planning-prefix.txt: a present
  * value must be a non-empty string or integer. Throws a descriptive error
  * otherwise.
  */

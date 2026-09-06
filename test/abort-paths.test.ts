@@ -152,7 +152,7 @@ async function testPlanningAbortJson(): Promise<void> {
     assert.equal(parsePlanOrAbort('{"abort":true}').valid, false);
     assert.match((parsePlanOrAbort('{"abort":true}') as { reason: string }).reason, /non-empty 'reason'/);
 
-    // Fenced JSON is accepted, matching the planning suffix contract.
+    // Fenced JSON is accepted, matching the planning prefix contract.
     const fenced = parsePlanOrAbort('```json\n{"abort":true,"reason":"blocked"}\n```');
     assert.ok(fenced.valid && fenced.result.kind === "abort");
     console.log("  ok: planning JSON abort result is parsed and validated");
@@ -197,7 +197,7 @@ async function testReplanPhaseParsingAndRestart(): Promise<void> {
     assert.ok(noPhase.valid && !(noPhase as typeof noPhase & { phase?: unknown }).phase, "absent phase stays undefined");
 
     // Invalid phase types are rejected (whitespace string, float, boolean,
-    // object, null) matching the planning-suffix contract.
+    // object, null) matching the planning-prefix contract.
     for (const bad of ["   ", 1.5, true, {}, null]) {
         const result = parseReplanResponse(JSON.stringify({ steps: ["a"], phase: bad }));
         assert.equal(result.valid, false, `reject invalid replan phase ${JSON.stringify(bad)}`);

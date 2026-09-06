@@ -31,7 +31,7 @@ agent-facing operating instructions are not part of this extraction.
 
 | File                            | Constant / use                         | Source        |
 |---------------------------------|----------------------------------------|---------------|
-| `planning-suffix.txt`           | `planningSuffix`                       | `main.ts`     |
+| `planning-prefix.txt`           | `planningPrefix`                       | `main.ts`     |
 | `execution-feedback-format.txt` | `executionFeedbackFormat`              | `main.ts`     |
 | `build-prompt-skeleton.txt`     | `buildPromptTemplate`                  | `main.ts`     |
 | `step-execution-prompt.txt`     | `stepExecutionPromptTemplate`          | `main.ts`     |
@@ -70,7 +70,7 @@ repository root).
 In `main.ts`:
 
 ```ts
-const planningSuffix            = readFileSync("prompts/planning-suffix.txt", "utf-8");
+const planningPrefix            = readFileSync("prompts/planning-prefix.txt", "utf-8");
 const executionFeedbackFormat   = readFileSync("prompts/execution-feedback-format.txt", "utf-8");
 const buildPromptTemplate       = readFileSync("prompts/build-prompt-skeleton.txt", "utf-8");
 const stepExecutionPromptTemplate = readFileSync("prompts/step-execution-prompt.txt", "utf-8");
@@ -97,26 +97,26 @@ Callers compute `feedbackJson`, `remainingPlan`, `stepNumber`, and `stepCount`
 before rendering. Custom templates using JavaScript expressions must migrate
 to those named placeholders. No template can execute JavaScript.
 
-The remaining files (`planning-suffix.txt`, `execution-feedback-format.txt`,
+The remaining files (`planning-prefix.txt`, `execution-feedback-format.txt`,
 `json-retry-hint.txt`) are plain text with no interpolation; they are used
 verbatim.
 
 ## Per-file reference
 
-### `planning-suffix.txt`
+### `planning-prefix.txt`
 
-The exact suffix appended to the end of a planning request so the model
+The stable prefix placed before the dynamic content of a planning request so the model
 returns a concrete, later-executable plan rather than just answering. Used in
 the planning stage and the review-phase plan step of `main()`:
 
 ```ts
-const planningResponse = await client.create({ input: `${prompt}\n\n${planningSuffix}` });
+const planningResponse = await client.create({ input: `${planningPrefix}\n\n${prompt}` });
 ```
 
 Plain text; no interpolation.
 
 The required plan JSON shape is `{ "tldr", "steps", "expected_outcome" }`.
-The suffix also documents an **optional top-level `phase` field** (e.g.
+The prefix also documents an **optional top-level `phase` field** (e.g.
 `"phase": 1` or `"phase": "design"`) that identifies a major stage of work
 with its own steps. `phase` may only be present for plans with **very high
 complexity** that genuinely need multiple phases and multiple steps; for
@@ -177,7 +177,7 @@ Interpolation points:
 | `${toolHistory}`       | recent tool-call TLDRs (numbered) |
 | `${commandLinePrompt}` | the current positional CLI prompt |
 
-Rendered by `buildPrompt()` before the planning suffix is appended.
+Rendered by `buildPrompt()` before the planning prefix is appended.
 
 ### `self-modification-section.txt`
 
@@ -218,7 +218,7 @@ numbered revised plan. The revised plan is validated by
 by `parseReplanResponse` in `llm/replan-abort.ts`.
 
 The prompt is phase-aware. It documents the optional top-level `phase` field
-that mirrors the planner prompt (`planning-suffix.txt`): a `phase` may only be
+that mirrors the planner prompt (`planning-prefix.txt`): a `phase` may only be
 proposed for very-high-complexity plans that genuinely span multiple phases and
 multiple steps, and when present it must be a non-empty string or integer. The
 prompt states that proposing a **different** phase than the current one causes a
@@ -333,7 +333,7 @@ The canonical order is:
 
 **Hard invariant (P0):** no dynamic text may appear before the stable prefix.
 Trailing, cache-friendly additions that already satisfy the invariant are left
-where they are: `planning-suffix.txt`, `self-modification-section.txt` (flag
+where they are: `self-modification-section.txt` (flag
 gated), `startDirWarning`, retry/parse-error hints, and the DeepSeek JSON retry
 hint (a trailing system message).
 
@@ -342,8 +342,8 @@ Per-prompt target order:
 | Prompt | Current | Target |
 |---|---|---|
 | Planning-necessity | `planning-necessity.prompt` → user request → memory | `planning-necessity.prompt` → user request → memory |
-| Opening planning | `CLAUDE.md` → history → current prompt → `planning-suffix.txt` → memory | `CLAUDE.md` → history → current prompt → `planning-suffix.txt` → memory |
-| Review-plan | `reviewPlanGoal` → `planning-suffix.txt` → memory | `reviewPlanGoal` → `planning-suffix.txt` → memory |
+| Opening planning | `planning-prefix.txt` → `CLAUDE.md` → history → current prompt → memory | `planning-prefix.txt` → `CLAUDE.md` → history → current prompt → memory |
+| Review-plan | `planning-prefix.txt` → `reviewPlanGoal` → memory | `planning-prefix.txt` → `reviewPlanGoal` → memory |
 | Step execution | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context | `CLAUDE.md` → `execution-feedback-format.txt` → `toolsAvailable` → commit → plan → step → execution context |
 | Replan | `CLAUDE.md` → completed work/feedback/findings/remaining steps | unchanged (already stable-first) |
 | Review | `CLAUDE.md` → original prompt/plan/executed steps/changes/learnings | unchanged (already stable-first) |

@@ -31,7 +31,7 @@ export interface PlanStep {
 
 /**
  * A validated top-level `phase` value: a trimmed non-empty string or an
- * integer, as constrained by the planning prompt (`prompts/planning-suffix.txt`).
+ * integer, as constrained by the planning prompt (`prompts/planning-prefix.txt`).
  */
 export type PlanPhase = string | number;
 
@@ -42,7 +42,7 @@ export interface PlanObject {
     /**
      * Optional top-level field identifying a major stage of work with its own
      * steps. Only present for very-high-complexity plans; when present it is a
-     * non-empty string or integer (see prompts/planning-suffix.txt).
+     * non-empty string or integer (see prompts/planning-prefix.txt).
      */
     phase?: PlanPhase;
 }
@@ -76,7 +76,7 @@ type ExtractResult =
  * Validate a top-level `phase` value that is present on a plan object.
  * Returns a normalized phase (trimmed string or integer) and throws a
  * descriptive error when it is not a non-empty string or integer, matching the
- * contract in prompts/planning-suffix.txt.
+ * contract in prompts/planning-prefix.txt.
  */
 function validatePhase(value: unknown): PlanPhase {
     if (typeof value === "string") {
@@ -150,7 +150,7 @@ export function extractJsonFromResponse(response: string): string {
  * objects, each carrying a `step_number` (number) and a `tldr` (string).
  *
  * The optional top-level `phase` field is validated when present (it must be a
- * non-empty string or integer, per prompts/planning-suffix.txt) and exposed on
+ * non-empty string or integer, per prompts/planning-prefix.txt) and exposed on
  * the returned plan. When `options.requirePhase` is true (very-high-complexity
  * plans) the field is required and its absence is a validation error.
  */

@@ -1,7 +1,7 @@
 // Prompt-consistency tests for the phase-aware replanner prompt
 // (prompts/replan-prompt.txt). These verify that the prompt text documents the
 // same top-level "phase" contract that the planner prompt
-// (prompts/planning-suffix.txt) and the handler (llm/replan-abort.ts
+// (prompts/planning-prefix.txt) and the handler (llm/replan-abort.ts
 // phaseRestartRequired) implement, so the LLM-facing contract and the runtime
 // behavior cannot drift silently.
 //
@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { phaseRestartRequired } from "../llm/replan-abort.js";
 
 const replannerText = readFileSync("prompts/replan-prompt.txt", "utf-8");
-const plannerText = readFileSync("prompts/planning-suffix.txt", "utf-8");
+const plannerText = readFileSync("prompts/planning-prefix.txt", "utf-8");
 
 async function testReplannerMentionsPhaseField(): Promise<void> {
   // The replanner prompt must document the optional top-level "phase" field and
@@ -20,7 +20,7 @@ async function testReplannerMentionsPhaseField(): Promise<void> {
   assert.match(replannerText, /"phase"/, "replanner prompt must mention the top-level phase field");
   assert.match(replannerText, /top-level JSON field/i, "replanner prompt must call phase a top-level field");
   assert.match(replannerText, /major stage/i, "replanner prompt must describe phase as a major stage");
-  assert.match(replannerText, /planning-suffix\.txt/, "replanner prompt must reference the planner prompt contract");
+  assert.match(replannerText, /planning-prefix\.txt/, "replanner prompt must reference the planner prompt contract");
   console.log("  ok: replanner prompt documents the top-level phase field");
 }
 

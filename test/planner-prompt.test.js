@@ -1,7 +1,7 @@
 // Unit tests for the planner prompt template assembly (planner-prompt.ts):
-//   buildPlanningPrompt       - initial planning prompt (user prompt + planning suffix)
+//   buildPlanningPrompt       - initial planning prompt (planning prefix + user prompt)
 //   buildPlanningRetryPrompt  - retry hint when the plan was not valid JSON
-//   buildReviewPlanPrompt     - review-plan prompt (goal + planning suffix)
+//   buildReviewPlanPrompt     - review-plan prompt (planning prefix + goal)
 //   buildReplanPrompt         - phase-aware replanner prompt (template interpolation)
 //   buildReplanRetryPrompt    - retry hint when the revised plan was not valid JSON
 // Compiled into test/.planner-prompt-build by the test:planner-prompt npm script.
@@ -19,10 +19,10 @@ function check(name, cond) {
     else { console.error(`FAIL: ${name}`); failures += 1; }
 }
 
-// A representative planning suffix template (mirrors prompts/planning-suffix.txt
+// A representative planning prefix template (mirrors prompts/planning-prefix.txt
 // structure). Contains a ${phase} interpolation point so we can assert that the
-// phase-aware suffix contents flow through unchanged to the prompt.
-const PLANNING_SUFFIX = "Return a JSON plan object. For very-high-complexity work include a top-level \"phase\". ${phaseHint}";
+// phase-aware prefix contents flow through unchanged to the prompt.
+const PLANNING_PREFIX = "Return a JSON plan object. For very-high-complexity work include a top-level \"phase\". ${phaseHint}";
 
 // A representative replan-prompt template with the interpolation points consumed
 // by buildReplanPrompt (see planner-prompt.ts ReplanPromptInputs). It mirrors
@@ -40,12 +40,12 @@ const REPLAN_TEMPLATE = [
 // Simple numbered plan formatter matching the CLI's formatPlan shape.
 const formatPlan = (steps) => steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
 
-// 1. buildPlanningPrompt appends the phase-aware planning suffix to the prompt.
+// 1. buildPlanningPrompt prepends the phase-aware planning prefix to the prompt.
 {
-    const out = buildPlanningPrompt("Review the codebase", PLANNING_SUFFIX);
-    check("buildPlanningPrompt keeps the prompt text", out.startsWith("Review the codebase"));
-    check("buildPlanningPrompt appends the planning suffix", out.endsWith(PLANNING_SUFFIX));
-    check("buildPlanningPrompt separates sections with a blank line", out.includes("Review the codebase\n\nReturn"));
+    const out = buildPlanningPrompt("Review the codebase", PLANNING_PREFIX);
+    check("buildPlanningPrompt keeps the prompt text", out.endsWith("Review the codebase"));
+    check("buildPlanningPrompt prepends the planning prefix", out.startsWith(PLANNING_PREFIX));
+    check("buildPlanningPrompt separates sections with a blank line", out === `${PLANNING_PREFIX}\n\nReview the codebase`);
 }
 
 // 2. buildPlanningRetryPrompt surfaces the parse failure on the prompt.
@@ -57,12 +57,12 @@ const formatPlan = (steps) => steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
 }
 
 // 3. buildReviewPlanPrompt carries the review goal plus the same phase-aware
-//    planning suffix so the review uses the identical JSON contract.
+//    planning prefix so the review uses the identical JSON contract.
 {
-    const out = buildReviewPlanPrompt("Conduct a review", PLANNING_SUFFIX);
-    check("buildReviewPlanPrompt keeps the review goal", out.startsWith("Conduct a review"));
-    check("buildReviewPlanPrompt appends the planning suffix", out.endsWith(PLANNING_SUFFIX));
-    check("buildReviewPlanPrompt separates sections with a blank line", out.includes("Conduct a review\n\nReturn"));
+    const out = buildReviewPlanPrompt("Conduct a review", PLANNING_PREFIX);
+    check("buildReviewPlanPrompt keeps the review goal", out.endsWith("Conduct a review"));
+    check("buildReviewPlanPrompt prepends the planning prefix", out.startsWith(PLANNING_PREFIX));
+    check("buildReviewPlanPrompt separates sections with a blank line", out === `${PLANNING_PREFIX}\n\nConduct a review`);
 }
 
 // 4. buildReplanPrompt interpolates every replanner input (phase-aware). The

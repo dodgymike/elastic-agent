@@ -2,10 +2,10 @@
  * Planner prompt template logic.
  *
  * This module owns the *assembly* of the planner-facing LLM prompts: the
- * initial planning prompt (a user prompt plus the phase-aware planning suffix),
+ * initial planning prompt (the phase-aware planning prefix plus a user prompt),
  * the phase-aware replanner prompt (focused revised-plan request), and the
  * review-plan prompt. The external prompt *templates* remain under
- * /elastic-agent/prompts/ (planning-suffix.txt, replan-prompt.txt) and are
+ * /elastic-agent/prompts/ (planning-prefix.txt, replan-prompt.txt) and are
  * supplied by the caller or resolved here; this module only composes them.
  *
  * All helpers are pure string constructors (no I/O, no side effects), so they
@@ -31,12 +31,12 @@ export interface ReplanPromptInputs {
 }
 
 /**
- * Build the initial planning prompt: the user-facing prompt followed by the
- * phase-aware planning suffix from prompts/planning-suffix.txt, which instructs
+ * Build the initial planning prompt: the user-facing prompt preceded by the
+ * phase-aware planning prefix from prompts/planning-prefix.txt, which instructs
  * the model to return JSON (plan, optional top-level "phase", or abort).
  */
-export function buildPlanningPrompt(prompt: string, planningSuffix: string): string {
-    return `${prompt}\n\n${planningSuffix}`;
+export function buildPlanningPrompt(prompt: string, planningPrefix: string): string {
+    return `${planningPrefix}\n\n${prompt}`;
 }
 
 /**
@@ -52,12 +52,12 @@ export function buildPlanningRetryPrompt(
 }
 
 /**
- * Build the review-plan prompt: a goal plus the same phase-aware planning
- * suffix, so the model plans how to conduct the review using the same JSON
+ * Build the review-plan prompt: the same phase-aware planning
+ * prefix followed by a goal, so the model plans how to conduct the review using the same JSON
  * contract as ordinary planning.
  */
-export function buildReviewPlanPrompt(reviewPlanGoal: string, planningSuffix: string): string {
-    return `${reviewPlanGoal}\n\n${planningSuffix}`;
+export function buildReviewPlanPrompt(reviewPlanGoal: string, planningPrefix: string): string {
+    return `${planningPrefix}\n\n${reviewPlanGoal}`;
 }
 
 /**

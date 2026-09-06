@@ -293,7 +293,7 @@ finalized:
 - Step 4 (user-facing abort handling) implements sections 3, 6, and the signal
   handlers from section 9.
 - Step 5 (unable-to-complete and stuck detection) implements sections 4 and 5
-  and updates `prompts/planning-suffix.txt` and `prompts/replan-prompt.txt`.
+  and updates `prompts/planning-prefix.txt` and `prompts/replan-prompt.txt`.
 - Step 6 (cleanup and status reporting) implements sections 7 and 8.
 - Step 7 (tests) asserts each exit code, each abort message shape, and the
   cleanup rules above with mocked adapters and temporary worktrees.

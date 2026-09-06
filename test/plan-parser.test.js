@@ -105,7 +105,7 @@ const samplePlan = {
 }
 
 // 10. Integration: the full extract -> parse -> steps flow matches the
-//     prompt shape revealed by prompts/planning-suffix.txt.
+//     prompt shape revealed by prompts/planning-prefix.txt.
 {
     const response = `\`\`\`json\n${JSON.stringify(samplePlan)}\n\`\`\``;
     const plan = parsePlanJson(extractJsonFromResponse(response));

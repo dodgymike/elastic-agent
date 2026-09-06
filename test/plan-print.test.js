@@ -15,7 +15,7 @@ function capture(fn) {
     return { text: lines.join("\n"), lines };
 }
 
-// Sample plan matching the shape revealed by prompts/planning-suffix.txt.
+// Sample plan matching the shape revealed by prompts/planning-prefix.txt.
 const samplePlan = {
     tldr: "Add pretty-printing of the planning step output",
     steps: [
