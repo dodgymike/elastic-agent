@@ -1,6 +1,6 @@
 # MI-15 — Create end-to-end memory regression and quality evaluations
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-10](10-safe-compaction.md), [MI-11](11-backend-capabilities-and-composite.md), [MI-12](12-conversation-lifecycle.md), [MI-13](13-retention-forget-and-export.md), [MI-14](14-health-and-efficiency-metrics.md)
 
@@ -42,10 +42,10 @@ choose equivalent locations if current architecture makes them more appropriate.
 
 ## Acceptance criteria
 
-- [ ] One offline command returns nonzero when any required production-path invariant regresses.
-- [ ] Deliberately breaking scope isolation, durable reload, or protected-constraint retention causes a test failure.
-- [ ] Test fixtures contain synthetic data only and leave no user-state artifacts in the checkout.
-- [ ] The result report distinguishes deterministic correctness, measured efficiency, model-dependent quality, skipped checks, and unresolved failures.
+- [x] One offline command returns nonzero when any required production-path invariant regresses.
+- [x] Deliberately breaking scope isolation, durable reload, or protected-constraint retention causes a test failure.
+- [x] Test fixtures contain synthetic data only and leave no user-state artifacts in the checkout.
+- [x] The result report distinguishes deterministic correctness, measured efficiency, model-dependent quality, skipped checks, and unresolved failures.
 
 ## Validation
 
@@ -64,14 +64,45 @@ Do not lower acceptance thresholds simply to make a new summarizer look better. 
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: current checkout (commit f488d96 at the time of the step);
+                 working tree also carries unrelated pre-existing changes that
+                 were preserved and not committed.
+Prerequisite evidence: MI-10, MI-11, MI-12, MI-13, and MI-14 completion records
+                 are DONE; their focused suites all pass.
+Reproduction / old behavior: no aggregate memory verification command existed
+                 and no end-to-end production-path regression suite covered the
+                 break detectors; package.json had no test:memory-improvements.
 Changed files and behavior:
+  - package.json: added test:memory-regression, test:memory-improvements
+    (offline aggregate), and the opt-in memory:evaluate-live script.
+  - test/memory-regression.test.ts: deterministic production-path suite (13
+    scenarios) including the scope-isolation, durable-reload, and
+    protected-constraint break detectors, scale fixtures (100/1,000 always;
+    10,000 opt-in), and a categorized result report.
+  - scripts/memory-live-model-quality.ts: separately opted-in live-model
+    quality evaluation using the same synthetic scenario shape; skipped
+    without provider configuration and exits nonzero on provider failure.
+  - memory-improvements/results/mi-15-baseline.md: baseline/result artifact.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
+  - npm run test:memory-regression: exit 0 (13 scenarios; scale-100 and
+    scale-1000 measured).
+  - npm run test:memory-improvements: exit 0 (26 offline suites).
+  - scripts/memory-live-model-quality.ts type-check via tsc --noEmit: exit 0.
+  - git diff --check: clean (exit 0).
+Schema / configuration / compatibility changes: none; new npm scripts are
+                 additive and do not change existing selection behavior.
 Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - The 10,000-event scale fixture is opt-in (MEMORY_SCALE_INCLUDE_10K=1) so
+    the default offline gate stays fast; covered by a skipped-check report.
+  - Live-model quality is not run in this environment (no provider config);
+    reported as skipped, never as a pass. Follow-up: run it against an
+    explicitly configured provider with a finite budget.
+  - test:prompt-builder remains excluded from the aggregate due to the
+    pre-existing, unrelated golden-fixture mismatch recorded under MI-09.
+Rollback notes: remove the three added npm scripts and the new
+                 test/memory-regression.test.ts and
+                 scripts/memory-live-model-quality.ts files; no production
+                 memory/runtime code was changed by this task.
+Implementation commit(s): (see commit referencing MI-15)
 ```
