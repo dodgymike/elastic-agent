@@ -88,3 +88,22 @@ Residual limitations and follow-up IDs:
 Rollback notes: `ELAGENT_MEMORY_TYPE=persistent` (or unset) restores the legacy backend and leaves the v2 database file intact; legacy JSON and v2 SQLite data are independent. See README "Rollout, migration, and rollback".
 Implementation commit(s): 462da67 (implementation + main.ts MI-14 health wiring); this file's own commit records completion.
 ```
+
+Verification re-check (verification pass, plan step 14): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: build, test:memory-selection,
+    test:memory-health, test:memory-backend-capabilities; the MI-15 offline
+    aggregate (`npm run test:memory-improvements`, 26 offline suites) also
+    exits 0.
+  - git diff --check clean.
+  - Prerequisites re-confirmed: MI-15 Status DONE (implementation commit
+    fe83803 and verification commits ee6859f/bfc0211 present); MI-16
+    implementation commit 462da67 and completion record commit 585a338 present
+    in git log.
+  - Skipped checks: none within the recorded offline command set; live-model
+    evaluations and real-user memory migration remain out of scope per the
+    task's boundaries and were not run (never counted as passes). The build
+    script compiles the full tracked-input source list on Node v22.23.2,
+    satisfying the "installation from tracked inputs" compile check.
+  - No code change; pre-existing working-tree changes left untouched.
