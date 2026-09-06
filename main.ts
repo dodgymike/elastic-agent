@@ -2900,10 +2900,6 @@ async function runPromptOnce(options: { review?: boolean; agentBusLoop?: boolean
 
     const planningPrompt = buildPlanningPrompt(prompt, planningSuffix);
 
-    // The planning prompt echo is non-essential diagnostic output; quiet and
-    // very-quiet suppress it (the prompt is still recorded to llm.log).
-    if (outputVerbose) console.log(planningPrompt);
-
     let planParseFailure: string | null = null;
     let parsedPlanningResponse: ReturnType<typeof parsePlanOrAbort> = { valid: false, reason: "Planning did not produce a response." };
     for (let attempt = 0; attempt <= maxPlanParseRetries; attempt += 1) {

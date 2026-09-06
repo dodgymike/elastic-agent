@@ -109,6 +109,9 @@ The model returns a structured JSON review result:
 
 ## Logging
 
+The planning prompt is not echoed to the terminal, including in verbose mode.
+Planning status and the generated plan remain visible.
+
 Every LLM prompt and response (planning, execution, replanning, review planning,
 review, and JSON retries) is recorded to `llm.log` in full, without truncation.
 
