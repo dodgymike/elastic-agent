@@ -86,3 +86,18 @@ Residual limitations and follow-up IDs: provider/model-aware tokenizer is inject
 Rollback notes: remove the additive assembly module and exports.
 Implementation commit(s): c7c4d0f (implementation + tests); completion record commit follows.
 ```
+
+Verification re-check (verification pass, plan step 7): verified, no change needed.
+  - Node binary used: v22.23.2 (/home/mike/.nvm/versions/node/v22.23.2/bin/node),
+    reached for npm scripts via RunPackageScript env PATH override.
+  - Actual results, all exit 0: test:memory-context-budget, test:multi-turn-memory,
+    test:llm-adapters (adapter-contract tests named in the plan's Validation section), build.
+  - The recorded literal `npx tsc --noEmit ... memory/index.ts` check was run through the
+    dedicated TypeCheck tool (repo-approved fixed flags, memory/index.ts, noEmit); exit 0.
+  - test:prompt-builder re-run -> still FAIL (exit 1): prompts/build-prompt-skeleton.txt
+    does not match the golden fixture (missing recent-prompt/tool-history lines), the same
+    pre-existing failure recorded in the completion record; unrelated to MI-09, not repaired.
+  - git diff --check clean.
+  - Prerequisites re-confirmed: MI-07 Status DONE (80985f7/cddc5ab) and MI-08 Status DONE
+    (249698d/b2e9689); MI-09 implementation commit c7c4d0f present in git log.
+  - Skipped checks: none. No code change.
