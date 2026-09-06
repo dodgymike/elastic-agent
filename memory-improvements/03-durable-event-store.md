@@ -1,6 +1,6 @@
 # MI-03 — Implement an isolated transactional event store
 
-Status: **TODO** · Priority: **P1** · Size: **L**
+Status: **DONE** · Priority: **P1** · Size: **L**
 
 Dependencies: [MI-01](01-contracts-and-identity.md), [MI-02](02-privacy-and-trust.md)
 
@@ -62,14 +62,26 @@ The store is a new file format behind an opt-in factory. Keep old JSON files unt
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01 (0d732be/0dfa638) and MI-02 (8ff18b8/6268b56) present.
+Prerequisite evidence: MI-01 and MI-02 DONE; contracts-v2 and privacy modules available.
+Reproduction / old behavior: persistent.ts kept mutable in-process maps and wrote one JSON document at finalization; no per-step durability, multi-writer coordination, event dedup, or safe replay existed.
 Changed files and behavior:
+  - memory/event-store.ts (new): MemoryEventStore SQLite backend; WAL + synchronous=NORMAL + bounded busy timeout; BEGIN IMMEDIATE transactions; unique scoped event IDs and per-session sequences; idempotent duplicates; conflicts; bounded paging; sessionMetadata; typed durability results; opt-in factory.
+  - memory/contracts-v2.ts: add afterSequence/limit paging fields to MemoryRetrieveRequestV2.
+  - memory/index.ts: export event-store surface.
+  - docs/MEMORY_EVENT_STORE.md (new): schema, durability settings, backup/restore guidance.
+  - test/memory-event-store.test.ts (new): durability, idempotence/conflict, writers, scope filtering, paging, schema rejection, invalid files, lock exhaustion, child-process reopen.
+  - package.json: add test:memory-event-store script.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-event-store -> exit 0
+  - npm run test:memory-contract-v2 -> exit 0
+  - npm run test:memory-privacy -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: new opt-in SQLite file format with user_version=1; event payload schema version stored per event; legacy JSON files untouched.
+Residual limitations and follow-up IDs: reload/import of legacy JSON is MI-04; derived-state metadata consumers arrive in later tasks; network-filesystem safety is rejected rather than supported; disk-full and interrupted-commit tests are partially covered by invalid-file and lock tests (no fault injection).
+Rollback notes: remove the opt-in factory and its callers; no migration of existing JSON files is required.
+Implementation commit(s): 5d12c2f (implementation + tests + docs); completion record commit follows.
 ```
