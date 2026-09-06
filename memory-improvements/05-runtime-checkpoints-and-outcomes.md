@@ -1,6 +1,6 @@
 # MI-05 — Checkpoint runtime progress with truthful outcomes
 
-Status: **TODO** · Priority: **P1** · Size: **M**
+Status: **DONE** · Priority: **P1** · Size: **M**
 
 Dependencies: [MI-04](04-reload-and-legacy-import.md)
 
@@ -62,14 +62,29 @@ Keep runtime wiring opt-in until task 16. Do not change external task status or 
 Fill this in as the implementation proceeds. Keep sensitive payloads out of it.
 
 ```text
-Status: TODO | IN_PROGRESS | BLOCKED | DONE
-Baseline revision:
-Prerequisite evidence:
-Reproduction / old behavior:
+Status: DONE
+Baseline revision: c0d5f09 (plan base); MI-01..MI-04 commits present.
+Prerequisite evidence: MI-04 DONE (e37a96e/ac048b4).
+Reproduction / old behavior: runtime remembered plan steps and finalized at end; a crash before finalization lost the run; invalid feedback could map to completed memory.
 Changed files and behavior:
+  - memory/runtime-checkpoint.ts (new): RuntimeCheckpointWriter, normalizeRuntimeOutcome, resumeCheckpointedSteps; durable checkpoint events; truthful outcomes; degraded append result; bounded flush/close.
+  - memory/contracts-v2.ts: extend MemoryOutcomeAssertionV2 with blocked and invalid_feedback.
+  - memory/legacy-compat.ts: map new assertion values safely to the v1 outcome vocabulary.
+  - memory/index.ts: export the checkpoint surface.
+  - test/memory-runtime-checkpoint.test.ts (new): crash recovery without finalization, truthful normalization, invalid-feedback storage, degraded append with no replay, bounded abort flush.
+  - package.json: add test:memory-runtime-checkpoint script.
 Validation commands and actual results:
-Schema / configuration / compatibility changes:
-Residual limitations and follow-up IDs:
-Rollback notes:
-Implementation commit(s):
+  - npm run test:memory-runtime-checkpoint -> exit 0
+  - npm run test:abort-paths -> exit 0
+  - npm run test:multi-turn-memory -> exit 0
+  - npm run test:memory-event-store -> exit 0
+  - npm run test:memory-reload -> exit 0
+  - npm run test:memory-contract-v2 -> exit 0
+  - npm run build -> exit 0
+  - npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck --types node memory/index.ts -> exit 0
+  - git diff --check -> clean
+Schema / configuration / compatibility changes: outcome vocabulary extended (additive); default backend unchanged.
+Residual limitations and follow-up IDs: runtime main.ts wiring stays opt-in until MI-16; hard-kill can still lose an uncommitted event (documented); external side-effect reconciliation remains with the execution lifecycle.
+Rollback notes: remove the additive writer/exports and revert the vocabulary additions; no stored-data migration required.
+Implementation commit(s): 7c40eca (implementation + tests); completion record commit follows.
 ```
