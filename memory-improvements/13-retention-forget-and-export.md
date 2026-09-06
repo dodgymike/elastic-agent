@@ -73,5 +73,5 @@ Validation commands and actual results: npm run test:memory-retention (exit 0); 
 Schema / configuration / compatibility changes: event-store DB user_version 1 -> 2 (additive migration creating tombstones + deletion_state; existing v1 databases migrate in place and newer versions are still rejected). PERSISTENT_V2_CAPABILITIES supportsForget/supportsExport are now true. New package.json script test:memory-retention.
 Residual limitations and follow-up IDs: workspace/principal-wide tombstones are intentionally not cleared by a single-session restore (reauthorizing a broader deletion is a separate operation); local deletion is logical only — SQLite pages/WAL/shm files, backups, previously written prompt logs, and already-sent provider requests have separate lifecycles; no standalone CLI binary was added — the programmatic controller is the narrow local API boundary (MI-16 can integrate further).
 Rollback notes: revert the schema v2 migration and the new retention module/wiring. The migration is additive and does not delete v1 data, so reverting the code before writing tombstones is safe; do not downgrade a database that has already written tombstones without an explicit migration path.
-Implementation commit(s): <recorded after commit>
+Implementation commit(s): be980a5
 ```
