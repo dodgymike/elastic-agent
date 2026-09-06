@@ -1,125 +1,231 @@
-// Control-flow test for the review-commit decision logic in main().
-// Mirrors the post-plan review loop with the NEW commit/worktree behavior:
-//   - execution steps stage changes and never commit;
-//   - the review step commits ONLY when it is happy (review.passed === true);
-//   - on a failing review with attempts remaining no commit occurs and the
-//     execution phase restarts;
-//   - on the 4th required loop (attempts reach maxReviewAttempts and still
-//     failing) an explicit error is thrown and NO commit occurs.
+// Control-flow test for the review-commit decision logic in main.ts.
+// Mirrors the CURRENT stop-on-failure review/worktree behavior:
+//   - the execution phase stages changes in the execution worktree and NEVER
+//     commits;
+//   - the review step commits/merges ONLY when it is happy (review.passed ===
+//     true);
+//   - a failing review does NOT commit, marks the Spec Keeper run task/epic
+//     blocked, cleans up the worktree, and returns { success: false } without
+//     re-executing;
+//   - a passing review followed by a failed commit/merge must surface the
+//     commit error (review success is distinct from commit success);
+//   - missing diff evidence is surfaced in the review request as an explicit
+//     notice rather than failing the review phase.
 // This is a pure control-flow simulation (as test/review-loop.test.js), so it
 // exercises the decision algorithm without a real git repository. The actual
 // git/worktree behavior is covered by test/worktree.test.ts.
-const maxReviewAttempts = 3;
 
-// Simulates the review loop with commit tracking. Returns a record describing
-// how many commits occurred, whether a worktree was used for staging, whether
-// the loop passed or threw, and the execution contexts used.
-function simulateReviewCommitFlow(reviewResponses) {
-    const accumulatedLearnings = [];
-    let reviewAttempt = 0;
-    let executionContext = "(none)";
-    const contexts = [];
-    let responses = [...reviewResponses];
-    // Track git operations performed by the simulated loop.
+const maxReviewParseRetries = 2;
+
+function summarizeReview(review) {
+    const learnings = Array.isArray(review?.learnings) ? review.learnings.filter(Boolean) : [];
+    if (learnings.length > 0) return learnings.join("; ");
+    return "completed work passed all four review criteria";
+}
+
+// Mirrors runReview() in main.ts: retry invalid review JSON up to
+// maxReviewParseRetries before throwing RunAbortError.
+function runReviewSimulation(responses) {
+    let lastReason = null;
+    let calls = 0;
+    for (let retry = 0; retry <= maxReviewParseRetries; retry += 1) {
+        const raw = responses.shift();
+        calls += 1;
+        if (raw === undefined) break;
+        const parsed = raw.valid ? raw : { valid: false, reason: raw.reason ?? "malformed response" };
+        if (parsed.valid) return parsed.review;
+        lastReason = parsed.reason;
+    }
+    const reason = `Review response was not valid JSON after ${maxReviewParseRetries} retries: ${lastReason ?? "no response received"}`;
+    const error = new Error(reason);
+    error.name = "RunAbortError";
+    error.reviewCalls = calls;
+    throw error;
+}
+
+// Mirrors the changes/diff assembly in runReviewPhase() in main.ts:
+// best-effort reading of the staged diff, falling back to committed work when
+// the staged diff is empty, and to an explicit notice when no evidence is
+// available. The review phase must NOT fail because the diff is missing.
+function buildChangesForReview(executionWorktreePath, readStagedChanges, readCommittedChanges) {
+    let changes = "(no staged changes summary available)";
+    if (!executionWorktreePath) return changes;
+    try {
+        changes = readStagedChanges(executionWorktreePath);
+    } catch (error) {
+        return changes; // explicit notice is retained; review still proceeds
+    }
+    if (changes.includes("(no staged changes against HEAD)")) {
+        try {
+            changes = `${changes}\n\n${readCommittedChanges(executionWorktreePath)}`;
+        } catch (error) {
+            // Keep the staged summary; review still proceeds.
+        }
+    }
+    return changes;
+}
+
+// Mirrors the options.review branch of runPromptOnce() in main.ts with commit
+// tracking. A thrown commit error carries gitOps/events so tests can assert on
+// the failed-commit path.
+function simulateReviewCommitFlow(reviewResponses, options = {}) {
     const gitOps = {
         worktreeUsedForStaging: false,
-        commits: [],      // commit messages when the review was happy
-        stagingCount: 0,  // git add --all calls during execution
+        commits: [],
+        merges: [],
+        stagingCount: 0,
     };
+    const events = [];
+    const specKeeper = { runTaskStatus: null, epicStatus: null };
+    let reviewAttempt = 0;
+    let executionPhases = 0;
+    let failureWorktreeCleanedUp = false;
+
     const stageAll = () => { gitOps.stagingCount += 1; gitOps.worktreeUsedForStaging = true; };
-    const commitReview = (summary) => { gitOps.commits.push(`review happy: ${summary}`); };
+    const commitInWorktree = (summary) => {
+        if (options.failCommit) throw new Error(`git commit failed: ${options.failCommit}`);
+        gitOps.commits.push(`review happy: ${summary}`);
+    };
+    const mergeIntoMain = () => {
+        if (options.failMerge) throw new Error(`git merge failed: ${options.failMerge}`);
+        gitOps.merges.push("worktree -> main");
+    };
 
-    while (true) {
-        // runExecutionPhase: execute steps and stage in the worktree (no commit).
-        contexts.push(executionContext);
+    // ONE execution phase per run: execute steps and stage in the worktree
+    // without committing.
+    executionPhases += 1;
+    events.push("execution-phase");
+    stageAll();
+
+    reviewAttempt += 1;
+    const review = runReviewSimulation(reviewResponses);
+
+    if (review.passed) {
+        events.push("review-passed");
+        // Review is happy: stage once more, commit in the worktree, merge.
         stageAll();
-
-        reviewAttempt += 1;
-        const review = responses.shift();
-        if (review.passed) {
-            // Review step is happy: stage once more, commit, and merge.
-            stageAll();
-            commitReview(review.summary ?? "completed work passed all four review criteria");
-            return {
-                attempts: reviewAttempt,
-                outcome: "committed",
-                contexts,
-                gitOps,
-            };
+        let commitError = null;
+        try {
+            commitInWorktree(summarizeReview(review));
+            mergeIntoMain();
+        } catch (error) {
+            commitError = error;
         }
-        for (const learning of review.learnings ?? []) if (learning) accumulatedLearnings.push(learning);
-        if (reviewAttempt >= maxReviewAttempts) {
-            // 4th required loop: throw WITHOUT committing.
-            throw new Error(
-                `Review failed after ${maxReviewAttempts} attempts: ${
-                (review.reasons ?? []).map((reason) => JSON.stringify(reason)).join("; ") || "none"}; must fix issues before committing.`);
+        if (commitError) {
+            // Review success is NOT commit success: surface the commit error,
+            // clean up the worktree, and stop the run.
+            failureWorktreeCleanedUp = true;
+            const error = new Error(`Review passed but the review commit failed: ${commitError.message}`);
+            error.gitOps = gitOps;
+            error.events = events;
+            error.executionPhases = executionPhases;
+            error.reviewAttempt = reviewAttempt;
+            error.failureWorktreeCleanedUp = failureWorktreeCleanedUp;
+            throw error;
         }
-        executionContext =
-            "REVIEW FEEDBACK FROM THE PREVIOUS ATTEMPT — address these issues in the executed work:\n" +
-            (review.reasons ?? []).map((reason) => `- ${reason}`).join("\n") +
-            "\n\nLEARNINGS FROM EARLIER REVIEWS:" +
-            accumulatedLearnings.map((learning) => `\n- ${learning}`).join("");
+        specKeeper.runTaskStatus = "done";
+        specKeeper.epicStatus = "done";
+        return {
+            success: true,
+            attempts: reviewAttempt,
+            executionPhases,
+            gitOps,
+            specKeeper,
+            failureWorktreeCleanedUp,
+            events,
+            reviewOutcome: "passed",
+        };
     }
+
+    // Failing review: NO commit, mark Spec Keeper blocked, clean up the
+    // worktree, return { success: false } without re-executing.
+    events.push("review-failed");
+    specKeeper.runTaskStatus = "blocked";
+    specKeeper.epicStatus = "blocked";
+    failureWorktreeCleanedUp = true;
+    return {
+        success: false,
+        attempts: reviewAttempt,
+        executionPhases,
+        gitOps,
+        specKeeper,
+        failureWorktreeCleanedUp,
+        events,
+        reviewOutcome: "failed",
+        error: "Review did not pass; the work was left uncommitted and the task was marked blocked.",
+    };
 }
 
 let failures = 0;
 function check(name, cond) { if (cond) console.log(`PASS: ${name}`); else { console.error(`FAIL: ${name}`); failures += 1; } }
 
-// 1. Execution steps stage in the worktree and never commit until review is happy.
+// 1. Happy review: commit exactly once, stage before commit, merge once.
 {
-    const r = simulateReviewCommitFlow([{ passed: true, reasons: [], learnings: [], summary: "all criteria met" }]);
+    const r = simulateReviewCommitFlow([
+        { valid: true, review: { passed: true, reasons: [], learnings: ["all criteria met"] } },
+    ]);
     check("happy review commits exactly once", r.gitOps.commits.length === 1);
     check("commit message marks review happy", r.gitOps.commits[0] === "review happy: all criteria met");
     check("staging happens in the worktree", r.gitOps.worktreeUsedForStaging === true);
     check("staging occurs before the commit", r.gitOps.stagingCount === 2); // once per execution phase + once at review
-    check("happy review uses 1 attempt", r.attempts === 1);
+    check("happy review merges exactly once", r.gitOps.merges.length === 1);
+    check("happy review uses attempt 1", r.attempts === 1);
+    check("happy review runs one execution phase", r.executionPhases === 1);
+    check("happy review returns success true", r.success === true);
 }
 
-// 2. A failing review does NOT commit and restarts execution; a later pass commits.
+// 2. A failing review does NOT commit, does NOT merge, does NOT restart, and
+//    leaves the run as failed.
 {
     const r = simulateReviewCommitFlow([
-        { passed: false, reasons: ["issue A"], learnings: ["learning B"], summary: "" },
-        { passed: true, reasons: [], learnings: [], summary: "fixed everything" },
+        { valid: true, review: { passed: false, reasons: ["missing docs"], learnings: ["write docs"] } },
     ]);
-    check("fail-then-pass commits exactly once (only on the happy review)", r.gitOps.commits.length === 1);
-    check("commit happens only after the passing attempt", r.attempts === 2 && r.gitOps.commits[0] === "review happy: fixed everything");
-    check("staging reused the same worktree across attempts", r.gitOps.worktreeUsedForStaging === true);
-    check("restart execution context includes feedback", r.contexts[1].includes("issue A"));
-    check("restart execution context includes learnings", r.contexts[1].includes("learning B"));
+    check("failing review never commits", r.gitOps.commits.length === 0);
+    check("failing review never merges", r.gitOps.merges.length === 0);
+    check("failing review runs exactly one execution phase (no restart)", r.executionPhases === 1);
+    check("failing review marks run task blocked", r.specKeeper.runTaskStatus === "blocked");
+    check("failing review marks epic blocked", r.specKeeper.epicStatus === "blocked");
+    check("failing review cleans up the worktree", r.failureWorktreeCleanedUp === true);
+    check("failing review returns success false", r.success === false);
+    check("failing review emits the stop error", r.error === "Review did not pass; the work was left uncommitted and the task was marked blocked.");
 }
 
-// 3. Failing all three attempts throws on the 4th required loop and NEVER commits.
+// 3. Missing diff evidence: the review request carries an explicit notice
+//    instead of failing the review phase.
 {
-    let threw = null;
-    let commits = [];
-    try {
-        const r = simulateReviewCommitFlow([
-            { passed: false, reasons: ["r1"], learnings: [], summary: "" },
-            { passed: false, reasons: ["r2"], learnings: [], summary: "" },
-            { passed: false, reasons: ["r3"], learnings: [], summary: "" },
-        ]);
-        commits = r.gitOps.commits;
-    } catch (e) { threw = e.message; }
-    check("fail all three attempts throws", threw !== null && threw.includes("3"));
-    check("error explains max attempts reached", threw !== null && threw.includes("must fix issues before committing"));
-    check("NO commit occurs on the 4th loop", commits.length === 0);
+    const missingWorktree = buildChangesForReview(null, () => "diff --git a/x b/x", () => "committed patch");
+    check("missing worktree path produces the explicit fallback notice", missingWorktree === "(no staged changes summary available)");
+
+    const unreadableDiff = buildChangesForReview(
+        "/worktrees/review-worktree",
+        () => { throw new Error("git diff failed"); },
+        () => "committed patch",
+    );
+    check("unreadable staged diff keeps the explicit fallback notice", unreadableDiff === "(no staged changes summary available)");
+
+    const emptyStagedFallsBackToCommitted = buildChangesForReview(
+        "/worktrees/review-worktree",
+        () => "(no staged changes against HEAD)",
+        () => "committed patch: 1 file changed",
+    );
+    check("empty staged diff surfaces committed work as evidence", emptyStagedFallsBackToCommitted.includes("(no staged changes against HEAD)") && emptyStagedFallsBackToCommitted.includes("committed patch"));
 }
 
-// 4. A failure after previously staging does not commit anything either.
+// 4. Review success is distinct from commit success: a passing review followed
+//    by a failed commit must surface the commit error, not return success.
 {
-    // First review fails, second throws at max (i.e. the 4th required loop).
-    let commits = [];
     let threw = null;
     try {
-        const r = simulateReviewCommitFlow([
-            { passed: false, reasons: ["a"], learnings: [], summary: "" },
-            { passed: false, reasons: ["b"], learnings: [], summary: "" },
-            { passed: false, reasons: ["c"], learnings: [], summary: "" },
-            ...([]),
-        ]);
-        commits = r.gitOps.commits;
-    } catch (e) { threw = e.message; }
-    check("threw on 4th loop with no commit", threw !== null && commits.length === 0);
+        simulateReviewCommitFlow(
+            [{ valid: true, review: { passed: true, reasons: [], learnings: [] } }],
+            { failCommit: "disk full" },
+        );
+    } catch (error) { threw = error; }
+    check("passing review with failed commit surfaces the commit error", threw !== null && threw.message.includes("Review passed but the review commit failed"));
+    check("commit error keeps the commit message detail", threw !== null && threw.message.includes("git commit failed: disk full"));
+    check("failed commit records no successful commit", threw !== null && threw.gitOps.commits.length === 0);
+    check("failed commit does not merge", threw !== null && threw.gitOps.merges.length === 0);
+    check("failed commit cleans up the worktree", threw !== null && threw.failureWorktreeCleanedUp === true);
 }
 
 if (failures === 0) { console.log("\nAll review-commit tests passed."); process.exit(0); }
