@@ -204,23 +204,28 @@ completion record and the implementation commits visible in git.
 | Task | Status | Implementation | Completion record | Verification |
 | --- | --- | --- | --- | --- |
 | MI-01 | DONE | `0d732be` | `0dfa638` | Verification recorded in `70550b7` and `f1d3d4c`; BLOCKED on unsupported workspace Node v18.19.1 (project engines require >=22.9.0). |
-| MI-02 | DONE | `8ff18b8` | `6268b56` | Not re-verified under `verification-protocol.md`. |
+| MI-02 | DONE | `8ff18b8` | `6268b56` | Verified in `f84a04e` under `verification-protocol.md`; no change needed. |
 | MI-03 | DONE | `5d12c2f` | `71d18bd` | Verification recorded in `08618d3`; BLOCKED on unsupported workspace Node v18.19.1 (project engines require >=22.9.0). |
 | MI-04 | DONE | `e37a96e` | `ac048b4` | Verification recorded in `45ef099`; BLOCKED on unsupported workspace Node v18.19.1 (project engines require >=22.9.0). |
-| MI-05 | DONE | `7c40eca` | `e79e9ea` | Not re-verified under `verification-protocol.md`. |
-| MI-06 | DONE | `b08954a` | `b451455` | Not re-verified under `verification-protocol.md`. |
-| MI-07 | DONE | `80985f7` | `cddc5ab` | Not re-verified under `verification-protocol.md`. |
-| MI-08 | DONE | `249698d` | `b2e9689` | Not re-verified under `verification-protocol.md`. |
-| MI-09 | DONE | `c7c4d0f` | `57e3dcb` | Not re-verified under `verification-protocol.md`. |
-| MI-10 | DONE | `2db6a34` | `de7ea47` | Not re-verified under `verification-protocol.md`. |
-| MI-11 | DONE | `1b615eb` | `dfb107e` | Not re-verified under `verification-protocol.md`. |
-| MI-12 | DONE | `a73932e` | `2850313` | Not re-verified under `verification-protocol.md`. |
-| MI-13 | DONE | `be980a5` | `d582d9e` | Not re-verified under `verification-protocol.md`. |
-| MI-14 | DONE | `ba5f01a` | `f488d96` | Not re-verified under `verification-protocol.md`. |
-| MI-15 | DONE | `fe83803` | `fe83803` | Not re-verified under `verification-protocol.md`; completion record is inside implementation commit `fe83803`. |
-| MI-16 | DONE | `462da67` | `585a338` | Not re-verified under `verification-protocol.md`. |
+| MI-05 | DONE | `7c40eca` | `e79e9ea` | Verified in `dccc5e1` under `verification-protocol.md`; no change needed. |
+| MI-06 | DONE | `b08954a` | `b451455` | Verified in `0443231` under `verification-protocol.md`; no change needed. |
+| MI-07 | DONE | `80985f7` | `cddc5ab` | Verified in `eb7df15` under `verification-protocol.md`; no change needed. |
+| MI-08 | DONE | `249698d` | `b2e9689` | Verified in `172281c` under `verification-protocol.md`; no change needed. |
+| MI-09 | DONE | `c7c4d0f` | `57e3dcb` | Verified in `32acd97` under `verification-protocol.md`; no change needed. |
+| MI-10 | DONE | `2db6a34` | `de7ea47` | Verified in `1c44b87` under `verification-protocol.md`; no change needed. |
+| MI-11 | DONE | `1b615eb` | `dfb107e` | Verified in `a48a9df` under `verification-protocol.md`; no change needed. |
+| MI-12 | DONE | `a73932e` | `2850313` | Verified in `51790b9` under `verification-protocol.md`; no change needed. |
+| MI-13 | DONE | `be980a5` | `d582d9e` | Verified in `06ad775` under `verification-protocol.md`; no change needed. |
+| MI-14 | DONE | `ba5f01a` | `f488d96` | Verified in `edcfc6d` under `verification-protocol.md`; no change needed. |
+| MI-15 | DONE | `fe83803` | `fe83803` | Verified under `verification-protocol.md`; repaired verification pass: fix in `bfc0211`, completion record annotated in `ee6859f`. |
+| MI-16 | DONE | `462da67` | `585a338` | Verified in `660a685` under `verification-protocol.md`; no change needed. |
 
 Commit `940221c` introduces the one-task-at-a-time verification protocol
 (`verification-protocol.md`); it defines how verification runs and is not itself
-a pass/fail result. MI-02 and MI-05..MI-16 have no verification-pass commit and
-were not re-verified under that protocol.
+a pass/fail result. Only MI-01, MI-03, and MI-04 remain blocked on the
+unsupported workspace Node v18.19.1 (project engines require >=22.9.0) and have
+not been re-verified under that protocol.
+
+> Index reconciliation note (documentation-only): this index was reconciled with
+> the verification-pass commits recorded in the table above; no implementation
+> changes were made.
