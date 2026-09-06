@@ -10,7 +10,7 @@
 import {
     createWorktree, ensureWorktree, stageAllInWorktree, commitInWorktree,
     mergeWorktreeIntoMain, cleanupWorktree, listWorktrees, stagedChangesSummary,
-    committedChangesSummary,
+    committedChangesSummary, commitInWorktreeWithTrailer, findCommitByTrailer,
 } from "../worktree.js";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
@@ -152,6 +152,51 @@ try {
     let threw = "";
     try { commitInWorktree(join(repoRoot, ".worktrees", "nonexistent"), "   "); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
     assert.ok(threw.length > 0, "commitInWorktree must reject an empty/whitespace message");
+
+    // 8. findCommitByTrailer rejects malformed trailer strings before touching git.
+    const trailerBranch = "trailer-worktree";
+    const trailerPath = createWorktree(trailerBranch, repoRoot);
+    cleanupPaths.push(trailerPath);
+    assert.throws(() => findCommitByTrailer(trailerPath, ""), /single-line trailer/);
+    assert.throws(() => findCommitByTrailer(trailerPath, "Trailer: a\nsecond-line"), /single-line trailer/);
+    assert.throws(() => findCommitByTrailer(trailerPath, "Trailer: a\u0000nul"), /single-line trailer/);
+
+    // 9. commitInWorktreeWithTrailer commits exactly once and deduplicates on replay.
+    writeFileSync(join(trailerPath, "trailer.txt"), "idempotent commit\n");
+    stageAllInWorktree(trailerPath);
+    const trailer = "Elastic-Agent-Run: elagent-plan-step-2-attempt-1";
+    const firstCommit = commitInWorktreeWithTrailer(trailerPath, "review happy: idempotent", trailer);
+    assert.equal(firstCommit.committed, true, "first trailer commit must be created");
+    assert.equal(firstCommit.existingHash, null, "first trailer commit must not report an existing hash");
+    assert.equal(firstCommit.uncertain, false, "first trailer commit must be certain");
+    const trailerHead = head(trailerPath);
+    assert.match(runGit(trailerPath, ["log", "-1", "--format=%B"]), /Elastic-Agent-Run: elagent-plan-step-2-attempt-1/);
+
+    const replay = commitInWorktreeWithTrailer(trailerPath, "review happy: idempotent", trailer);
+    assert.equal(replay.committed, false, "a duplicate trailer must not create a new commit");
+    assert.equal(replay.uncertain, false, "a duplicate trailer must be certain");
+    assert.equal(replay.existingHash, trailerHead, "the duplicate must report the existing commit hash");
+
+    // 10. findCommitByTrailer distinguishes found, absent, and uncertain results.
+    const found = findCommitByTrailer(trailerPath, trailer);
+    assert.equal(found.found, true, "the committed trailer must be found");
+    assert.equal(found.uncertain, false, "the committed trailer lookup must be certain");
+    assert.equal(found.hash, trailerHead, "the committed trailer lookup must return the hash");
+    const absentTrailer = findCommitByTrailer(trailerPath, "Elastic-Agent-Run: elagent-never-committed");
+    assert.equal(absentTrailer.found, false, "an absent trailer must not be found");
+    assert.equal(absentTrailer.uncertain, false, "an absent trailer lookup must be certain");
+    assert.equal(absentTrailer.hash, null, "an absent trailer must report a null hash");
+
+    // 11. An un-inspectable worktree yields uncertain, never a duplicate commit.
+    const uninspectable = join(repoRoot, "does-not-exist");
+    const uncertainFind = findCommitByTrailer(uninspectable, trailer);
+    assert.equal(uncertainFind.found, false, "an uninspectable path must not claim the trailer is absent");
+    assert.equal(uncertainFind.uncertain, true, "an uninspectable path must be reported as uncertain");
+    const uncertainCommit = commitInWorktreeWithTrailer(uninspectable, "msg", trailer);
+    assert.equal(uncertainCommit.committed, false, "an uninspectable path must never create a commit");
+    assert.equal(uncertainCommit.existingHash, null, "an uninspectable path must report no existing hash");
+    assert.equal(uncertainCommit.uncertain, true, "an uninspectable path must stay uncertain");
+    cleanupWorktree(trailerBranch, repoRoot);
 
     console.log("Worktree staging/commit fixtures passed.");
 } finally {
