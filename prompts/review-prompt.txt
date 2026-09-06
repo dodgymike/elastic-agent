@@ -19,17 +19,17 @@ ${changes}
 Review plan (created at the start of the review phase):
 ${reviewPlan}
 
-Accumulated learnings from earlier review attempts (empty if none):
+Accumulated learnings (empty if none):
 ${learnings}
 
 Review attempt: ${reviewAttempt} of ${maxReviewAttempts}
 
-WORKFLOW — LOOP-RESTART AND COMMIT BEHAVIOR
+WORKFLOW — COMMIT AND STOP-ON-FAILURE BEHAVIOR
 
 - Execution work is staged in a dedicated git worktree and is never committed during the execution phase.
 - The review phase is the only step that commits, and it commits ONLY when the review is happy (this is when you return "passed": true).
-- If any criterion fails ("passed": false), NO commit is made: the workflow restarts from the beginning of the execution phase with your reasons and learnings injected as feedback, and the staged work is retained and re-worked.
-- The review runs at most ${maxReviewAttempts} times. On the loop after the final failed attempt, an explicit error is thrown and no commit is made (the work must be fixed before committing).
+- If any criterion fails ("passed": false), NO commit is made: the run stops immediately, the worktree work is left uncommitted, and the run/epic/task are marked blocked. There is no automatic re-execution of the plan.
+- You get a single formal review attempt per run; this is attempt ${reviewAttempt} of ${maxReviewAttempts}. If your response is not valid JSON, the runtime retries parsing this same review request before aborting the run as blocked.
 - Therefore be precise and honest: return "passed": true only when ALL four criteria genuinely pass.
 
 REVIEW CRITERIA — assess ALL four:
@@ -50,6 +50,6 @@ RESPOND IN JSON FORMAT ONLY. Provide exactly one JSON object with this exact str
 Field meanings:
 - passed: boolean; true only if ALL four criteria above pass.
 - reasons: array of strings describing why the review did not pass (meaningful when passed is false).
-- learnings: array of strings recording any learnings worth carrying into the next execution attempt.
+- learnings: array of strings recording any learnings worth recording for future runs.
 
 Do not output any prose or markdown outside the JSON object.

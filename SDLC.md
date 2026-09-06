@@ -9,18 +9,21 @@ modules described under [Module structure](#module-structure) below.
 ## Overview
 
 The agent runs a plan-then-execute loop against a configurable LLM provider with
-a mandatory post-plan **review phase**. The lifecycle is:
+an optional post-plan **review phase** that runs only when the run was started
+with `--review` (`options.review`). The lifecycle is:
 
 1. **Plan** — build a planning prompt and let the model investigate through
    multiple tool-call turns before returning a validated execution plan.
 2. **Execute** — run each plan step, invoking tools as needed, and collect a
    machine-readable execution-feedback block per step. Replanning is supported
    when a step requests it (up to `maxReplanAttempts`).
-3. **Review** — after the plan is complete, run an automatic review of the
-   completed work against the four criteria listed below.
-4. **Finish or retry** — if the review passes, stop. If it does not pass and the
-   retry budget remains, restart the **execution** phase (not the planning
-   phase) with the review feedback and learnings injected; otherwise fail.
+3. **Review** — when `--review` is enabled, run a review of the completed
+   work against the four criteria listed below.
+4. **Finish or stop** — if the review passes, the staged work is committed and
+   merged into the main branch and the run finishes. If the review does not
+   pass (or its JSON cannot be parsed after retries), the run stops: the
+   worktree work is left uncommitted and the run, epic, and task are marked
+   blocked.
 
 ### Step results and the final tldr
 
@@ -63,9 +66,11 @@ remains the leaf dependency (`renderPrompt`) used by `planner-prompt.ts`, and
 
 ## Review phase
 
-The review phase runs automatically after plan completion. It begins with a
-**plan step** (the agent creates a plan for how to conduct the review) before the
-review prompt is sent to the model.
+The review phase runs only in the `--review` (`options.review`) branch, after
+plan execution completes; without `--review`, execution completes directly with
+no formal review. The review phase begins with a **plan step** (the agent
+creates a plan for how to conduct the review) before the review prompt is sent
+to the model.
 
 The review prompt includes the full review instructions and asks the model to
 assess all four of the following criteria:
@@ -75,8 +80,8 @@ assess all four of the following criteria:
 - **(b) End-result quality** — is the end result of good quality?
 - **(c) SDLC.md compliance** — has the process described in this document been
   followed/met?
-- **(d) Noted learnings** — any learnings worth carrying into the next
-  execution attempt.
+- **(d) Noted learnings** — any learnings worth recording from the execution,
+  the plan, or earlier review attempts.
 
 The model returns a structured JSON review result:
 
@@ -96,16 +101,17 @@ The model returns a structured JSON review result:
 ### Retry / failure behavior
 
 - The review result is parsed as JSON. If it cannot be parsed, the parsing error
-  is appended to the review prompt and the request is retried (up to a small
-  number of retries). If it still cannot be parsed, the review is treated as
-  failed with an unparseable-response reason.
-- If the review does not pass and the review-attempt budget remains, execution
-  is restarted from the **execution phase** (not the planning phase) with the
-  review feedback and learnings injected into the step-execution prompts.
-- The maximum number of review attempts is `maxReviewAttempts` (default `3`).
-- If a fourth review would be required (i.e., the review fails on the final
-  allowed attempt), the agent throws an error explaining why it is not
-  finishing, rather than looping forever.
+  is appended to the review prompt and the same review request is retried (up to
+  `maxReviewParseRetries`, default `2`, so at most three parse attempts). If it
+  still cannot be parsed, the review phase aborts with an `unable-to-complete`
+  review error and the run is finalized as blocked.
+- A review that returns `passed: false` stops the run immediately: no commit is
+  made, the worktree work is left uncommitted, and the run/epic/task are marked
+  blocked (task mode finalizes its claimed task with the failing review
+  reasons). There is no automatic re-execution of the plan.
+- There is no max-attempt restart loop. `maxReviewAttempts` is kept only as a
+  display label for the current review attempt in status and prompt text; the
+  model gets a single formal review attempt per run.
 
 ## Logging
 
@@ -125,10 +131,11 @@ of the repository (`prompt.log` is gitignored alongside `llm.log`).
 
 ## Constants
 
-| Constant            | Default | Meaning                                  |
-|---------------------|---------|------------------------------------------|
-| `maxReplanAttempts` | `3`     | Max focused replans within one execution |
-| `maxReviewAttempts` | `3`     | Max post-plan review attempts            |
+| Constant                | Default | Meaning                                                                        |
+|-------------------------|---------|-------------------------------------------------------------------------------|
+| `maxReplanAttempts`     | `3`     | Max focused replans within one execution                                      |
+| `maxReviewAttempts`     | `3`     | Display label for the current review attempt; a failing review stops the run  |
+| `maxReviewParseRetries` | `2`     | JSON parse retries within a single review attempt                             |
 
 ## Investigative planning
 

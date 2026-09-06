@@ -18,11 +18,13 @@ provider (OpenAI, Bedrock Claude Sonnet, or DeepSeek V4). The loop:
 4. asks the model to return a machine-readable execution-feedback block per step,
 5. applies local/plan updates and, when replanning is requested, builds a focused
    replan prompt,
-6. after the plan is complete, runs a post-plan **review phase** that begins with
-   a plan step and then asks the model to review the completed work against four
-   criteria, returning a structured JSON review result, and
-7. if the review does not pass and the retry budget remains, restarts execution
-   with the review feedback and learnings injected; otherwise it fails.
+6. when the run was started with `--review`, runs a post-plan **review phase**
+   that begins with a plan step and then asks the model to review the completed
+   work against four criteria, returning a structured JSON review result, and
+7. if the review passes, commits/merges the work and finishes; if the review
+   does not pass (or its JSON cannot be parsed after retries), the run stops,
+   the worktree work is left uncommitted, and the run/epic/task are marked
+   blocked.
 
 Each stage uses a distinct prompt, captured in the files below. CLAUDE.md
 agent-facing operating instructions are not part of this extraction.
@@ -206,7 +208,7 @@ Interpolation points:
 | `${stepCount}` | total number of plan steps |
 | `${step}` | the current step's text |
 | `${executionFeedbackFormat}` | the contents of `execution-feedback-format.txt` |
-| `${executionContext}` | review feedback/learnings from earlier attempts, or `(none)` on the first execution |
+| `${executionContext}` | `(none)`; reserved — a failed review no longer restarts execution with feedback/learnings |
 
 ### `replan-prompt.txt`
 
@@ -261,9 +263,9 @@ Interpolation points:
 | `${executedSteps}` | the list of executed steps |
 | `${changes}` | staged diff (`git diff --cached`) or, when empty, the latest committed work from the execution worktree |
 | `${reviewPlan}` | the review plan created at the start of the review phase |
-| `${learnings}` | accumulated learnings from earlier review attempts |
-| `${reviewAttempt}` | the current one-based review attempt |
-| `${maxReviewAttempts}` | the maximum number of review attempts |
+| `${learnings}` | accumulated learnings recap (rendered by `formatLearnings`; currently `(none)` because a failing review stops the run) |
+| `${reviewAttempt}` | the current one-based review attempt label |
+| `${maxReviewAttempts}` | display ceiling for the attempt label; a failing review stops the run (no restart loop) |
 
 ### `json-retry-hint.txt`
 
