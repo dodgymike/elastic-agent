@@ -205,3 +205,14 @@ export type {
   RetrievedItemV2,
   RetrievalResultV2,
 } from "./retrieval.js";
+
+export {
+  MemoryContextAssembler,
+  estimateTokensConservative,
+  snapshotMemoryContext,
+} from "./context-assembly.js";
+export type {
+  AssembledMemoryContext,
+  ContextAssemblyInput,
+  MemoryContextAssemblerOptions,
+} from "./context-assembly.js";
