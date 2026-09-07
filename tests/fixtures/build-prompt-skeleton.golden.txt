@@ -1,0 +1,4 @@
+${claudeInstructions}
+
+Current command line prompt:
+${commandLinePrompt}

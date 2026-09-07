@@ -2,7 +2,7 @@
 
 > **Status: BLOCKED (Spec Keeper offline).** This file is a **non-authoritative**
 > local mirror of the plan that must be recorded in Spec Keeper once access is
-> restored. Per `SPEC_KEEPER.md` failure handling, local files are NOT
+> restored. Per `docs/integrations/SPEC_KEEPER.md` failure handling, local files are NOT
 > authoritative; this artifact exists only to preserve the plan and the access
 > blocker as a handoff, so server synchronization can resume.
 >
@@ -56,18 +56,18 @@ Project slug: `elastic-agent` (defaults from `.spec-keeper`).
 
 ### Plan notes (record as task notes / progress)
 
-1. Implement `tools/AgentBusEnrol.ts` mirroring `tools/SpecKeeperEnroll.ts`
+1. Implement `src/tools/AgentBusEnrol.ts` mirroring `src/tools/SpecKeeperEnroll.ts`
    (TypeScript): parse + validate invite JSON, reject invalid JSON / missing
    fields, invoke repo-root `./agent-busctl enrol --invite-file --name
    (--identity resolvable to an in-workspace store such as `.agent-bus.local`)`,
    write non-secret metadata to `.agent-bus.local` (chmod 600), default invite
    discovery (`agent-bus-invite-*.json` single match), fail safely with
-   actionable diagnostics. Register in `main.ts`; add
-   `tools/agent-bus-enrol-usage.md`.
-2. Enhance `tools/AgentBus.ts` to read default base URL / identity / token from
+   actionable diagnostics. Register in `src/main.ts`; add
+   `prompts/tools/agent-bus-enrol-usage.md`.
+2. Enhance `src/tools/AgentBus.ts` to read default base URL / identity / token from
    `.agent-bus.local` mirroring the `SpecKeeper.ts` `loadSecretConfig` pattern
    with env/per-call override precedence; register new params; update
-   `tools/agent-bus-usage.md`.
+   `prompts/tools/agent-bus-usage.md`.
 3. Add defaults (invite filename pattern, identity store path) to the new
    tooling.
 4. Add TypeScript tests in `test/` (`agent-bus-enrol.test.ts`,

@@ -27,5 +27,5 @@ longer being written.
 Run focused tests:
 
 ```sh
-python3 -B test/extract-execute-commands.test.py
+python3 -B tests/cli/extract-execute-commands.test.py
 ```

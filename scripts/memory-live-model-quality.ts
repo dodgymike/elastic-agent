@@ -23,16 +23,16 @@
 import {
   createRuntimeLlmAdapter,
   resolveRuntimeLlmModel,
-} from "../llm/application.js";
-import type { GenerateResponse, TokenUsage } from "../llm/adapter-contract.js";
+} from "../src/llm/application.js";
+import type { GenerateResponse, TokenUsage } from "../src/llm/adapter-contract.js";
 import {
   buildEventEnvelope,
   type MemoryEventAppendV2,
   type MemoryIdentityV2,
   type MemoryScopeV2,
-} from "../memory/contracts-v2.js";
-import { buildStructuredProjection } from "../memory/structured-records.js";
-import { retrieveRelevantRecords } from "../memory/retrieval.js";
+} from "../src/memory/contracts-v2.js";
+import { buildStructuredProjection } from "../src/memory/structured-records.js";
+import { retrieveRelevantRecords } from "../src/memory/retrieval.js";
 
 interface LiveScenario {
   readonly name: string;

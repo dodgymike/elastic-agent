@@ -1,0 +1,658 @@
+{
+  "llm-adapters": {
+    "files": [
+      "tests/llm/llm-adapters.test.ts"
+    ],
+    "env": {}
+  },
+  "node-version-check": {
+    "files": [
+      "tests/cli/node-version-check.test.ts"
+    ],
+    "env": {}
+  },
+  "llm-log": {
+    "files": [
+      "tests/llm/llm-log.test.ts"
+    ],
+    "env": {}
+  },
+  "prompt-logger": {
+    "files": [
+      "tests/llm/prompt-logger.test.ts"
+    ],
+    "env": {}
+  },
+  "multi-turn-memory": {
+    "files": [
+      "tests/memory/multi-turn-memory.test.ts"
+    ],
+    "env": {}
+  },
+  "multi-turn-runtime": {
+    "files": [
+      "tests/llm/multi-turn-runtime.test.ts",
+      "tests/llm/multi-turn-lifecycle.test.ts"
+    ],
+    "env": {}
+  },
+  "memory": {
+    "files": [
+      "tests/memory/memory.test.ts"
+    ],
+    "env": {}
+  },
+  "persistent-memory": {
+    "files": [
+      "tests/memory/persistent-memory.test.ts"
+    ],
+    "env": {}
+  },
+  "graph-memory": {
+    "files": [
+      "tests/memory/graph-memory.test.ts"
+    ],
+    "env": {}
+  },
+  "composite-memory": {
+    "files": [
+      "tests/memory/composite-memory.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-selection": {
+    "files": [
+      "tests/memory/memory-selection.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-backend-capabilities": {
+    "files": [
+      "tests/memory/memory-backend-capabilities.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-contract-v2": {
+    "files": [
+      "tests/memory/memory-contract-v2.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-privacy": {
+    "files": [
+      "tests/memory/memory-privacy.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-event-store": {
+    "files": [
+      "tests/memory/memory-event-store.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-reload": {
+    "files": [
+      "tests/memory/memory-reload.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-import": {
+    "files": [
+      "tests/memory/memory-import.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-runtime-checkpoint": {
+    "files": [
+      "tests/memory/memory-runtime-checkpoint.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-facts": {
+    "files": [
+      "tests/memory/memory-facts.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-incremental-summary": {
+    "files": [
+      "tests/memory/memory-incremental-summary.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-retrieval": {
+    "files": [
+      "tests/memory/memory-retrieval.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-context-budget": {
+    "files": [
+      "tests/memory/memory-context-budget.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-safe-compaction": {
+    "files": [
+      "tests/memory/memory-safe-compaction.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-retention": {
+    "files": [
+      "tests/memory/memory-retention.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-health": {
+    "files": [
+      "tests/memory/memory-health.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-regression": {
+    "files": [
+      "tests/memory/memory-regression.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-rendering": {
+    "files": [
+      "tests/ui/tool-renderer.test.ts",
+      "tests/ui/main2-tool-rendering.test.js"
+    ],
+    "env": {
+      "FORCE_COLOR": "1"
+    }
+  },
+  "tool-timer": {
+    "files": [
+      "tests/ui/tool-timer.test.ts"
+    ],
+    "env": {}
+  },
+  "edit-tool": {
+    "files": [
+      "tests/tools/edit-tool.test.ts"
+    ],
+    "env": {}
+  },
+  "delete-tool": {
+    "files": [
+      "tests/tools/delete-tool.test.ts"
+    ],
+    "env": {}
+  },
+  "read-tool": {
+    "files": [
+      "tests/tools/read-tool.test.ts"
+    ],
+    "env": {}
+  },
+  "grep-tool": {
+    "files": [
+      "tests/tools/grep-tool.test.ts"
+    ],
+    "env": {}
+  },
+  "write-tool": {
+    "files": [
+      "tests/tools/write-tool.test.ts"
+    ],
+    "env": {}
+  },
+  "denial-tracker": {
+    "files": [
+      "tests/safety/denial-tracker.test.ts"
+    ],
+    "env": {}
+  },
+  "workspace-init": {
+    "files": [
+      "tests/runtime/workspace-init.test.ts"
+    ],
+    "env": {}
+  },
+  "docker-detection": {
+    "files": [
+      "tests/runtime/docker-detection.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-safety": {
+    "files": [
+      "tests/safety/tool-safety-classifier.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-safety-config": {
+    "files": [
+      "tests/safety/tool-safety-config.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-source-root": {
+    "files": [
+      "tests/safety/tool-source-root.test.ts"
+    ],
+    "env": {}
+  },
+  "prompt-builder": {
+    "files": [
+      "tests/cli/prompt-builder.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-cwd": {
+    "files": [
+      "tests/tools/tool-cwd.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-call-scheduling": {
+    "files": [
+      "tests/tools/tool-call-scheduling.test.ts"
+    ],
+    "env": {}
+  },
+  "git-command-router": {
+    "files": [
+      "tests/safety/git-command-router.test.ts"
+    ],
+    "env": {}
+  },
+  "agent-bus-detect": {
+    "files": [
+      "tests/integrations/agent-bus-detect.test.ts"
+    ],
+    "env": {}
+  },
+  "git-tool": {
+    "files": [
+      "tests/tools/git-tool.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-schema": {
+    "files": [
+      "tests/tools/tool-schema-consistency.test.ts"
+    ],
+    "env": {}
+  },
+  "step-renderer": {
+    "files": [
+      "tests/ui/step-renderer.test.ts"
+    ],
+    "env": {
+      "FORCE_COLOR": "1"
+    }
+  },
+  "review-result": {
+    "files": [
+      "tests/planning/review-result.test.js"
+    ],
+    "env": {}
+  },
+  "review-loop": {
+    "files": [
+      "tests/planning/review-loop.test.js"
+    ],
+    "env": {}
+  },
+  "review-commit": {
+    "files": [
+      "tests/planning/review-commit.test.js"
+    ],
+    "env": {}
+  },
+  "worktree": {
+    "files": [
+      "tests/runtime/worktree.test.ts"
+    ],
+    "env": {}
+  },
+  "plan-print": {
+    "files": [
+      "tests/planning/plan-print.test.js"
+    ],
+    "env": {}
+  },
+  "plan-parser": {
+    "files": [
+      "tests/planning/plan-parser.test.js"
+    ],
+    "env": {}
+  },
+  "plan-patch": {
+    "files": [
+      "tests/planning/plan-patch.test.js"
+    ],
+    "env": {}
+  },
+  "run-state": {
+    "files": [
+      "tests/runtime/run-state.test.ts"
+    ],
+    "env": {}
+  },
+  "run-state-reconcile": {
+    "files": [
+      "tests/runtime/run-state-reconcile.test.ts"
+    ],
+    "env": {}
+  },
+  "replan-apply": {
+    "files": [
+      "tests/planning/replan-apply.test.ts"
+    ],
+    "env": {}
+  },
+  "replan-patch": {
+    "files": [
+      "tests/planning/replan-patch.test.ts"
+    ],
+    "env": {}
+  },
+  "planner-prompt": {
+    "files": [
+      "tests/planning/planner-prompt.test.js"
+    ],
+    "env": {}
+  },
+  "prompt-parser": {
+    "files": [
+      "tests/planning/prompt-parser.test.js"
+    ],
+    "env": {}
+  },
+  "plan-handler": {
+    "files": [
+      "tests/planning/plan-handler.test.js"
+    ],
+    "env": {}
+  },
+  "step-outcome": {
+    "files": [
+      "tests/planning/step-outcome.test.js"
+    ],
+    "env": {}
+  },
+  "spec-keeper-epic-flow": {
+    "files": [
+      "tests/integrations/spec-keeper-epic-flow.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-task-flow": {
+    "files": [
+      "tests/integrations/spec-keeper-task-flow.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-config": {
+    "files": [
+      "tests/integrations/spec-keeper-config.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-workspace": {
+    "files": [
+      "tests/integrations/spec-keeper-workspace.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-routes": {
+    "files": [
+      "tests/integrations/spec-keeper-routes.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-tool-lookup": {
+    "files": [
+      "tests/integrations/spec-keeper-tool-lookup.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-migration": {
+    "files": [
+      "tests/integrations/spec-keeper-migration.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-enroll": {
+    "files": [
+      "tests/integrations/spec-keeper-enroll.test.ts"
+    ],
+    "env": {}
+  },
+  "cli-task-mode": {
+    "files": [
+      "tests/cli/cli-task-mode.test.ts",
+      "tests/runtime/cli-loop-options.test.ts"
+    ],
+    "env": {}
+  },
+  "loop-queue": {
+    "files": [
+      "tests/runtime/loop-queue.test.ts"
+    ],
+    "env": {}
+  },
+  "loop-poll": {
+    "files": [
+      "tests/runtime/loop-poll.test.ts"
+    ],
+    "env": {}
+  },
+  "loop-replan": {
+    "files": [
+      "tests/planning/loop-replan.test.ts"
+    ],
+    "env": {}
+  },
+  "loop-busctl-read": {
+    "files": [
+      "tests/runtime/loop-busctl-read.test.ts"
+    ],
+    "env": {}
+  },
+  "loop-mode": {
+    "files": [
+      "tests/runtime/loop-mode.test.ts",
+      "tests/runtime/loop-repeat.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-task-fetch": {
+    "files": [
+      "tests/integrations/spec-keeper-task-fetch.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-task-claim": {
+    "files": [
+      "tests/integrations/spec-keeper-task-claim.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-task-prompt": {
+    "files": [
+      "tests/integrations/spec-keeper-task-prompt.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-task-lifecycle": {
+    "files": [
+      "tests/integrations/spec-keeper-task-lifecycle.test.ts"
+    ],
+    "env": {}
+  },
+  "spec-keeper-task-completion": {
+    "files": [
+      "tests/integrations/spec-keeper-task-completion.test.ts"
+    ],
+    "env": {}
+  },
+  "output-verbosity": {
+    "files": [
+      "tests/ui/output-verbosity.test.ts"
+    ],
+    "env": {}
+  },
+  "response-format": {
+    "files": [
+      "tests/ui/response-format.test.ts"
+    ],
+    "env": {}
+  },
+  "agent-bus-enrol": {
+    "files": [
+      "tests/integrations/agent-bus-enrol.test.ts"
+    ],
+    "env": {}
+  },
+  "agent-bus": {
+    "files": [
+      "tests/integrations/agent-bus.test.ts"
+    ],
+    "env": {}
+  },
+  "abort-paths": {
+    "files": [
+      "tests/runtime/abort-paths.test.ts"
+    ],
+    "env": {}
+  },
+  "replan-prompt-consistency": {
+    "files": [
+      "tests/planning/replan-prompt-consistency.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-compaction-prompt": {
+    "files": [
+      "tests/memory/memory-compaction-prompt.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-compaction": {
+    "files": [
+      "tests/memory/memory-compaction.test.ts"
+    ],
+    "env": {}
+  },
+  "model-defaults": {
+    "files": [
+      "tests/llm/model-defaults.test.ts"
+    ],
+    "env": {}
+  },
+  "security-epic": {
+    "files": [
+      "tests/safety/security-epic.test.ts"
+    ],
+    "env": {}
+  },
+  "tool-lifecycle": {
+    "files": [
+      "tests/tools/tool-lifecycle.test.ts"
+    ],
+    "env": {}
+  },
+  "artifact-policy": {
+    "files": [
+      "tests/tools/artifact-policy.test.ts"
+    ],
+    "env": {}
+  },
+  "shell-mode": {
+    "files": [
+      "tests/safety/shell-mode.test.ts"
+    ],
+    "env": {}
+  },
+  "planning-loop": {
+    "files": [
+      "tests/planning/planning-loop.test.ts"
+    ],
+    "env": {}
+  },
+  "new-tools": {
+    "files": [
+      "tests/tools/new-tools.test.ts"
+    ],
+    "env": {}
+  },
+  "memory-hybrid-interrogation": {
+    "files": [
+      "tests/memory/memory-hybrid-interrogation.test.ts"
+    ],
+    "env": {}
+  },
+  "file-agent-log": {
+    "files": [
+      "tests/runtime/agent-log.test.ts"
+    ],
+    "env": {}
+  },
+  "file-cli-provider-selection": {
+    "files": [
+      "tests/llm/cli-provider-selection.test.ts"
+    ],
+    "env": {}
+  },
+  "file-durable-memory-prototype": {
+    "files": [
+      "tests/memory/durable-memory-prototype.test.js"
+    ],
+    "env": {}
+  },
+  "file-execution-completion": {
+    "files": [
+      "tests/planning/execution-completion.test.ts"
+    ],
+    "env": {}
+  },
+  "file-extract-execute-commands": {
+    "files": [
+      "tests/cli/extract-execute-commands.test.py"
+    ],
+    "env": {}
+  },
+  "file-implementation-tldr": {
+    "files": [
+      "tests/ui/implementation-tldr.test.js"
+    ],
+    "env": {}
+  },
+  "file-planner-model-cli": {
+    "files": [
+      "tests/planning/planner-model-cli.test.js"
+    ],
+    "env": {}
+  },
+  "file-planner-model-selection": {
+    "files": [
+      "tests/planning/planner-model-selection.test.ts"
+    ],
+    "env": {}
+  },
+  "file-planning-necessity": {
+    "files": [
+      "tests/planning/planning-necessity.test.ts"
+    ],
+    "env": {}
+  },
+  "file-runtime-provider-environment": {
+    "files": [
+      "tests/llm/runtime-provider-environment.test.ts"
+    ],
+    "env": {}
+  },
+  "agent-startup": {
+    "files": [
+      "tests/runtime/agent-startup.test.js"
+    ],
+    "env": {}
+  }
+}

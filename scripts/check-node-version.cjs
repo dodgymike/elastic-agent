@@ -3,7 +3,7 @@
 
 /**
  * Prestart guard for `npm start`. It reads the same `engines.node` declaration
- * as node-version-check.ts (the single source of truth in package.json) and
+ * as src/cli/node-version-check.ts (the single source of truth in package.json) and
  * exits with an actionable message before `npm run build` or provider
  * initialization on an unsupported Node.js runtime.
  */

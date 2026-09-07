@@ -87,3 +87,6 @@ agent-busctl
 
 # Concise plan and step outcome log.
 agent.log
+
+# Shared compiled test output.
+.test-build/

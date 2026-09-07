@@ -8,7 +8,7 @@ output, and contain no credentials, secrets, or sensitive content.
 ## `elastic-agent-memory-aaaa-1112-0001.json`
 
 An example durable memory document (following the
-`PersistentMemoryDocument` schema in `memory/persistent.ts`) for the session id
+`PersistentMemoryDocument` schema in `src/memory/persistent.ts`) for the session id
 `aaaa-1112-0001`. It is used as a reference for the **memory-compaction**
 feature (see _Memory compaction_ in the repository `README.md`).
 
@@ -16,7 +16,7 @@ The document is deliberately written so its `summary` field is long enough to
 exceed 50% of the default 120,000-character context window, which is the point
 at which the memory-compaction hook triggers. It shows the compacted-output
 shape and the fields the runtime records per step. The exact same session id
-(`aaaa-1112-0001`) is exercised in `test/memory-compaction.test.ts`.
+(`aaaa-1112-0001`) is exercised in `tests/memory/memory-compaction.test.ts`.
 
 > **Artificial.** This file is a placeholder fixture for documentation and
 > testing. It is not the real `memory-output/elastic-agent-memory-aaaa-1112-0001.json`

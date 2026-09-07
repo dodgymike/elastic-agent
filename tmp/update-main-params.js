@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const root = process.cwd();
-const file = path.join(root, "main.ts");
+const file = path.join(root, "src/main.ts");
 // helper
 const storeName = "." + "agent" + "-bus" + ".local";
 const storeText = storeName;

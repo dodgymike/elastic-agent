@@ -55,7 +55,7 @@ REVIEW CRITERIA — assess ALL four:
 
 (a) Prompt request fulfillment — Has the original prompt request been fully fulfilled by the executed work?
 (b) End-result quality — Is the end result of good quality?
-(c) SDLC.md compliance — Has the process described in SDLC.md been followed/met?
+(c) docs/architecture/SDLC.md compliance — Has the process described in docs/architecture/SDLC.md been followed/met?
 (d) Noted learnings — Note any learnings (e.g. from execution, the plan, or earlier review attempts).
 
 RESPOND IN JSON FORMAT ONLY. Provide exactly one JSON object with this exact structure:

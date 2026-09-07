@@ -9,7 +9,7 @@ console.
 1. **Restate** — take each instruction, restate your understanding, and report
    that restatement back to the caller before acting.
 2. **Plan when required** — plan work that needs planning. Use the `SpecKeeper`
-   tool for planning and execution tasks (read `tools/spec-keeper-usage.md`
+   tool for planning and execution tasks (read `prompts/tools/spec-keeper-usage.md`
    before using it); never use it for answering simple questions.
 3. **Critical path first** — deliver the critical path first, then fix the
    remaining issues in an iterative loop.
@@ -35,12 +35,12 @@ console.
 - `ALWAYS COMMIT YOUR WORK`.
 - If you need a tool and it is missing, write it and stop with a message that
   you need to restart to load the tool.
-- Read the per-tool usage prompt (for example `tools/read-usage.md`) before
+- Read the per-tool usage prompt (for example `prompts/tools/read-usage.md`) before
   using a tool for the first time.
 - Use `SpecKeeper` when planning and executing a task that requires planning,
-  never when answering questions; read `tools/spec-keeper-usage.md` first.
-- Follow `SDLC.md` (plan → execute → review → finish/retry) and the tool
-  error-handling contract in `ERROR_HANDLING.md`.
+  never when answering questions; read `prompts/tools/spec-keeper-usage.md` first.
+- Follow `docs/architecture/SDLC.md` (plan → execute → review → finish/retry) and the tool
+  error-handling contract in `docs/architecture/ERROR_HANDLING.md`.
 
 <!-- WORKSPACE-START-DIRECTORY (system-injected; do not remove) -->
 

@@ -1,10 +1,10 @@
 // One-shot helper: register the new AgentBus identity/store params in
-// tools/AgentBus.ts tool declaration inside main.ts. This operates only on the
-// in-workspace main.ts file and performs a single, exact string replacement.
+// src/tools/AgentBus.ts tool declaration inside main.ts. This operates only on the
+// in-workspace src/main.ts file and performs a single, exact string replacement.
 const fs = require("fs");
 const path = require("path");
 
-const file = path.join(process.cwd(), "main.ts");
+const file = path.join(process.cwd(), "src/main.ts");
 const oldText =
   'body: {}, baseUrl: { type: "string" }, accessToken: { type: "string" }, userAgent: { type: "string" },';
 const newText =

@@ -33,7 +33,7 @@ Useful options:
 
 Shell execution defaults to Linux bubblewrap isolation. Hosts without working
 namespaces can explicitly select `--shell-mode trusted-host`, which grants host
-filesystem/network access. See [security boundaries](docs/SECURITY_BOUNDARIES.md)
+filesystem/network access. See [security boundaries](docs/security/SECURITY_BOUNDARIES.md)
 for shell permissions and HTTP origin configuration.
 
 ## Memory
@@ -63,7 +63,7 @@ ELAGENT_MEMORY_TYPE=persistent-v2 node dist/main.js \
 
 Semantic query expansion uses the configured LLM; set
 `ELAGENT_MEMORY_SEMANTIC=0` for lexical-only recall. See
-[memory interrogation](docs/MEMORY_INTERROGATION.md) for details and limits.
+[memory interrogation](docs/memory/MEMORY_INTERROGATION.md) for details and limits.
 
 ## Logs and checks
 
@@ -72,7 +72,7 @@ Semantic query expansion uses the configured LLM; set
 - `--log-prompts`: additionally write `prompt.log`.
 
 ```sh
-npm run build
+npm test
 npm run test:planning-loop
 npm run test:memory-hybrid-interrogation
 ```
@@ -81,9 +81,10 @@ Additional focused test commands are listed in [package.json](package.json).
 
 ## Documentation
 
-- [Execution lifecycle](SDLC.md) and [completion tracking](docs/EXECUTION_COMPLETION.md)
-- [Prompt templates](prompts/PROMPTS.md)
-- [Memory contract](docs/MEMORY_V2_CONTRACT.md), [storage](docs/MEMORY_EVENT_STORE.md), and [retention](docs/MEMORY_RETENTION.md)
-- [Planning improvements](docs/PLANNING_IMPROVEMENTS.md)
-- [Memory improvement tasks](memory-improvements/README.md)
-- [Repository self-repair backlog](docs/SELF_REPAIR_BACKLOG.md)
+- [Repository layout and development](docs/architecture/REPOSITORY_LAYOUT.md)
+- [Execution lifecycle](docs/architecture/SDLC.md) and [completion tracking](docs/architecture/EXECUTION_COMPLETION.md)
+- [Prompt templates](docs/prompts.md)
+- [Memory contract](docs/memory/MEMORY_V2_CONTRACT.md), [storage](docs/memory/MEMORY_EVENT_STORE.md), and [retention](docs/memory/MEMORY_RETENTION.md)
+- [Planning improvements](docs/plans/PLANNING_IMPROVEMENTS.md)
+- [Memory improvement tasks](docs/plans/memory-improvements/README.md)
+- [Repository self-repair backlog](docs/plans/SELF_REPAIR_BACKLOG.md)
